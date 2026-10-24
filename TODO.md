@@ -237,10 +237,12 @@ and to build it as soon as the usage allows.
       (since 2026-10-24) a reason formatted with `%s` or handed to `assert`. The
       changelog entry is under "For the first release's changelog". What is left:
 
-- [ ] **VPS Avenger's own sentences stay sentences.** About 250 page and speech texts inside
+- [x] **VPS Avenger's own sentences stay sentences.** About 250 page and speech texts inside
       modules/vps-avenger, among them the new "… was not clicked: <message>" and "the menu cannot be
       seen here; nothing was chosen", are compared nowhere outside the module, so they were left as
       they are (core app first). Convert them if one is ever handed to another module or compared.
+      Decided by the maintainer on 2026-10-24 (triage): by design; a text is converted only if
+      another module is ever handed it.
 - [x] **macOS element reads never say "not known".** On a Mac every `host.element` question answers
       what it found, or nothing, and never an error value: a walk stopped at its 300 ms deadline, an
       application in the not-answering quarantine, and a dump cut at its 2000 nodes or 5 s all
@@ -538,11 +540,14 @@ and to build it as soon as the usage allows.
       `hotkey::APP_KEY`, since 2026-10-24); keys.md says so. Decide whether `check` gets a reason of
       its own for them (a word for its table, `ok` false, and the overlay runtime's REFUSES_HOTKEY),
       so that a module vetting a key with `check` hears it before `register`.
-- [ ] **The lint's limits.** check-docs.ps1 takes a hook's `how` only inside the hook, found by its
+- [x] **The lint's limits.** check-docs.ps1 takes a hook's `how` only inside the hook, found by its
       indentation, and does not see a table keyed by host.keys.check's words (the runtime's
       REFUSES_HOTKEY). `string.format("%s", err)` and `assert(ok, err)` raise for an error value,
       and are not linted, because the runtime and ik-on-ear format sentences of their own under the
       name `why`; renaming those to `word` would let the lint take both shapes.
+      Decided by the maintainer on 2026-10-24 (triage): closed; the two gaps (a `how` handed on, a
+      format put together from parts) belong in check-docs.ps1's comments, which name the first
+      already.
 
       **Mostly built** (2026-10-24, stage B). A `%s` or `%q` given a reason's name — the format read
       where the call has it, `string.format("…", …)` or `("…"):format(…)`, its string on the line
@@ -882,7 +887,8 @@ them:
       (b) daw-hosts' focus key on an empty chain after focusing a Logic plug-in window says "could
       not tell" and does nothing (l.2102-2106): it could at least ask the overlays to look again.
       (c) An overlay never begins on an unreadable chain, so a reload with the keyboard already in
-      Avenger's view comes up only at the first readable round (l.1946-2140). (d) Kontakt's
+      Avenger's view comes up only at the first readable round (l.1946-2140). Kept so (decided by
+      the maintainer on 2026-10-24, triage: beginning would claim keys on a guess). (d) Kontakt's
       `control` functions read with callbacks too (kontakt detect.luau) and still call
       `host.window.recheck`; they could take `again` as a third argument. (e) l.2321: the first
       page trip's ◀ after the page opened gave up unchanged, possibly a swallowed first click
@@ -899,7 +905,7 @@ them:
       after it begins none: the overlay is back only at the next readable round, as in (f). (i) A
       header read that answers nothing, half an answer or no factor does not call `again` (on
       purpose: re-asking at once would spend the 8 nils), so after a click with the chain empty it
-      waits for the next evaluation.
+      waits for the next evaluation. By design (decided by the maintainer on 2026-10-24, triage).
 
 ## CI without macos-14 (2026-10-16)
 
@@ -1211,7 +1217,7 @@ into the changelog with that release.
       against the same control, with the reasoning written beside it. Worth looking there first
       for anything wx-or-native-control shaped: guessing in front of a blind tester costs his
       time, and a search costs mine.
-- [ ] **Module manager follow-ups:** CLI/IPC control surface; a **native macOS/GTK checkbox path** (`TVS_CHECKBOXES` is Windows-only — non-Windows currently shows no checkboxes). Out-of-process only for the untrusted-native-FFI tier. See [docs/module-runtime-and-lifecycle.md](docs/module-runtime-and-lifecycle.md).
+- [ ] **Module manager follow-ups:** CLI/IPC control surface; ~~a **native macOS/GTK checkbox path** (`TVS_CHECKBOXES` is Windows-only — non-Windows currently shows no checkboxes)~~ (the native macOS checkbox list is built, gui.rs:453-470 and 718-735; GTK means Linux, which comes later — triage 2026-10-24). Out-of-process only for the untrusted-native-FFI tier. See [docs/module-runtime-and-lifecycle.md](docs/module-runtime-and-lifecycle.md). The CLI/IPC surface is deferred by the maintainer on 2026-10-24 (triage): not before the first release; if wanted later, `reload <id>` over the existing instance pipe (S-M).
   - Lifted out of the completed entries below, where they were easy to lose:
   - [x] **Hotkey conflicts are resolved at registration only** — fixed 2026-09-03, and the
       entry understated it. The skipped registration was not merely inactive: `host.hotkey.register`
@@ -1278,6 +1284,9 @@ into the changelog with that release.
   - [ ] **Application-side hotkey remapping — the feature the conflict actually points at.**
       Not urgent; written down while the reasoning is fresh. The user should be able to move
       a module's key rather than choose between two modules.
+      Deferred by the maintainer on 2026-10-24 (triage): after the first release, then as the first
+      core feature (L): it is the documented answer to screen-reader key conflicts, its UI a dialog
+      offered on the conflict itself.
       - The shape: the host already records every claim — `hotkeys` holds the spec, the
         owning module and whether it is live, and `refresh_hotkeys` already knows who lost to
         whom. So it can offer "module A wants Ctrl+Win+Alt+F8, which module B is using" and
@@ -1304,8 +1313,8 @@ into the changelog with that release.
         `host.keys.describe`. What is left is the remap itself, and handing the remapped spec
         back to the module (from `register`) so the runtime announces that one instead.
 
-  - [ ] **`rollback_to` still has the active-overlay `onDeactivate` gap** that `purge_module` fixed for reload — it applies on uninstall and on a failed load.
-  - [ ] **Versioned dependencies: no version SELECTION.** Install fetches the default branch's latest, so a `>= x.y` constraint is checked at load but never used to choose what to fetch; reload does not re-verify constraints; and the `"id >= x.y"` syntax is undocumented in the module.toml docs.
+  - [x] **`rollback_to` still has the active-overlay `onDeactivate` gap** that `purge_module` fixed for reload — it applies on uninstall and on a failed load. Obsolete: uninstall no longer uses `rollback_to` (it calls `apply_enabled`, lib.rs:5933-5935), and `rollback_to` now gives everything back (lib.rs:2009-2077), triage 2026-10-24.
+  - [ ] **Versioned dependencies: no version SELECTION.** Install fetches the default branch's latest, so a `>= x.y` constraint is checked at load but never used to choose what to fetch; reload does not re-verify constraints; ~~and the `"id >= x.y"` syntax is undocumented in the module.toml docs~~ (documented now, docs/module-package-format.md:44 and 68 — triage 2026-10-24). Version selection is deferred by the maintainer on 2026-10-24 (triage): not before the first release; meanwhile `install_tree` could say when the latest does not satisfy a range (S). The reload's re-check stays open, as build work.
   - [x] **Hotkey conflict detection (bd53d02):** a cross-module global-hotkey clash is detected at registration (parsed `(vk,mask)` compare via `key_spec`, order/case-stable) and surfaced in the accessible no-TTS dialog naming both modules + the combo; first-come keeps it, the later module stays loaded with that binding inactive. An OS rejection (another app holds the combo) is reported distinctly; a malformed spec fails loudly with the real parse error. Captured-key duplicates are intentionally NOT flagged (window-scoped overlays legitimately share Tab/Return). Adversarially reviewed. **Follow-up:** dynamic re-resolution — a skipped/disabled binding doesn't activate when the owner is later disabled (needs a restart), and `apply_enabled`'s re-register on enable doesn't conflict-check/surface (silent). Conflicts are registration-time only.
   - [x] **In-place module reload (235f92d):** a "Reload" button rebuilds the selected module's VM in place from its source dir (edit a dev module + reload, no app restart, no loss of other modules' state). `populate_vm` (the VM build, extracted + shared with load) + `purge_module` (single-index registration teardown — like `rollback_to` but `== idx`, no vector truncation; fires an active overlay's `onDeactivate`) + `reload_module` (re-read manifest BEFORE purge so a broken manifest leaves the running module intact; store snapshot/rollback on a failed rebuild; fresh VM under the same index). Refreshes the row's settings/dependencies/label; a failed reload tells the user the module is now inactive. Adversarially reviewed (MEDIUM findings folded in). **Follow-ups:** live cascade to *dependents* (they hold a copy of the code in their own VM → still need a restart; = the "live hot-reload on update" item below); `rollback_to` (uninstall / load-failure) still has the active-overlay `onDeactivate` gap that `purge_module` now fixes.
 - [x] **Module crash protection + accessible error dialog (runtime callbacks):** a faulting module's callback — a Lua error OR a re-raised Rust panic — no longer takes down the app or sibling VMs. The hotkey / key / timer (one-shot + recurring) / window-trigger (activate + focus) / settings-`onChange` / arbiter dispatch all run through `call_guarded`/`guard` (`catch_unwind` + Lua-error capture, `crates/host/src/lib.rs`); the concrete Luau error (mlua's message + traceback where present) is logged **and** surfaced — attributed to the faulting module id — in the manager's accessible no-TTS dialog (`modal_message`; see [[accessibility-native-controls]]). The tick that shows it is re-entrancy-guarded (modal dialogs run a nested wx loop), and the dialog is deduped per (id, context) and reset on enable/disable so a fixed-and-retried module re-surfaces. Unit-tested (catches both a Lua error and a Rust panic) + adversarially reviewed (re-entrancy / dedup-flood / borrow-safety fixes folded in).
@@ -1313,7 +1322,7 @@ into the changelog with that release.
 - [x] **Versioned dependencies (min-version constraints, 9ce375b):** a `module.toml` dependency may carry a space-separated semver requirement (`"com.x.y >= 1.2"`; a bare id is unchanged + backward-compatible). `module-manifest::dep_id`/`dep_constraint` split a spec; at LOAD the resolved dependency's version is verified against the requirement (`check_dep_version`) — an unsatisfied one fails the load with a clear error (`module 'A' requires 'B' >= 1.2, but the loaded version is v1.0`), a non-semver req/version is logged + skipped. The id-based machinery (`host.require`, sibling resolution, the install/uninstall graph) consumes the stripped ids stored on `Module`/`InstalledModule`. Verified headless (impossible constraint fails, satisfiable loads) + unit-tested (parser + version check). **Follow-ups:** install fetches the default-branch latest (no constraint-driven version *selection*); reload doesn't re-verify constraints; document the `"id >= x.y"` syntax in the module.toml docs.
 - [x] **Version-based update detection (6ed6860):** `registry::update_available` now compares the upstream `module.toml` `version` (semver) to the installed version — only a version bump signals an update; commits *between* releases no longer do. Falls back to the commit-SHA comparison when either version isn't valid semver. The CLI + the tray Updates list show the `vX → vY` transition. (Install still fetches the latest by SHA; only the signal changed. Added the `semver` crate.)
 - [x] **Live hot-reload on update (no restart):** updating or reloading a module now rebuilds its **transitive dependents** too, in dependency order, without a restart. A code module's source is copied into each dependent's VM when that dependent is built, so rebuilding only the changed module left every dependent running the OLD copy — which is why the manager used to say "restart to apply". `registry::reload_order` (pure + unit-tested, incl. a cycle) sorts the affected modules so a dependent is always rebuilt AFTER the dependency whose code it copies; `reload_module_tree` walks that order and reports per-module success/failure (a dependent that fails to rebuild is left inactive and named, rather than aborting the cascade). Wired into both entry points: the Reload button and the update flow, which now reloads in place instead of asking for a restart. The TODO's stated blocker ("needs a per-module unload that re-indexes") turned out not to apply — `reload_module` rebuilds in place under the SAME index, so nothing is dropped from the index-keyed vectors. ✓ (2026-07-26)
-- [ ] Finalize the host's license (currently the placeholder `GPL-3.0-or-later`; a permissive one might be more flexible for a module ecosystem).
+- [ ] Finalize the host's license (currently the placeholder `GPL-3.0-or-later`; a permissive one might be more flexible for a module ecosystem). Deferred by the maintainer on 2026-10-24 (triage): GPL-3.0-or-later stays (it is no longer a placeholder), perhaps with a stated exception for modules that only use `host.*`; decided before outside contributions arrive.
 - [x] **Packaging bundles the screen-reader clients** (already done; the entry was stale).
       `package.ps1` copies `nvdaControllerClient64.dll`, `SAAPI64.dll` and `DirectML.dll`, and
       **throws** naming any that is missing, with what each one costs — because every one of
@@ -1379,7 +1388,7 @@ See [docs/macos-port.md](docs/macos-port.md) for the decisions and
   - Verified by running it: on Windows all three OCR regions return nothing, `ownsPoint`
       answers `true` inside and `false` outside, and the strip search finds 26 flat regions
       where the first version — searching the full window width — found none at all.
-- [ ] **`window_owns_point` on macOS: the obvious implementation is a trap.** Reaching for
+- [x] **`window_owns_point` on macOS: the obvious implementation is a trap.** Reaching for
       `CGWindowListCopyWindowInfo` costs no new FFI, no new permission and no coordinate
       conversion, and it answers **the wrong question**: what is *drawn* at a point, not what a
       click would *hit*. Clicks are posted by location, so the window server's hit test decides
@@ -1395,6 +1404,7 @@ See [docs/macos-port.md](docs/macos-port.md) for the decisions and
       enabled `objc2-app-kit` features and would go into both manifests, it needs a
       `MainThreadMarker`, and its `NSPoint` is **bottom-left** where everything else in that
       backend is top-left.
+      Done: e5b4440, NSWindow's hit test (backend/macos/ax.rs:1410-1460), triage 2026-10-24.
   - Two things any implementation must not do, both found by checking a draft rather than by
       running it. It must never turn an entry it could not parse into a verdict about a
       different window — skipping an unreadable window answers from whatever lies behind it,
@@ -1405,13 +1415,15 @@ See [docs/macos-port.md](docs/macos-port.md) for the decisions and
   - Also blocked on this: `Entry.window_id` is **always 0** today — nothing interns a real one
       — and `ffi::ax_window_id` and `ax::window_id` are both dead code with no callers. Either
       would have to start being filled in first.
-- [ ] **Most of the untested list is not a testing job at all — it is blocked.** Scroll, drag,
+- [x] **Most of the untested list is not a testing job at all — it is blocked.** Scroll, drag,
       `editable`, `typingWhen` and the stepper are used by exactly one module, `ik-on-ear`,
       which declares `supported_os = ["windows"]`. No module that loads on a Mac can reach any
       of those code paths, so nobody can exercise them there however willing. `Overlay:watch`
       is the same in practice: its callers are `addHotspotToggle` and the stepper, and the only
       overlay that activates on a Mac is sforzando, built entirely from OCR read-outs and OCR
       buttons. These come off the list when a macOS-reachable overlay uses them, not before.
+      Obsolete: VPS Avenger runs on Macs and uses steppers, `O:watch`, scroll and drag; only
+      `editable` and `typingWhen` remain Windows-only, triage 2026-10-24.
 - [x] **The blank-region guard is on both platforms now** (2026-08-31). macOS had noticed the
       identical fact — one flat colour, nothing to crop to — logged it at *trace*, asked TCC
       whether it was a permission problem, and handed the rectangle to Vision anyway.
@@ -1456,7 +1468,7 @@ See [docs/macos-port.md](docs/macos-port.md) for the decisions and
       window returned `'1'`, `'2'` and `'0%'` as tokens of their own, so the second OCR engine
       does NOT have to become cross-platform for that reason. What the same session left open
       is narrower and is the next item.
-- [ ] **PB RANGE reads nothing at the value 1 in sforzando standalone; POLY. at 1 reads
+- [x] **PB RANGE reads nothing at the value 1 in sforzando standalone; POLY. at 1 reads
       fine.** Reported by the tester, and the module predicted it about itself: its macOS
       region for the pitchbend field `{576, 38, 607, 60}` was flagged in its own comment as
       "the one most likely to want a nudge", because the probe's box for RANGE overlapped
@@ -1464,11 +1476,14 @@ See [docs/macos-port.md](docs/macos-port.md) for the decisions and
       the recogniser. One probe of the standalone with PB RANGE set to 1 settles it — a state
       the tester CAN produce, through our own menu — and no log line for it exists yet,
       because the overlay logs a read's timing, never its text.
-- [ ] **Do Qt object names survive into `AXIdentifier`?** The strings the Kontakt and
+      Done: the region starts at 569 now (sforzando main.luau:45-56), and the tester confirmed it in
+      the second macOS session, triage 2026-10-24.
+- [x] **Do Qt object names survive into `AXIdentifier`?** The strings the Kontakt and
       Komplete Kontrol modules navigate by (`FileTypeSelector`, `WhatsNewScreen`) reach
       Windows through Qt's Windows accessibility provider; the macOS bridge is a different
       one. If they do not survive, those modules need a different anchor on macOS. The
       accessibility dump answers it.
+      Done: answered no in the third macOS session, triage 2026-10-24.
 - [x] **The macOS key vocabulary: keep the Windows one** (2026-08-20). **Superseded on
       2026-09-22** by the maintainer's decision that a spec's modifiers are roles, the Qt way:
       on a Mac `Ctrl` is Command, `Alt` Option, `Win` Control (see "Modifiers are roles, the Qt
@@ -1550,7 +1565,7 @@ See [docs/macos-port.md](docs/macos-port.md) for the decisions and
       a module can load cleanly on Windows for weeks and fail on the first real launch. The
       macOS job now runs the packaged app headless once and fails on "did not load", and
       `modules/**` is in its trigger list.
-- [ ] **The VoiceOver transport is unmeasured, and the measurement has to answer one thing
+- [x] **The VoiceOver transport is unmeasured, and the measurement has to answer one thing
       first** (2026-08-19): does `output` return when VoiceOver has the text, or block until
       the phrase has been spoken? If it blocks, per-line time is speech duration and NO
       change of transport buys anything — not a kept-compiled `NSAppleScript`, not a raw
@@ -1562,6 +1577,8 @@ See [docs/macos-port.md](docs/macos-port.md) for the decisions and
       Length-independent and over ~100 ms → build the direct Apple Event**, with the codes
       read from the `sdef` the tester is being asked for, on the existing worker thread,
       sent with `sendEventWithOptions:timeout:`.
+      Done: measured at 0 ms for 50 lines ("The VoiceOver transport is free", below), then rebuilt
+      as a direct Apple Event, triage 2026-10-24.
   - Ruled out on evidence, not taste: **`NSAppleScript` is not usable here.** objc2 binds
     `executeAndReturnError` / `executeAppleEvent:error:` as returning a NON-optional
     `Retained<…>`, while the real API returns nil on script error — objc2 0.6.4 panics on a
@@ -1621,7 +1638,7 @@ See [docs/macos-port.md](docs/macos-port.md) for the decisions and
     `native_checkboxes::same()` always answered `false`.
   - Still to confirm on a Mac: the six questions U1–U6 (per-row state, whether one utterance
     carries name AND checkbox, whether Space actually toggles).
-- [ ] **Left standing after the adversarial review** (2026-08-13), each because the fix
+- [x] **Left standing after the adversarial review** (2026-08-13), each because the fix
       wants a measurement more than it wants a decision:
   - `focus_step` can in the worst case cost thousands of cross-process round trips per Tab
     press — it re-enumerates the ring on every step, which is a Windows-side invariant, and
@@ -1638,9 +1655,13 @@ See [docs/macos-port.md](docs/macos-port.md) for the decisions and
     subscribing no longer sits in front of the answer the user is waiting for. It buys
     nothing for the switch happening now — it is about noticing the next change. Still six
     round trips, still once per application, but off the critical path.
+  - Done: the walk has time limits (ax.rs:130, 143), `focus_step` has a budget (ax.rs:3506), and the
+    inset was measured (28 pt, the ReaHotkey port's prerequisites), triage 2026-10-24.
 - [ ] **Developer ID + notarisation.** Ad-hoc signatures change on every rebuild, so every
       test build a tester receives asks for its permissions again. Survivable for testing,
       not for release.
+      Deferred by the maintainer on 2026-10-24 (triage): yes (the Apple Developer Program, and
+      signing and notarisation in the macOS CI job), before the first public release only.
 
 - [x] **The UIA tree walk was six process crossings per element** (2026-08-31). Measured on a
       53-element JUCE window: `uia_raw_dump` cost **211 ms**, because it asked the target for
@@ -1828,10 +1849,11 @@ See [docs/macos-port.md](docs/macos-port.md) for the decisions and
       never warms — is for the bench's `paddle-first:with-vision` row to say.
 - [ ] **The fast level's first pass in a cold process, and the fast level and the recogniser after
       pauses**: on the CI's Macs from the next run, on the Air from its session.
-- [ ] **Revision 2: not taken for the lone digit** (2026-10-03: the recogniser answers it, by
+- [x] **Revision 2: not taken for the lone digit** (2026-10-03: the recogniser answers it, by
       Windows' rule); `rev2-tight` and `rev3>rev2` stay in the bench for comparison. Apple lists it
       as deprecated from macOS 15; macOS 26.6.2 still offers it. Its trial in a process of its own
       stays. macOS 12 has no revision 3, and the application reads with revision 2 there already.
+      Done: a recorded decision of 2026-10-03, nothing left, triage 2026-10-24.
 - [ ] **The counts from real sessions** — who answered each read, the recogniser's readings beside
       the ladder's, and where a fast pass ran beside the ladder, the fast level against both — the
       Mac's counterpart of O15. An Intel Mac's agreed answers meet no accurate pass in a session,
@@ -1892,12 +1914,14 @@ See [docs/macos-port.md](docs/macos-port.md) for the decisions and
       today's ladder on a Mac may well misread it too (a warning in CI).
 - [ ] **Licences in the Windows package**: ONNX Runtime linked in and the model embedded, without
       their notices (`package.ps1` ships the GPL text and prism's). A task of its own.
-- [ ] **The bench's rounds**, set after the first CI run of this size so that the Intel Mac stays
+- [x] **The bench's rounds**, set after the first CI run of this size so that the Intel Mac stays
       under 30 minutes (`Plan::speed_pictures`, `samples`); every section prints its time. The CI
       job's limit is 45 minutes until then. The pipeline's verdicts lean on the engine's control
       (`prod-b`), which runs in another section at another time: should the pipeline's verdicts
       look noisy, a control of its own (prod under another name, about a minute more) is the next
       step.
+      Done: the Intel ocr-bench leg took about 22 minutes in run 40051316448, under the 30-minute
+      goal; lowering `timeout-minutes` from 45 to 35 is optional, triage 2026-10-24.
 - [x] **`paddle_pre::fold`'s dashes** (decided 2026-10-03): every dash U+2010 to U+2015 and the
       minus U+2212 are one hyphen, the en dash U+2013 among them — the form Vision is likeliest to
       give for a minus. A value's minus comes out of either recogniser as any of them, so a Vision
@@ -1923,8 +1947,8 @@ See [docs/macos-port.md](docs/macos-port.md) for the decisions and
 ## Documentation
 
 - [x] **API-version-specific, web-based documentation:** a versioned **Docusaurus** site in `docs-site/` renders `docs/` — the guides plus the `host.*` API reference in `docs/api/` — with a version switcher (first snapshot `versioned_docs/version-0.1.0`) and a GitHub Pages deploy workflow (`.github/workflows/deploy-docs.yml`). Includes the step-by-step **[Building an overlay](docs/building-an-overlay.md)** tutorial, written because the vocabulary (cell, overlay, layer, slot, landmark) had grown faster than anything explained it. ✓
-  - [ ] **Single Source of Truth:** the API reference is still written by hand, so it can drift from the implementation. Generate what can be generated from the capability catalog / host-API surface.
-  - [ ] Cut a new docs version on each `engine_api` bump, so a module author reads the reference for *their* target version rather than the newest one. **The premature 0.1.0 snapshot was removed** (2026-08-31): it had been cut when the site was set up, before any release and before `engine_api` had ever moved, so the dropdown offered two stands of the same version and the archived one had quietly stopped being true — 14 overlay entries against the live 25, 6 UIA entries against 12, missing `O:watch`, `O:addStepper`, `O:group` and `O.layer` entirely. A version gets frozen when somebody is actually running it.
+  - [x] **Single Source of Truth:** the API reference is still written by hand, so it can drift from the implementation. Generate what can be generated from the capability catalog / host-API surface. Decided by the maintainer on 2026-10-24 (triage): covered by `api-index.py --check` and check-docs.ps1; generated prose would lose the behaviour the docs pin down.
+  - [ ] Cut a new docs version on each `engine_api` bump, so a module author reads the reference for *their* target version rather than the newest one. **The premature 0.1.0 snapshot was removed** (2026-08-31): it had been cut when the site was set up, before any release and before `engine_api` had ever moved, so the dropdown offered two stands of the same version and the archived one had quietly stopped being true — 14 overlay entries against the live 25, 6 UIA entries against 12, missing `O:watch`, `O:addStepper`, `O:group` and `O.layer` entirely. A version gets frozen when somebody is actually running it. Deferred by the maintainer on 2026-10-24 (triage): 0.1 is frozen at the first release, then a version is cut on every bump.
   - [x] **Every API entry has a worked example, the way AutoHotkey's reference does** (2026-08-31). Not a
         signature restated in prose but the call in use, in a `luau` block, taken from a real
         module where possible so it moves when the module does. Asked for on 2026-08-31, and it
@@ -1970,6 +1994,9 @@ See [docs/macos-port.md](docs/macos-port.md) for the decisions and
       documentation (for example `docs = "<url>"` in `module.toml`); the module manager offers to
       open it when a module has one; it is hosted wherever the module's author likes, for instance
       on GitHub Pages from the module's own repository.
+      Deferred by the maintainer on 2026-10-24 (triage): after the release; then a `docs =
+      "https://…"` field (in module-package-format.md), the runtime's docs as a section versioned by
+      `com.platform.overlay`, a native "Open documentation" button, and the link in discovery.
 
       To discuss: (1) the field's name and form: a URL only, a package-relative path for
       documentation shipped in the package and readable offline, or both; (2) what moves out of this
@@ -2211,9 +2238,9 @@ reported by a test, because none of them fails loudly.
 
 ## Further open points (from the feasibility study)
 
-- [ ] Define hard **performance/footprint budgets** (hotkey latency in ms, baseline RAM, default binary size) — study §10.2.
-- [ ] Clarify **macOS distribution/MDM details** (Developer ID/notarization flow, possibly PPPC profiles for enterprise) — study §10.4.
-- [ ] Work out the **native-FFI security model** (out-of-process sandbox per OS, trust store/signature flow, macOS FFI policy) — study §11.1–11.2.
+- [ ] Define hard **performance/footprint budgets** (hotkey latency in ms, baseline RAM, default binary size) — study §10.2. Deferred by the maintainer on 2026-10-24 (triage): when taken up, three numbers: hotkey to speech at 50 ms or less on Windows, warm; baseline memory with the shipped modules; package size, with a CI warning above 10 % growth.
+- [ ] Clarify **macOS distribution/MDM details** (Developer ID/notarization flow, possibly PPPC profiles for enterprise) — study §10.4. Deferred by the maintainer on 2026-10-24 (triage): it goes with "Developer ID + notarisation" (before the first public release); a PPPC profile only when an MDM user asks.
+- [ ] Work out the **native-FFI security model** (out-of-process sandbox per OS, trust store/signature flow, macOS FFI policy) — study §11.1–11.2. Deferred by the maintainer on 2026-10-24 (triage): until a module needs native code.
 
 ## ReaHotkey port — prerequisites & tooling
 
@@ -2226,9 +2253,11 @@ Foundation: [docs/reahotkey-port-analysis.md](docs/reahotkey-port-analysis.md).
       session and surviving a rebuild under the local signing identity. Original text
       follows. macOS TCC onboarding (Accessibility + Screen Recording, Input Monitoring only with CGEventTap). **Hotkey strategy per VOCR:** registered hotkeys via Carbon `RegisterEventHotKey` + context scopes → **no** CGEventTap/Input Monitoring/silent-disable needed. CGEventTap + health watchdog (`tapIsEnabled`/`tapEnable`) only if suppression/remapping/hotstrings are required. Permission persistence across self-updates (stable team/bundle ID). Study P0-2 + P0-9.
 - [x] **Overlay calibrator (Windows):** armed with `AUTOMATION_PLATFORM_CALIBRATE=1` and captured (not registered), so the keys belong to whichever overlay is ACTIVE — the only thing that can answer where its own controls land, since the coordinate frame (origin, frame offset, `rawOrigin`, landmark anchoring) is its own. **Ctrl+Alt+Shift+S** writes a screenshot of the coordinate window with a crosshair on every control plus the pixel read there, and logs the active window, every control in enumeration order with the chosen origin marked, and the origin's named accessibility elements; **+T** crops a template around the focused control straight into the module; **+V** counts that template's matches. It replaced a workflow of three-to-six rounds of throwaway diagnostics per coordinate, and the roster/tree half exists because a wrong ORIGIN is invisible in a list of coordinates — they are all faithfully wrong together. ✓ (2026-07-27)
-  - [ ] The macOS counterpart, once there is a macOS backend to calibrate against.
-- [ ] Concretize the **capture+OCR performance budget** (max capture frequency, ROI size) — GTune polls at 4 Hz; more expensive under ScreenCaptureKit than Windows `PixelGetColor`. Part of study §10.2.
-- [ ] **MVP vertical-slice order:** runtime framework → FabFilter (1 hotspot) → GTune (OCR+timer) → u-he bundle (Diva/Hive2/Repro/Zebra, possibly 1 generic "u-he header" module) → later Engine2/Raum/Zampler/KompleteKontrol. **Dubler 2 family = very involved** (image-/coordinate-heavy; advanced audio routing via ASIO/BASSASIO — per the client also available for Mac), deliberately deferred.
+  - [x] The macOS counterpart, once there is a macOS backend to calibrate against.
+        Done: the calibrator is the overlay runtime's own setting now, on both systems
+        (overlay-runtime main.luau:188-247), triage 2026-10-24.
+- [x] Concretize the **capture+OCR performance budget** (max capture frequency, ROI size) — GTune polls at 4 Hz; more expensive under ScreenCaptureKit than Windows `PixelGetColor`. Part of study §10.2. Obsolete: overtaken by the measurements and by OCR leaving the event loop; the rest folds into the budgets item above, triage 2026-10-24.
+- [x] **MVP vertical-slice order:** runtime framework → FabFilter (1 hotspot) → GTune (OCR+timer) → u-he bundle (Diva/Hive2/Repro/Zebra, possibly 1 generic "u-he header" module) → later Engine2/Raum/Zampler/KompleteKontrol. **Dubler 2 family = very involved** (image-/coordinate-heavy; advanced audio routing via ASIO/BASSASIO — per the client also available for Mac), deliberately deferred. Obsolete: overtaken; the ports went another way, and the core app comes first, triage 2026-10-24.
 
 ## ReaHotkey port — sample libraries (in progress)
 
@@ -2305,22 +2334,24 @@ matrix. This is the cheapest remaining content on the backlog: a product is a da
       honour.** (Also worth keeping: `ocrLabel` was the wrong tool here. It reads a control's
       NAME off the screen and REPLACES the fixed one, for controls whose meaning the plugin
       changes — Cinematic Studio's mic switches. Here the name is fixed and the value moves.)
-- [ ] **Soundiron — the Voices of Wind family** is installed (Adey / Audrey / Kimba as separate
+- [x] **Soundiron — the Voices of Wind family** is installed (Adey / Audrey / Kimba as separate
       NI libraries, where ReaHotkey has one "Voices of Wind Collection" overlay) but unmeasured
       and deliberately not declared. Its ReaHotkey rack probe sits at y 663, which the Mimi
       Page finding makes suspect for the same reason.
+      Done: Adey, Audrey and Kimba are ported (soundiron main.luau:112-160), triage 2026-10-24.
 - [x] **Runtime: `reveal` on a graphical toggle** ✓ — the point whose colour says a panel is
       shut and which also opens it, plus a settle delay. Asynchronous (we cannot sleep through
       ReaHotkey's 250 ms), so the continuation re-checks that the overlay is still active on
       the SAME window; fails OPEN, because a control that silently stops responding is worse
       than one that clicks an already-open panel. Unused so far — see above.
-- [ ] **A tab row need not sit at the same height on every page it appears on.** Kontakt's
+- [x] **A tab row need not sit at the same height on every page it appears on.** Kontakt's
       does not: y 504..522 on the Performance page, y 497..512 on the FX rack. A click authored
       from the wrong page's shot landed 9 px low on background and did nothing — and the same
       slip produced a FALSE MEASUREMENT, reading the background under a tab and concluding the
       tab never changes colour. Worth remembering as a class: when two states of one UI are
       being measured, a coordinate taken from the other state's picture is not an
       approximation, it is a different place.
+      Done: a lesson, recorded where it applies (soundiron main.luau:326-327), triage 2026-10-24.
 - [x] **Audio Imperia — module started, Chorus measured and verified** (`modules/audio-imperia`,
       `com.platform.audio-imperia`). Its wordmark templates still match the current UI
       exactly, unlike its coordinates. ✓ (2026-07-27)
@@ -2370,14 +2401,16 @@ matrix. This is the cheapest remaining content on the backlog: a product is a da
         measurement.
   - **Audio Imperia is complete**: all eleven product overlays across two panel layouts and
     two Cerberus patch families.
-  - [ ] **A list control and runtime control-swapping are no longer needed for Audio
+  - [x] **A list control and runtime control-swapping are no longer needed for Audio
         Imperia** — but Zampler's four `OCRListBox`es and Dubler's `PopulatedListBox` still
         want the list, and arrow-key stepping now exists (the slider owns Left/Right), so
         that is the natural place to build on when either is ported.
+        Obsolete: only Zampler and Dubler would need it, and neither port is planned, triage
+        2026-10-24.
 
 ## Kontakt — open threads from the Soundiron port (2026-07-28)
 
-- [ ] **The status-bar toggles must report their STATE, not just act.** Side pane, info pane
+- [x] **The status-bar toggles must report their STATE, not just act.** Side pane, info pane
       and keyboard are toggles announced as plain buttons, so pressing one tells you nothing
       about which way it went — the same defect as a `readOnly` OCR control calling itself a
       button, and the same rule: a control must not be less informative than what it does.
@@ -2387,11 +2420,14 @@ matrix. This is the cheapest remaining content on the backlog: a product is a da
       height the same way. So the state is readable from the origin rather than from a pixel
       or a UIA property — no new measurement, and nothing that drifts with a theme. Verify
       before building: a window resized for another reason must not read as a toggled panel.
-- [ ] **In the instrument EDIT view the play-view overlay is shown.** The view probe reads
+      Done: kontakt header.luau:53-127, triage 2026-10-24.
+- [x] **In the instrument EDIT view the play-view overlay is shown.** The view probe reads
       Edit Mode as "classic" in a calibration shot (brightness 99), so this is not simply the
       probe being wrong — Edit Mode is a THIRD state the two-way classic/play question cannot
       express. The likely answer is the one the user proposed: its own overlay, which also
       gives the collapsed Insert / Send / Main Effects sections somewhere to live.
+      Done: the editor is a third view now (`EDIT_PROBE`, kontakt detect.luau:690;
+      cells.luau:188-193), triage 2026-10-24.
 - [x] **ReaHotkey's Soundiron probes fit a TALLER Kontakt window.** CONFIRMED, 2026-07-28. The
       hypothesis was right in full: Alt+9 grew the window from 664x679 to 664x965 and the
       "Performance | FX Rack" row appeared at y 675..694 — ReaHotkey's published 663 plus the
@@ -2413,12 +2449,14 @@ matrix. This is the cheapest remaining content on the backlog: a product is a da
       to keep the grip inside it, refusing with a spoken reason when there is no room.
       Resize controls are also gated on classic view now (8 of 27 shots have a grip, all
       classic; 13 play-view shots at the same height have none).
-- [ ] **The window currently open is still 965 px and still stuck.** The clamp prevents this
+- [x] **The window currently open is still 965 px and still stuck.** The clamp prevents this
       state, it does not undo it. Recovering an already-stuck window needs the host window
       lifted so the corner clears the taskbar, the grip dragged, and the host put back — which
       our own app can do (it acts only while the plug-in has focus, so it owns the foreground)
       but an outside script cannot: `SetForegroundWindow` from a background process is refused
       by Windows, which is what stopped the attempt. Only worth building if the state recurs.
+      Obsolete: the clamp prevents that state now (kontakt header.luau:261-276, 376-404), triage
+      2026-10-24.
 
 ## Soundiron — owed after Adey's reverb (2026-07-28)
 
@@ -2478,16 +2516,20 @@ matrix. This is the cheapest remaining content on the backlog: a product is a da
       Note what does NOT need this: Gaia's FX-rack tile matches a Bryn patch unchanged, because
       that page is flat Kontakt chrome with fixed slot graphics rather than the singer artwork.
       The exposure is specific to a library's own themed page.
-- [ ] **The hazard is halved, not gone.** A pump iteration still exceeds ~300 ms on a window
+- [x] **The hazard is halved, not gone.** A pump iteration still exceeds ~300 ms on a window
       switch. What is left is neither the OS calls (1 question per epoch reaches the system),
       nor Lua table conversion (0.0 ms at microsecond resolution across 5077 calls), nor
       pixels (zero), nor the arbiter — it is the COUNT of Lua/Rust crossings inside
       `pluginControl`. The next lever is fewer crossings there, not cheaper ones.
-- [ ] **The runtime is a code module, so per-VM state multiplies.** The scene is computed
+      Obsolete: the latency is no longer reproducible (2026-08-15), and the reads are off the loop,
+      triage 2026-10-24.
+- [x] **The runtime is a code module, so per-VM state multiplies.** The scene is computed
       once per VM per epoch, not once globally — three Kontakt-using modules, three
       computations. That is the price of the inheritance model, and it caps every
       module-level memo the same way. A host-side scene would not have it.
-- [ ] **Instrumentation to keep.** The pump reports its phases and event multiplicity, each
+      Decided by the maintainer on 2026-10-24 (triage): the per-VM origin is accepted, unless a
+      measured `[recheck]` cost shows otherwise.
+- [x] **Instrumentation to keep.** The pump reports its phases and event multiplicity, each
       epoch its hit ratio and pixel count, each dispatch its size, each recheck its two
       halves. It exists because SEVEN reasoned guesses about this were wrong in a row
       (arbiter, timer resolution, uncoalesced events, template cache, table conversion,
@@ -2495,6 +2537,8 @@ matrix. This is the cheapest remaining content on the backlog: a product is a da
       remembering: accumulating per-call time with `as_millis()` rounded every sub-millisecond
       cost to zero, and eighteen hundred zeroes summed to zero — a unit too coarse looks
       exactly like evidence of absence.
+      Done: all four lines are in place (`[pump]`, `[observe]`, `[dispatch]`, `[recheck]`), triage
+      2026-10-24.
 
 ## AutoHotkey translation audit (2026-07-27)
 
@@ -2518,12 +2562,14 @@ plausible wrong action rather than an error.
       SIZE, overshooting the right and bottom edges by a border width on any window that has
       one). The case the guard was written for still holds: Kontakt 7's arrow at x=704
       against a 649 px window is outside the frame too.
-- [ ] **Verify KK standalone's `-10` itself against a real window** — the guard was the bug,
+- [x] **Verify KK standalone's `-10` itself against a real window** — the guard was the bug,
       but the literal is still unconfirmed: Komplete Kontrol's application is not installed
       here, so nobody has checked that its menu bar is genuinely non-client rather than a Qt
       widget inside the client area. If it is a widget, the guard fix stands and the module's
       y needs re-measuring rather than copying. Re-measure x = 16/52/83/138/194 at the same
       time.
+      Done: confirmed on a shot, and the menus are pressed by UIA name now (komplete-kontrol
+      main.luau:269-311), triage 2026-10-24.
 - [x] **Impact Soundworks' invented Alt+P** ✓ (2026-07-27) — ReaHotkey binds NO key on
       either Juggernaut OCRButton; ours added Alt+P, which the inherited Kontakt header
       already owns for "Previous snapshot". A doubly-claimed spec resolves to the first
@@ -2645,7 +2691,7 @@ class IS the identity, so there is no landmark, no `identify`, and nothing to di
 - [ ] **Raum** (free, installed) and **GTune** (free, installed as VST2) are the small
       remaining ReaHotkey plug-in overlays. GTune is the one that settles whether we carry a
       SELF-UPDATING read-out (it polls at 2.5 Hz); every future level/meter display wants
-      that answer.
+      that answer. Deferred by the maintainer on 2026-10-24 (triage): after the release.
 
 ## ReaHotkey port — Kontakt (open threads)
 
@@ -2889,7 +2935,7 @@ asked; this is what was NOT, plus what the session found that nobody had asked.
       in `gui.rs` says the host "may still speak this one"; it cannot, with the defaults. The
       fix is the plain voice for this one line when there is no balloon, which is what the
       comment meant. Not done in this round — the owner chose F6 and the busy-skip first.
-- [ ] **F6 into the plugin: rewritten, and unrun.** Five of five presses failed in the
+- [x] **F6 into the plugin: rewritten, and unrun.** Five of five presses failed in the
       session, with the backend reporting every request accepted and the focus chain still
       three deep — REAPER keeps its keyboard on the FX list, and the plugin's view exposes no
       element to hand it to. `daw-hosts` now clicks three points inside the plugin's panel
@@ -2909,6 +2955,7 @@ asked; this is what was NOT, plus what the session found that nobody had asked.
       chain now answers EMPTY when the focus could not be read, instead of substituting the
       window and looking exactly like "inside". Whether REAPER moves its focus on the click,
       only the next session can say.
+      Done: confirmed in the second macOS session ("Keyboard focus arrived!"), triage 2026-10-24.
   - **Known limitation, and it needs a second plug-in to settle.** "The keyboard is on the
       host's chrome" is read from the chain being deeper than the window itself, which is
       only right for a plug-in whose view exposes nothing — sforzando, as measured. A plug-in
@@ -2916,7 +2963,7 @@ asked; this is what was NOT, plus what the session found that nobody had asked.
       be read as chrome, get clicked at its corner and be reported as a failure that is not
       one. The REAPER matcher is title-based, so every plug-in takes this path. Distinguishing
       the two needs an accessible plug-in on the tester's machine to look at first.
-- [ ] **Each F6 press cost a second and switched the tap off twice.** `host.window.find`
+- [x] **Each F6 press cost a second and switched the tap off twice.** `host.window.find`
       lists every window, `enumerate_windows` asked every application, one of them was not
       answering, and the loop never consulted the busy quarantine that
       `frontmost_window_element` has used since it was introduced. It does now — and the
@@ -2929,6 +2976,7 @@ asked; this is what was NOT, plus what the session found that nobody had asked.
       When an application IS in the quarantine, `find` is blind to its windows for five
       seconds; the log now names the application it did not ask, and the shortcut says "could
       not find a plugin window", which is what it knows.
+      Done: fixed with the third session (lib.rs:8459-8474; ax.rs:1747-1800), triage 2026-10-24.
 - [x] **`window.active()` was the biggest thing blocking the pump** — fixed 2026-09-04, and
       the fix needed two rounds because the first one moved the stall rather than removing it.
       It had stalled the pump **fourteen times**, worst case **2605 ms**; the worst had
@@ -3245,7 +3293,7 @@ control that has hidden itself acts on its hotkey sibling or says "not available
       the summary waits for them. `probe step 'X': N ms` per step. A second press while a run
       is going says "Still recording probe N"; a run that makes no step for two minutes is given up
       and stopped. The picture step notes when the window in front is no longer the one recorded.
-- [ ] **CI signing with a stable identity — the maintainer's, at release.** Done by the
+- [x] **CI signing with a stable identity — the maintainer's, at release.** Done by the
       maintainer, last, before the official release; not a task for a session. Only a tester
       who keeps grants across builds on their own Mac would gain before then — the borrowed Macs
       reset TCC on purpose. The recipe, so it cannot fail without a word: the p12 made with
@@ -3254,6 +3302,8 @@ control that has hidden itself acts on its hotkey sibling or says "not available
       `Authority=OSAP Local Signing`; the workflow file added to the reuse diff; the secret in an
       Environment limited to main. The key IS the privilege — anyone holding it ships a binary
       that inherits the grants.
+      Decided by the maintainer on 2026-10-24 (triage): decided already on 2026-09-19; it belongs on
+      a release checklist, which the triage's question 89 (still open) would add.
 - [x] **The menu watch's backstop honoured a menu for 150 ms of every 1.2 s** — 2026-09-19. A
       menu the accessibility check sees now keeps the check running every tick (each sighting
       extends `menuPlausibleUntil` by three ticks), so the keys stay with it while it is seen and
@@ -3391,18 +3441,23 @@ what it left open.
       dialog was up — activation came the second the app first answered — so "DEF read as
       550." is still unexplained; the read-out text is logged now, so next time it will be.
       A probe press over that dialog would say what it is.
-- [ ] **Step 7 was structurally dead**: no F6, and REAPER without an observer, so the in-DAW
+- [x] **Step 7 was structurally dead**: no F6, and REAPER without an observer, so the in-DAW
       overlay (event-driven, no poll) could never re-evaluate. Both fixed; untested. The
       VOCR-click route still cannot wake it — a keyboard moved into a view exposing no AX
       element fires no notification (`daw-hosts` says so) — only F6's own recheck can.
-- [ ] **CI artifacts are ad-hoc signed** (`package-macos.sh` falls back when no identity is
+      Done: Kontakt 8 in REAPER worked on a Mac on 2026-09-18 (the Mac mini session), triage
+      2026-10-24.
+- [x] **CI artifacts are ad-hoc signed** (`package-macos.sh` falls back when no identity is
       in the keychain; the workflow has none). Every new download is a new identity and all
       four grants are lost. A self-signed certificate exported once and kept as a GitHub
       secret, imported by the workflow, would give artifacts one identity; needs the
       maintainer's hand.
-- [ ] **ownsPoint is unanswerable on macOS** and nil is read as permission; unrelated
+      Obsolete: the same as "CI signing with a stable identity" (the maintainer signs at release),
+      triage 2026-10-24.
+- [x] **ownsPoint is unanswerable on macOS** and nil is read as permission; unrelated
       windows (a Software Update alert, a 1892x1055 Safari window, the remote-assist window)
       overlapped every probed window's centre all session. Documented; not implemented.
+      Done: e5b4440, triage 2026-10-24.
 - [ ] ~16 sub-threshold pump blocks per session on focus changes — `[recheck] 'sforzando'`
       re-asking `window.active` synchronously while Finder takes 106-229 ms to answer. Not
       reported by the 250 ms line; the front memory covers the busy case, not the slow one.
@@ -3462,14 +3517,17 @@ in macOS 14`, where without it the process would have aborted), `window.active` 
       `speakControl` takes a `queued` flag and the activation path uses it. Bounded honestly:
       `interrupt` governs OUR queue only — whether VoiceOver cuts itself off is VoiceOver's
       decision — so this fixes the case where both lines are still ours, which is this one.
-- [ ] **The line the protocol told him to watch for cannot tell the bug from normal
+- [x] **The line the protocol told him to watch for cannot tell the bug from normal
       operation.** It fired eight times in his log, every time as `because a plugin menu is
       open`, which is by design. Only `because the scoped window is not frontmost` is the
       defect. Either split the two log lines or, in the next protocol, name the second half.
-- [ ] **Timers are far worse than the 5% previously recorded:** `10 x 100 ms took 1673 ms
+      Done: the let-through line names its reason now (tap.rs:1251-1258), triage 2026-10-24.
+- [x] **Timers are far worse than the 5% previously recorded:** `10 x 100 ms took 1673 ms
       (shortest 104, longest 729)`, so a 900 ms watch deadline is really about 1505 ms there,
       and a single hop can take 729 ms on its own. Every settle and deadline in every module
       was tuned on Windows. Measured twice in the same session (1673 and 1637 ms).
+      Obsolete: corrected by the instruments audit ("The timer cadence measured the probe's own
+      OCR"), triage 2026-10-24.
 - [x] **Batching OCR reads is NOT worth building, and the instrument said the opposite** —
       corrected 2026-09-04, before the work was done rather than after. The numbers are `one
       774x120 region took 354 ms and read 28 word(s); the same band as three strips took 374 ms
@@ -3487,15 +3545,16 @@ in macOS 14`, where without it the process would have aborted), `window.active` 
       reported as the figure that actually decides, and a stated threshold (50 ms) with the
       reasoning beside it so a reader can disagree with the rule rather than only the
       conclusion.
-- [ ] **`enumerate_windows` is now the biggest stall on that machine** — 1291 ms and 1033 ms in
+- [x] **`enumerate_windows` is now the biggest stall on that machine** — 1291 ms and 1033 ms in
       the two probe runs, against `active_window`'s worst of 329 ms. It is the probe's own doing
       (`host.window.list`), so no shipped module pays it today, but the `find`-with-an-`app`
       clause noted elsewhere in this file is what would bound it.
-- [ ] **The VoiceOver transport is free, and that answers the question set before the
+      Done: bounded per application (ax.rs:1747-1800), triage 2026-10-24.
+- [x] **The VoiceOver transport is free, and that answers the question set before the
       numbers:** `50 lines through VoiceOver: 0 ms on average, 0 at best, 0 at worst`, against
       `an osascript that talks to nobody took 212 ms`. So `output` returns when VoiceOver has
       the text rather than blocking until it is spoken, and no change of transport buys
-      anything. Close the question.
+      anything. Close the question. Done: measured; the item closes itself, triage 2026-10-24.
 - [ ] **Space in the module list needs VoiceOver interaction.** "Space in the row without VO
       interaction doesn't work ... I could VO interact, then VO+Space worked." Our own Space
       handler (written precisely so a VoiceOver user is not left reading a list he cannot
@@ -3522,10 +3581,10 @@ in macOS 14`, where without it the process would have aborted), `window.active` 
       minutes later — so the case he describes is not in it. Ask for the log of a failing
       launch; and independently, make that launch explain itself, because the startup line
       records neither which transport it took nor whether anything accepted it.
-- [ ] **Qt is still unanswered and no longer his problem.** Kontakt and Komplete Kontrol will
+- [x] **Qt is still unanswered and no longer his problem.** Kontakt and Komplete Kontrol will
       not run on macOS 12.7.6, and the Qt applications he could think of are equally
       unsupported there. It moves to the next session's protocol instead, on a machine where
-      they run.
+      they run. Done: answered in the third macOS session, triage 2026-10-24.
 
 - [x] **Personal Voice would have killed the application on the tester's Mac** — found
       2026-09-04 by an adversarial review of the test protocol, before he was asked to press
@@ -3595,13 +3654,15 @@ in macOS 14`, where without it the process would have aborted), `window.active` 
       chosen. No shipped module calls `use`/`engines`, so nothing is broken today; a module
       author who asks once would have been. `docs/api/speech.md` says it now, including that
       "nine entries, always the same nine" is only true once the list has filled.
-- [ ] **Timers run about 5% slow on that machine, and a settle is a deadline.** Measured by
+- [x] **Timers run about 5% slow on that machine, and a settle is a deadline.** Measured by
       the probe: `10 x 100 ms took 1050 ms (shortest 105, longest 105)`, so a 900 ms watch
       deadline is really about 945 ms there. Nothing is broken; it is a number modules with
       settles and deadlines are written against, and every one of those was tuned on Windows.
       Worth a look before blaming a module for missing a window that was never open long
       enough.
-- [ ] **Vision costs the same whether the region is tiny or the whole window.** From the
+      Obsolete: corrected by the instruments audit ("The timer cadence measured the probe's own
+      OCR"), triage 2026-10-24.
+- [x] **Vision costs the same whether the region is tiny or the whole window.** From the
       same probe: a 1013x580 pt read took 730 ms and finished, while a **64x16 pt** read was
       abandoned at its 457 ms deadline. Region size is not the lever — the per-request cost
       is — which is why an ordinary Tab step costs 90-250 ms there against 23-34 ms on
@@ -3609,18 +3670,21 @@ in macOS 14`, where without it the process would have aborted), `window.active` 
       the way out is fewer requests rather than smaller ones: one read of a region covering
       several fields, split afterwards by position. Before building that, measure whether one
       request over a region holding three read-outs really costs less than three requests.
+      Obsolete: contradicted by the later measurement ("Batching OCR reads is NOT worth building",
+      the second macOS session), triage 2026-10-24.
 
 - [ ] **Retina is still unmeasured.** The tester's Air has a backing scale of 1.00. The
       coordinate agreement shown by the probe is real and answers nothing about 2.00x.
-- [ ] **The arm64 half of the universal build has never run.** The session ran the x86_64
+- [x] **The arm64 half of the universal build has never run.** The session ran the x86_64
       slice (no Rosetta). The CI's `lipo` check proves both slices exist, not that the arm64
       one launches.
-- [ ] **Qt object names in `AXIdentifier`** — still open, and it needs NO code. The class
+      Done: ran on the M1 (the third macOS session) and on the M2 Max, triage 2026-10-24.
+- [x] **Qt object names in `AXIdentifier`** — still open, and it needs NO code. The class
       string the backend publishes is already `AXRole/AXSubrole/AXIdentifier` (see
       `join_class`, whose own doc gives `"AXGroup//NI.Kontakt.Main"` as its example), and the
       probe prints it verbatim for every element. One probe run over a Kontakt or Komplete
       Kontrol window answers it. The tester probed sforzando, which is not a Qt application;
-      he thinks he can install one.
+      he thinks he can install one. Done: answered no (the third macOS session), triage 2026-10-24.
 - [x] **`host.element.rawDump` did not return on Windows** — fixed 2026-09-04, and the
       diagnosis was wrong twice before the measurement settled it. First guess: the Chromium
       subtree. Measured by timing the dump over all 21 top-level windows on this desktop,
@@ -3643,7 +3707,7 @@ in macOS 14`, where without it the process would have aborted), `window.active` 
       (`TreeScope_Children`) would bound it and still keep most of the win the subtree cache
       was measured to bring (211 ms per walk down to one crossing instead of six per
       element). Worth doing when something other than a diagnostic needs that window.
-- [ ] **The original note, for the record.** `host.element.rawDump` did not return on Windows, twice, over a WinUI window. Found
+- [x] **The original note, for the record.** `host.element.rawDump` did not return on Windows, twice, over a WinUI window. Found
       while self-testing the probe's new answers: the run reached "note: tree rectangles
       below are SCREEN coordinates" — printed immediately before the dump — and produced
       nothing further in 40 s, twice, over a WhatsApp window (`WinUIDesktopWin32WindowClass`,
@@ -3652,9 +3716,12 @@ in macOS 14`, where without it the process would have aborted), `window.active` 
       a hang rather than a failure. Not chased — it is the Windows side and it did not block
       what was being tested. Worth its own look: a probe that stops before its own answers is
       an instrument that lies by omission.
-- [ ] **The VoiceOver transport** — still unmeasured, because the switch was off. Ask the
+      Done: the hang was fixed under "`host.element.rawDump` did not return on Windows" above
+      (uia.rs:188-212), triage 2026-10-24.
+- [x] **The VoiceOver transport** — still unmeasured, because the switch was off. Ask the
       tester to turn "Speak through VoiceOver" on for the next round; the `voiceover.sdef`
       he sent confirms the `output` command exists.
+      Done: measured, and the Automation request is built, triage 2026-10-24.
   - **The permission that would have swallowed that measurement is now asked for**
       (2026-09-04). Every line of that transport is an Apple Event, which needs the
       **Automation** grant — a fourth permission, in its own pane, refused by default, and
@@ -3782,7 +3849,7 @@ wrapper rather than with prism.
       exactly the failure the VoiceOver setting was shaped to avoid. The Windows escape (open
       it on a background thread) does not port either: every avspeech call goes through
       `dispatch_sync` to the main queue, which during start-up is not running yet.
-- [ ] **The cleanup is still worth doing, for a different reason.** `tts` is the sole reason
+- [x] **The cleanup is still worth doing, for a different reason.** `tts` is the sole reason
       the abandoned `objc 0.2` / `cocoa-foundation` generation is in a build that otherwise
       uses `objc2` throughout — two Objective-C runtimes in one process, 11 crates that
       nothing else needs. It also does `version_parts[1].parse().unwrap()` on the macOS version
@@ -3791,6 +3858,8 @@ wrapper rather than with prism.
       both of its macOS backends register the same delegate class name, so a second `Tts` in
       one process fails — macOS structurally cannot re-arm its plain voice the way the Windows
       fallback thread does.
+      Done: speech/avspeech.rs over objc2-avf-audio; `tts` and `cocoa-foundation` are gone from
+      Cargo.lock, triage 2026-10-24.
 - [x] **Built** (2026-09-04), written blind and never run. `speech/avspeech.rs` over
       `objc2-avf-audio` 0.3.2, which was verified to expose all six symbols the plan named —
       `requestPersonalVoiceAuthorization` and `personalVoiceAuthorizationStatus` included —
@@ -3858,12 +3927,14 @@ wrapper rather than with prism.
       thread), and it hung (a fresh library per query). The question is now answered by a
       worker that already holds one, and a chosen engine is another long-lived worker rather
       than something opened per call.
-- [ ] **`host.speech` — what is left of the idea.** The macOS half: VoiceOver, the system
+- [x] **`host.speech` — what is left of the idea.** The macOS half: VoiceOver, the system
       voice and Personal Voice as three entries in `engines()`, and `use` answering for real
       there. It waits on the objc2 wrapper, which waits on the Mac tester. Also unbuilt, and
       deliberately: a way to send DIFFERENT text to a braille display than to the ear, which
       would be an option on `output` rather than a namespace of its own — worth building only
       when a module needs it, and a 40-character braille line suggests one eventually will.
+      Done: `engines()` and `use()` answer on macOS (speech/mod.rs:907); braille text waits for a
+      module that needs it, triage 2026-10-24.
 - [x] **Order of operations — answered by the first session** (2026-09-03): the plain voice
       is fine. The tester heard the overlay throughout (and noted that with VoiceOver on
       system TTS it does not even interrupt us). The wrapper is therefore tidying plus
@@ -3974,12 +4045,14 @@ and `screen.md`. Bindings and worker are in `crates/host/src/image_search.rs`.
       there (decided 2026-09-21). A point on no monitor reads black on both paths too
       (`colorref_rgb` maps CLR_INVALID to black; it used to be white). Unmeasured on a real
       multi-monitor setup.
-- [ ] **Optional hardening: a time-based in-flight stamp in the overlay runtime** (critique R7).
+- [x] **Optional hardening: a time-based in-flight stamp in the overlay runtime** (critique R7).
       No longer needed for a disable: an answer that arrives while its owner is disabled is
       now held and the search sent again on re-enable (`image_search::Fate::Hold`), so the
       landmark gate's `pending` flag is always cleared by a callback while the VM lives. A stamp
       (`host.now()` instead of a boolean, as the `imageSearchEach` doc example does) would still
       guard against a callback lost some other way.
+      Obsolete: the landmark gate asks `host.screen.pending` now (overlay-runtime
+      main.luau:973-1026), triage 2026-10-24.
 - [ ] **Call-level `tolerance` outside 0–255 silently becomes 0, an exact match.** Every search
       reads it through `image_search::read_tol`, unchanged on purpose because changing it
       changes what existing modules get; clamp numbers to 0–255 and raise on anything else,
@@ -3991,8 +4064,9 @@ and `screen.md`. Bindings and worker are in `crates/host/src/image_search.rs`.
       (`capture.rs` asks for `CGInterpolationQuality::Low`; Apple does not specify the kernel):
       add a measurement to `tools/capture-probe` — a known 2x2 checker at backing resolution,
       read back at point resolution — before the docs say anything about it.
-- [ ] **`host.resource.readBytes`**, so a packed binary template can be shipped as a file and
+- [x] **`host.resource.readBytes`**, so a packed binary template can be shipped as a file and
       handed to `rgba` without a detour through JSON numbers.
+      Decided by the maintainer on 2026-10-24 (triage): closed until a module asks for raw bytes.
 - [ ] **A `capture` template must stay a live read when DXGI capture lands**: never served from
       a frame cache (`docs/screen-frame-sharing-design.md` on calibration paths). Holds by
       construction after the merge with desktop duplication (2026-09-21): `template{ capture =
@@ -4127,8 +4201,9 @@ arrived with the game in front. So desktop duplication is the working source for
       (2026-09-25, M4): after 30 s without a read the duplication was released and the next
       read reopened it without trouble; what the reopening cost was not reported on its own.
       The device's own release at 5 minutes is still unseen.
-- [ ] **M12** Whether duplication works at all on a GitHub Windows runner (Basic Display
+- [x] **M12** Whether duplication works at all on a GitHub Windows runner (Basic Display
       Adapter) — the CI live-test step prints it.
+      Done: yes, "DXGI LIVE: duplication answered after 21-35 ms" in three runs, triage 2026-10-24.
 - [ ] **M13** With OBS display capture and his C# reader running, `DuplicateOutput` gets
       `NOT_CURRENTLY_AVAILABLE` and the fallback is clean.
 - [ ] **M14** `WAIT_TIMEOUT` never hides a changed screen: a game whose frames bypass
@@ -4137,6 +4212,7 @@ arrived with the game in front. So desktop duplication is the working source for
 - [ ] **M15** (WGC only) Whether an unpackaged app can turn the yellow border off —
       probably not: `IsBorderRequired` needs 10.0.20348+, a consent prompt and a package
       capability.
+      Deferred by the maintainer on 2026-10-24 (triage): Windows.Graphics.Capture is not built now.
 - [ ] **M16** The first frame after opening or reopening on a STATIC screen (a menu waiting
       for input): does a real picture arrive, or only pointer updates until something
       repaints? The engine takes a picture only from a frame whose `LastPresentTime` is not
@@ -4165,6 +4241,7 @@ arrived with the game in front. So desktop duplication is the working source for
       game reads live); rotated monitors; the
       phase-2 question (duplication by default for every module), which needs M6 and a
       decision about holding one of a session's four duplication slots all day.
+      Deferred by the maintainer on 2026-10-24 (triage): not built until a module needs it.
 - [ ] macOS: `[screen]` is accepted and ignored there. Whether ScreenCaptureKit (or the
       CoreGraphics fallback) sees a game's frames the way duplication does on Windows — the
       design assumed it reads the compositor's output — has never been checked, so the API
@@ -4402,11 +4479,12 @@ Found while documenting — the behaviour is written down now, and wants fixing:
       macOS layout types is parked instead of refused (`backend/macos/hotkey.rs`, `register`)
       and registered as soon as a layout that types it is selected, so neither reaches the
       dialog. The macOS half has not run on a Mac: see "Verify on a Mac (letters by layout)".
-- [ ] **A capture whose hook or tap could not be installed stays registered.**
+- [x] **A capture whose hook or tap could not be installed stays registered.**
       `host.keys.capture` pushes its entry and refreshes the captured set before
       `watch_keys()`; when that raises (macOS without the Accessibility grant), the token is
       lost with the error, and the key is suppressed and dispatched once a later capture
       installs the tap. Register the entry only after `watch_keys()` succeeded.
+      Done: d513dc9 (lib.rs:7873-7880, the test at 10020-10024), triage 2026-10-24.
 - [x] **The keyboard hook is installed once and never checked.** Windows documents that a
       low-level hook that keeps timing out can be removed without notice; `KEY_HOOK_INSTALLED`
       would stay true and every capture would stop for the session with nothing logged. Not
@@ -4506,6 +4584,8 @@ unzip-and-run application does not have, so each is a deliberate decision of its
       gamepad would need what remapping tools do (DS4Windows, reWASD, Steam Input): hide the real
       pad from the game and give the game a virtual one that receives everything the overlay does
       not consume.
+      Deferred by the maintainer on 2026-10-24 (triage): not built; a driver would break the
+      portable app.
   - Windows: a filter driver (HidHide) plus a virtual-pad bus (ViGEmBus, no longer maintained):
         kernel drivers, an administrator install, and a game without a pad if we crash.
   - macOS: seizing the device (`kIOHIDOptionsTypeSeizeDevice`) takes the pad from the game
@@ -4517,9 +4597,11 @@ unzip-and-run application does not have, so each is a deliberate decision of its
       macOS can create virtual MIDI sources and destinations through CoreMIDI without any driver;
       Windows traditionally needed a loopback driver (loopMIDI / teVirtualMIDI), and Windows MIDI
       Services (Windows 11) is said to add app-to-app endpoints — not verified here.
+      Deferred by the maintainer on 2026-10-24 (triage): if it comes up, a CoreMIDI spike first.
 - [ ] **A virtual USB/HID device**, to emulate hardware. Windows needs a virtual-HID driver (a UMDF
       driver, or a third-party bus); macOS needs a DriverKit system extension with Apple's
       entitlement. The largest of the three.
+      Deferred by the maintainer on 2026-10-24 (triage): parked.
 
 ## One build run for both systems (2026-09-21)
 
@@ -4532,15 +4614,17 @@ otherwise). The YAML parses, and the calls, inputs, permissions, `needs` and out
 checked by script. Written without a run, though, so these are open until the first push
 shows them:
 
-- [ ] The run starts at all. A call that grants less than the called workflow asks for, or
+- [x] The run starts at all. A call that grants less than the called workflow asks for, or
       passes an input it does not declare, is refused before any job runs.
-- [ ] Both downloads are in the one run, named as above, and `newer-macos` finds the macOS one
-      by that name.
-- [ ] The macOS reuse finds the previous Build run's `-macos` download. The first Build run has
+      Done: every Build run since 35651160216, triage 2026-10-24.
+- [x] Both downloads are in the one run, named as above, and `newer-macos` finds the macOS one
+      by that name. Done: run 40051316448, triage 2026-10-24.
+- [x] The macOS reuse finds the previous Build run's `-macos` download. The first Build run has
       none and builds, since runs of the old `macos-build.yml` are not looked at. After that, a
-      Luau-only push should log "reused the build from …".
-- [ ] Two pushes in quick succession each get a complete run with both downloads. Nothing
+      Luau-only push should log "reused the build from …". Done: run 39084811059, triage 2026-10-24.
+- [x] Two pushes in quick succession each get a complete run with both downloads. Nothing
       cancels a run any more; the old macOS workflow cancelled a superseded one.
+      Done: runs 39125723422 and 39126002847 overlapped, both complete, triage 2026-10-24.
 - [ ] "Re-run failed jobs" after a red import check or capture probe (both run after the macOS
       upload) gets past the upload, which now overwrites the download the first attempt left in
       the run instead of failing on its name. The same for re-running the Windows job.
@@ -4561,14 +4645,17 @@ the naming job in `build.yml`. The log header says `version 0.1.0, build <commit
 `(0.1.0, build <commit>)`. Checked locally (unit tests, a headless run, `package.ps1` into a
 scratch folder); these only a real run can show:
 
-- [ ] The Windows job's capability step prints `log header: ... build <this run's commit>` with
+- [x] The Windows job's capability step prints `log header: ... build <this run's commit>` with
       no warning. A `-modified` warning there means the runner's checkout changed before the
-      compile; the `git status` below it says which file.
-- [ ] The macOS job's module load prints the same: the executable's own commit when the job
+      compile; the `git status` below it says which file. Done: run 39125723422, triage 2026-10-24.
+- [x] The macOS job's module load prints the same: the executable's own commit when the job
       built it, and the one `build-info.txt` beside the `.app` names when it reused one.
-- [ ] The first Luau-only push after this: the reuse step says "the package is build X, its
+      Done: the built case in every run, the reused case in run 39084811059, triage 2026-10-24.
+- [x] The first Luau-only push after this: the reuse step says "the package is build X, its
       executable was built from Y", the log header says `build X (binary built from Y)`, and
       the downloaded README's `Build:` line says both.
+      Done: run 39084811059 shows the reuse line, the log header and the README line, triage
+      2026-10-24.
 - [ ] Whether a reused macOS download keeps the permissions a tester granted to the build it
       reuses. Never observed either way. The bundle is left untouched for that reason (only
       `build-info.txt` and `README.txt` beside it change); a file inside it would need a new
@@ -4650,8 +4737,9 @@ Only a real session can show these:
       by `proc_pidpath`), has never run.
 - [ ] macOS: the alert of a start that gave up (`CFUserNotificationDisplayAlert`, shown before
       wxWidgets exists) appears in front and VoiceOver reads it.
-- [ ] macOS: the OS line reads `os macos aarch64 — Mac OS 15.x [64-bit]` or similar (os_info reads
+- [x] macOS: the OS line reads `os macos aarch64 — Mac OS 15.x [64-bit]` or similar (os_info reads
       SystemVersion.plist, and `sw_vers` behind it).
+      Done: in the CI logs ("Mac OS 15.7.9", "Mac OS 26.6.2"), triage 2026-10-24.
 
 ## Module installation and the registry, hardened (2026-09-21)
 
@@ -4729,6 +4817,9 @@ update flows of `crates/host/src/gui.rs`.
 - [ ] **Report upstream:** zip 8.6 `ZipArchive::extract` writes `top/C:\x` outside the target
       folder on Windows, and cap-std 4.0.3 lets `sub/C:x` out of its directory (both from the
       crate audit).
+      Deferred by the maintainer on 2026-10-24 (triage): the zip path escape is re-tested on the
+      newest zip first, and if it still escapes, one issue goes upstream from the maintainer's
+      account; the cap-std half is dropped, cap-std being no longer a dependency.
 - [x] **A failed install replaced the installed folder.** An archive that failed while
       unpacking, a manifest that differed from the review, or a download without `module.toml`
       left the user without the installed version. Each module is staged now (see the review
@@ -4789,10 +4880,13 @@ window of the application open, or in a shipped module.
       and at that moment that is our own manager; check that the answer comes at once rather
       than after a timeout on our own process. A module without an `initial` trigger does not
       ask.
-- [ ] **No module uses the three yet.** The overlay runtime still works around the missing
+- [x] **No module uses the three yet.** The overlay runtime still works around the missing
       cancel with generation counters (`Overlay:afterIdle`), and checks the window in front at
       load itself (`_recheck` after registering). Moving it onto `cancel` and
       `initial = true` is a behaviour change for every overlay and needs its own live test.
+      Decided by the maintainer on 2026-10-24 (triage): the runtime is not moved onto
+      `host.timer.cancel` and `initial = true`; it keeps its generation counters and its own check
+      at load.
 
 ## Keys written once, said per platform (2026-09-22)
 
@@ -4856,8 +4950,9 @@ Everything else here stands.
       once.
 - [ ] **macOS: how VoiceOver says the described keys** ("Shift+Command+F6": whether the `+`
       is read as "plus", and whether the order sounds natural).
-- [ ] **macOS: the plain-pattern log line** for Kontakt's in-DAW patterns (`^NIChildWindow%x+$`)
+- [x] **macOS: the plain-pattern log line** for Kontakt's in-DAW patterns (`^NIChildWindow%x+$`)
       should appear once per pattern at start-up; not yet seen in a Mac log.
+      Obsolete: Kontakt's patterns are keyed by system since bde3eb0, triage 2026-10-24.
 - [ ] **Windows (live, with NVDA): the announcements** now say "Control+L" where they said
       "Ctrl+L", a control or tab whose hotkey the host refuses no longer says its key, and a
       Ctrl+Alt key checked on a German layout reports `altgr` with the character (seen in a
@@ -4867,17 +4962,20 @@ Everything else here stands.
       `mod`/`cmd` field (xplat-audit A4): settled by the roles (2026-09-22). Its fields are
       roles, so on a Mac `ctrl` is Command held and `win` Control held; `ctrl` is the neutral
       field.
-- [ ] **To confirm (maintainer): `check` without the `keys` capability.** `normalize`,
+- [x] **To confirm (maintainer): `check` without the `keys` capability.** `normalize`,
       `describe` and `check` are in `FREE_MEMBERS`, and `check` is the one of the three that
       reads more than the string — the character the current layout types with a Ctrl+Alt or
       Option chord. Kept free so that any module can ask before it announces a key; to be moved
       behind `keys` if that read should need the declaration.
-- [ ] **To decide: should `check` say that no key of the current layout types a letter?** On
+      Decided by the maintainer on 2026-10-24 (triage): `check` stays free.
+- [x] **To decide: should `check` say that no key of the current layout types a letter?** On
       macOS such a hotkey is accepted and parked until a layout that types the letter is
       selected (see "macOS: letters follow the keyboard layout" below), and `check` stays
       structural: `no-keycode` is F21–F24 only, and `ok` is true for the letter. A
       layout-dependent reason would have to be one that does not refuse (`register` does not
       raise for it) and would be asked of the layout even with `layout = false`.
+      Decided by the maintainer on 2026-10-24 (triage): no; `register` and `send` already answer
+      `not_supported`.
 - [ ] **`examples/overlay-attach` and the README still use Ctrl+Alt+1 and Ctrl+Alt+3**
       (`examples/overlay-attach/src/main.luau`, `README.md`, the overlay demo). Ctrl+Alt is
       AltGr on Windows, where a layout can type a character with 1 or 3 (`check` says `altgr`).
@@ -5140,11 +5238,12 @@ the `Mod`/`Global` tokens of the same morning.
 
 ## Seen in the first session with the log backend (2026-09-22)
 
-- [ ] **wxdragon warns once at start:** `[dep:wxdragon] warn: Warning: C++ returned invalid
+- [x] **wxdragon warns once at start:** `[dep:wxdragon] warn: Warning: C++ returned invalid
       TreeItemId pointer 0x..., rejecting`, logged right after the installed list is filled. It
       was invisible before our dependencies' messages reached the log. Find which tree call
       returns the invalid item (the module manager's tree, gui.rs) and whether anything the user
       sees is missing because of it.
+      Done: 0a48756; the test at gui.rs:3476-3490 holds it, triage 2026-10-24.
 
 ## Grid cells and window regions (2026-09-22)
 
@@ -5259,8 +5358,10 @@ with a window of the application open, or against a game.
 - [ ] **An in-repo benchmark of `cells::reduce`.** The 8 ns a pixel in `screen.md` was measured
       with a scratch crate that borrowed `cells.rs` (release build, i7-8700K); an `#[ignore]`
       test would keep the number true when the code changes.
-- [ ] **Share the predicate with templates** when a template colour test is built:
+- [x] **Share the predicate with templates** when a template colour test is built:
       `cells::Predicate` is that test, and a second parser would be a second set of rules.
+      Decided by the maintainer on 2026-10-24 (triage): closed; the reminder belongs in a one-line
+      note on `cells::Predicate`.
 
 ## Text recognition off the event loop (2026-09-22)
 
@@ -5301,18 +5402,22 @@ What only a person, a Mac or a measurement can settle:
       per lane, p50 and p95, with Melodyne polling and while tabbing through an overlay. The log's
       "ocr: N region(s) … waited" line covers jobs over 100 ms. (The input barrier's waits were
       part of this until step 11.3 removed it.)
-- [ ] **O4** — a synchronous `recognize` inline against the same read queued and waited for.
-- [ ] **O5** — confirmation only: Windows with the resolver hands `"de-DE"` for `"de"`; whether
+- [x] **O4** — a synchronous `recognize` inline against the same read queued and waited for.
+      Obsolete: overtaken by 8df17ff, triage 2026-10-24.
+- [x] **O5** — confirmation only: Windows with the resolver hands `"de-DE"` for `"de"`; whether
       `TryCreateFromLanguage("de")` alone would have worked is now moot.
+      Done: the resolver is unit-tested in ocr/lang.rs, triage 2026-10-24.
 - [ ] **O6 (Mac)** — Vision's accurate and fast language lists on macOS 12, 14, 15 and 26, and what
       Vision does with a tag it does not list (the resolver never hands it one, but `recognize`
       does while the list is not known yet).
-- [ ] **O7 (Mac)** — what one Vision pass costs on the recognise thread, against the pump thread.
+- [x] **O7 (Mac)** — what one Vision pass costs on the recognise thread, against the pump thread.
+      Done: answered by CI run 36972644006 (ocr-bench, "Text recognition on the Mac, measured"),
+      triage 2026-10-24.
 - [ ] **O8 (Mac)** — the spelling `NSLocale.preferredLanguages` gives ("de-DE", "de", "de-Latn-DE")
       and that it resolves; and that asking for it off the main thread is fine.
 - [ ] **O9** — the line separator in `OcrResult.Text()` (what `recognize` returns as `text`).
-- [ ] **O10** — whether the GitHub Windows runner has an OCR language, which decides whether a CI
-      probe can assert a `read`.
+- [x] **O10** — whether the GitHub Windows runner has an OCR language, which decides whether a CI
+      probe can assert a `read`. Done: it has en-US (run 40051316448), triage 2026-10-24.
 - [ ] **O11 / O12 / O17** — `OcrEngine.MaxImageDimension`; what `Cancel()` does after a timeout;
       how long a whole-screen read takes on the reference machine. Together they decide a 5 s
       guard on `RecognizeAsync` (`SetCompleted` once, never `get()`), which is not built: the
@@ -5332,9 +5437,10 @@ What only a person, a Mac or a measurement can settle:
       days of uptime"; the question stands for the hours in which nothing is captured.)
 - [ ] **O19** — the cost of deciding the small-text path by the content crop instead of the
       region's size (up to 1 MP), and whether it changes any read in the repo's modules.
-- [ ] **Mac, first run:** a `read` from a headless probe — the capture from the `screen-capture`
+- [x] **Mac, first run:** a `read` from a headless probe — the capture from the `screen-capture`
       thread (ScreenCaptureKit's answer while the pump is not the thread waiting), rows from
       Vision's observations, `languages()` and `resolveLanguage("de")`.
+      Done: the macos-26 CI job reads 3 words in 294 ms, triage 2026-10-24.
 - [ ] **Not built yet from the design:** the capture-probe `read` line and its CI assertion
       (informational on Windows first; the probe reads a snapshot with `read` since 2026-09-26,
       but not the live screen); `expect`. Snapshots on the `screen-capture` thread are built
@@ -5365,7 +5471,7 @@ What only a person, a Mac or a measurement can settle:
 - [ ] **`read` with a window region, live:** a minimised game's region answered `"failed"` with
       the client-area reason while the other regions of the same call are read, and a region
       that follows the window when it is resized — neither has run outside the unit tests.
-- [ ] **Measure: do the neural recognitions pile up under `read`?** They still start beside
+- [x] **Measure: do the neural recognitions pile up under `read`?** They still start beside
       `Windows.Media.Ocr` for every small region, on purpose. But `read` is no longer paced by the
       event loop: a 64-region call starts 64 of them at once, all queuing on the one session
       lock, and a region that really needs the fallback waits behind every one of them that will
@@ -5374,6 +5480,8 @@ What only a person, a Mac or a measurement can settle:
       call first. If it matters, a way that keeps the start parallel: hand the thread a flag, set
       when `Windows.Media.Ocr` answers or the blank guard fires, and have `paddle_ocr::recognize`
       return early when it is set — after the preprocessing, before it takes the session lock.
+      Done: one recogniser thread now, and a region no longer wanted is skipped
+      (paddle_ocr.rs:795-967), triage 2026-10-24.
 - [ ] **An exit that hung in a third-party audio DLL** (seen 2026-09-22, not OCR): one of five
       headless runs that exited on their own (a module that fails to load, so nothing is
       pending) never finished exiting. Our exit had completed; the last thread sat in
@@ -5585,6 +5693,8 @@ in this order, and what is not built:
       key across calls. The same reference counts, release thread and releases as `hold`, with
       `maxHold` 10000 ms by default; named `releaseHeld`, not `releaseAll`, beside
       `host.keys.releaseAll`.
+      Deferred by the maintainer on 2026-10-24 (triage): until a module needs to hold a key across
+      calls.
 - [ ] **`host.keywatch` — a keyboard observer that only listens** (decided 2026-09-21: later;
       item d of the small-API design). Today `host.keys.capture` always takes the key away, and
       there is no listen-only mode for ordinary keys. A namespace shaped like
@@ -5600,6 +5710,7 @@ in this order, and what is not built:
       key a low-level hook swallows — ours or a screen reader's — still reaches Raw Input;
       `RIDEV_INPUTSINK` on a message-only window; `hDevice` and `ExtraInformation` of injected
       keys; on macOS the target pid, VoiceOver and the injected source.
+      Deferred by the maintainer on 2026-10-24 (triage): revisited after the hook-watch NVDA test.
 
 ## Screen snapshots, the synchronous core (2026-09-26)
 
@@ -5654,7 +5765,7 @@ What only a person, a Mac or a measurement can settle:
       `display_at` for each point), and whether a capture `frame::plan_points` plans across such
       a gap comes back whole — a clipped one fails the whole call, where the same points read one
       `pixel` at a time would each be answered.
-- [ ] **Decided while planning, for the maintainer to confirm:** the region of `snapshot` and
+- [x] **Decided while planning, for the maintainer to confirm:** the region of `snapshot` and
       `crop` is required and read strictly (no whole-screen default); a template cut from a
       snapshot needs its region wholly inside; `pixels` reads its points strictly (whole
       numbers, where `pixel(x, y)` cuts a fraction); macOS snapshots keep the backing image
@@ -5663,12 +5774,14 @@ What only a person, a Mac or a measurement can settle:
       snapshot held while its module was disabled is made again on the same snapshot. Those two
       together mean a disabled module's held searches keep their snapshots' pixels, uncharged,
       for as long as it stays disabled: bounded in number (nothing new is queued meanwhile), not
-      in time.
-- [ ] **Snapshot reads in the observation line.** `profile`, `cells` and `matchCells` on a
+      in time. Confirmed by the maintainer on 2026-10-24 (triage).
+- [x] **Snapshot reads in the observation line.** `profile`, `cells` and `matchCells` on a
       snapshot do their reduction on the event loop, and it is not timed: the observation line
       counts screen touches, and a read of a snapshot touches none. So a module that reduces a
       large snapshot often stalls the event loop without the log saying so. A field of its own
       for them (`snap_us`, say) would.
+      Done: the reductions run on the image worker (7a76e8d) and are counted apart, triage
+      2026-10-24.
 - [x] **capture-probe** has its snapshot lines (2026-09-26): a `snapshot`, `pixels` of three
       points beside `pixel` of the same points, from the screen and from the snapshot, a `save`
       of the snapshot, a plain `snapshotAsync`, a change wait on a still screen and a
@@ -5755,17 +5868,20 @@ person, a Mac or a measurement can settle:
       (press, change, speech), under load — Melodyne's selection watcher polling beside it. (A
       click held behind a plain `snapshotAsync` was part of this until step 11.3 removed the input
       barrier: a module clicks in the callback now.)
-- [ ] **Decided while planning, for the maintainer to confirm:** the callback is `cb(snap, why, info)`, not `cb(snap, info)` with `info.error`; a newer
+- [x] **Decided while planning, for the maintainer to confirm:** the callback is `cb(snap, why, info)`, not `cb(snap, info)` with `info.error`; a newer
       request with the same key answers the older one `nil` and a reason even when its picture was
       already taken (no `newer` as `host.ocr.read` has); `at` is a `host.now()` time, not a delay;
-      the input barrier covers plain requests and a change wait's first picture without `from` or
+      ~~the input barrier covers plain requests and a change wait's first picture without `from` or
       `at`, not timed requests or waits with `from` (void since step 11.3, 2026-10-10: the
-      maintainer removed the barrier, and nothing holds a module's input for a picture);
+      maintainer removed the barrier, and nothing holds a module's input for a picture)~~;
       `host.ocr.read` on a snapshot cuts each region to the snapshot, and a region with nothing
-      in it fails alone; `recognize` and `recognizeMany` raise for a `snapshot` key instead of
-      ignoring it; `snapshotAsync`'s keys are their own (a text read with the same key never
-      replaces one); per module the oldest request is ended, in the whole application the newest
+      in it fails alone; `recognize` ~~and `recognizeMany`~~ raise for a `snapshot` key instead of
+      ignoring it; ~~`snapshotAsync`'s keys are their own (a text read with the same key never
+      replaces one)~~; per module the oldest request is ended, in the whole application the newest
       refused; the change wait lives in `ocr/change.rs`, beside the thread that drives it.
+      Confirmed by the maintainer on 2026-10-24 (triage); struck what no longer exists: the input
+      barrier (removed in step 11.3), `recognizeMany`, and `snapshotAsync` (folded into
+      `snapshot(opts, cb)` by slice F).
 - [x] **Headless check of the asynchronous half** (debug build, 1920x1080, standard path,
       2026-09-26): a plain `snapshotAsync` of 300x100 was answered 24 ms after the call, its
       picture taken 7 ms after it; `at = host.now() + 150` was taken 170 ms after the call; a
@@ -5778,7 +5894,7 @@ person, a Mac or a measurement can settle:
       one wait were ended by the module's limits and the rest answered with a picture; 33
       callbacks for 33 requests; every mistake raised with its message; the probe's three
       snapshot callbacks came. Release times are not measured.
-- [ ] **Decided while fixing the review of the asynchronous half (2026-09-26), for the
+- [x] **Decided while fixing the review of the asynchronous half (2026-09-26), for the
       maintainer to confirm:** a change that undoes itself before a `settle` spell ends — a
       flash, a cursor that moved off and back — is no change, and the wait looks on (`changed` is
       never said of a picture equal to the baseline); `snap.inputEpoch` is `host.inputEpoch()`
@@ -5792,9 +5908,11 @@ person, a Mac or a measurement can settle:
       (was 3 × and 15 ×); a request ended by a key or a limit gives its bytes back at once; a
       newer keyed request made by a callback in the same delivery batch supersedes an older answer
       in it; a wait with a `from` that cannot be its baseline (not holding every watched region,
-      or taken another way than the module reads) holds input like one without; a read of a
+      or taken another way than the module reads) ~~holds input like one without~~; a read of a
       snapshot counts the part its regions cover in the 256 MB picture budget; desktop
       duplication falling back plans the standard captures of a round as a standard round is.
+      Confirmed by the maintainer on 2026-10-24 (triage); "holds input like one without" struck, the
+      input barrier being gone since step 11.3.
 - [x] **Review of the asynchronous half, fixed** (2026-09-26): the sixteen findings of the
       adversarial review — the points above, the docs of `inputEpoch`, of the effective size limits (a
       change wait at most 11,184,810 pixels on Windows and 4,793,490 points on macOS in an
@@ -5803,7 +5921,7 @@ person, a Mac or a measurement can settle:
       checks the picture for the bubble; a panic anywhere in a round's own code answers every
       request of it; new tests for each, the ones the review found would not fail when their fix
       was reverted included.
-- [ ] **Decided while fixing the final reviews of step 6 (2026-09-26), for the maintainer to
+- [x] **Decided while fixing the final reviews of step 6 (2026-09-26), for the maintainer to
       confirm:** the budget for a window region is answered, not raised — `snapshot`, a
       snapshot's `crop` and `snapshotAsync` answer `nil` and `at the window's current size this
       module's snapshots would hold …` (or the application's sentence), as the size limit is
@@ -5820,6 +5938,7 @@ person, a Mac or a measurement can settle:
       the same, nothing is ended; a refused request gives its charge back at once. The docs'
       menu example waits with `settle = 50` and reads once more 150 ms after the answer, gated on
       the game being in front; the bubble example uses `settle = 40`.
+      Confirmed by the maintainer on 2026-10-24 (triage).
 - [x] **Final reviews of step 6, fixed** (2026-09-26): the unit tests that assumed Windows'
       least time between rounds (8 ms, where macOS has 33 ms) or its estimate factor (1, where
       macOS reserves five times the pixels) derive them now — `over_budget_…`,
@@ -5842,6 +5961,7 @@ person, a Mac or a measurement can settle:
       recogniser's input and `lang`; a call that cancels a module's pending `snapshotAsync` by
       its key without asking again (now only a newer request with the key, which is itself
       taken, or disabling the module ends one).
+      Deferred by the maintainer on 2026-10-24 (triage): until its measurements exist.
 
 ## Menus: each module names its tests, and no timer decides (2026-09-26)
 
@@ -6071,12 +6191,15 @@ decision, hooked into one interface the overlay runtime provides.
       reads cost. The probe (Cmd+Shift+F9) logs a `foreground:` line beside the window it
       probes, saying whether it is that window; and every hold over a menu's window that ends
       with no test seeing the menu logs the runtime's `the keyboard goes to …` line.
-- [ ] **A busy Mac application reads as "no menu" to the accessibility tests.** The host leaves
+- [x] **A busy Mac application reads as "no menu" to the accessibility tests.** The host leaves
       an application that did not answer alone for 5 s (`BUSY_PENALTY`, `backend/macos/ax.rs`)
       and `find` answers false meanwhile, so a menu only the accessibility tests see (a
       standalone Kontakt 8's File menu) closes after two ticks and opens again afterwards.
       Documented under overlay.md's macOS notes; telling "could not ask" from "no menu" needs a
       host change — the maintainer's decision.
+      Done: with the typed errors a busy application answers `nil` and `timeout` (ax.rs:381-385);
+      one stale comment is left at overlay-runtime main.luau:7074-7075, build work, triage
+      2026-10-24.
 - [x] **Decided 2026-09-26: the host's 60 s rule is gone.** On macOS `native_menu_open` treated a
       menu depth that had not moved for 60 s as closed (`STUCK_MENU_MS`, `backend/macos/watch.rs`),
       and the event tap's own pass-through followed it — a timed decision about UI state. Removed:
@@ -6273,24 +6396,29 @@ seven cases (a fresh earlier package, a reused one, a README naming another comm
 itself, the older `-macos` kind, a failed download, none at all); its artifact query through
 gh's own jq against the real runs. Only a run shows:
 
-- [ ] The first run with this change builds the Mac executable: the newest earlier macOS
+- [x] The first run with this change builds the Mac executable: the newest earlier macOS
       download is of the older `-macos` kind, and the reuse step says so and builds. "Build
       the documentation" passes on the Mac, the Package step prints `Docs: N page(s), N
       rewritten` from pwsh, and "Zip the download" lists `docs` and no `build-info.txt`, then
       writes `automation-platform-<version>-<commit>-macos.zip`.
-- [ ] The run's page lists that file as the macOS artifact, and downloading it in a browser
+      Done: every Build run since 689d5b5, triage 2026-10-24.
+- [x] The run's page lists that file as the macOS artifact, and downloading it in a browser
       gives the zip itself: a double-click in Finder makes the `AutomationPlatform` folder, with
       the `.app`, `docs/index.html`, `modules` and `README.txt`, and nothing else zipped inside.
-- [ ] `newer-macos` on 14 and 26: the download step reports a raw file (not an extraction), the
+      Done: run 40051316448, triage 2026-10-24.
+- [x] `newer-macos` on 14 and 26: the download step reports a raw file (not an extraction), the
       unpack step finds the executable runnable, no inner zip, the documentation, and the
       signature verifying (a warning otherwise), and the log header names this run's build.
-- [ ] Windows: the Package step's README check passes, the download has no `build-info.txt`,
+      Done: run 40051316448; macos-14 was replaced by macos-15 with the older functions (1e8a540),
+      triage 2026-10-24.
+- [x] Windows: the Package step's README check passes, the download has no `build-info.txt`,
       and the capability step's log header still names this run's commit.
-- [ ] The first Luau-only push after that reuses: "reused the build from …", "The documentation,
+      Done: windows-build.yml:336-337, green, triage 2026-10-24.
+- [x] The first Luau-only push after that reuses: "reused the build from …", "The documentation,
       into the reused package" runs, "Zip the download" lists `build-info.txt`, `newer-macos`'s
       "Unpack it the way a tester does" prints it with `commit=` and `binary=`, and the
       downloaded README's `Build:` line and the log header say both commits, with no line after
-      the header saying the file was not used.
+      the header saying the file was not used. Done: run 39084811059, triage 2026-10-24.
 - [ ] "Re-run all jobs" on a run: the macOS upload replaces the first attempt's file (overwrite
       by the file's name), and `newer-macos` downloads the new one.
 
@@ -7109,7 +7237,7 @@ in 12.3); Info.plist carries `NSInputMonitoringUsageDescription`. What only a Ma
       `tccutil reset ScreenCapture com.automationplatform.app`: does the next start's request
       then add the entry again, or does it — as reported after "−" (forums thread 818415) —
       need the Mac restarted first?
-- [ ] **Does the key tap need Input Monitoring at all?** It is created active, the kind
+- [x] **Does the key tap need Input Monitoring at all?** It is created active, the kind
       Accessibility governs, and it suppressed keys in the first session (12.7.6) — whether
       Input Monitoring was granted then is unknown, because the line that said so read the
       posting side. Read the new `input monitoring` line on each Mac next to `the event tap
@@ -7117,6 +7245,7 @@ in 12.3); Info.plist carries `NSInputMonitoringUsageDescription`. What only a Ma
       `denied`, it is not needed, and Input Monitoring should stop being `blocking` — a
       `denied` reading puts the startup window in front of the user today. Until measured it
       stays blocking, as it was.
+      Done: no, seen on macOS 26.6 (item 1b above); optional since 9b8aecb, triage 2026-10-24.
 - [ ] **Input Monitoring's button.** With the `input monitoring` line `unknown` (or after
       `tccutil reset ListenEvent com.automationplatform.app`): press "Open the Input Monitoring
       settings". The log's `input monitoring: asked with CGRequestListenEventAccess` line gives
@@ -7340,11 +7469,13 @@ system.
       Mac when its `identify` finds a "Komplete Kontrol" element in the window, with coordinates
       measured on Windows — nobody has seen what Komplete Kontrol publishes inside a Mac DAW
       beyond the third session's "nothing".
-- [ ] **Logic's origin line repeats.** `[daw-hosts] Logic plug-in window '…': the plug-in starts
+      Deferred by the maintainer on 2026-10-24 (triage): not now.
+- [x] **Logic's origin line repeats.** `[daw-hosts] Logic plug-in window '…': the plug-in starts
       at …` comes once per window and size in every module that binds with `daw.all` —
       sforzando, Kontakt and each of its library modules — identical each time, and once more
       from the focus key. Expected: daw-hosts' own VM evaluates no overlay, so a line limited to
       it would come only when the key is pressed.
+      Decided by the maintainer on 2026-10-24 (triage): accepted, as the code comment says.
 
 ## VPS Avenger, stage 1: the runtime's building blocks (2026-09-28)
 
@@ -7422,17 +7553,21 @@ of it has run on either system.
       read for this, not measured against the JUCE Avenger ships; if JUCE ignores more than three
       clicks, the count is too small — detection all the same, never a wait. `ownsPoint` against
       the popup's HWND: `true` expected.
-- [ ] **Avenger's popups — macOS, in Logic and in REAPER.** The same questions, plus: at which
+- [x] **Avenger's popups — macOS, in Logic and in REAPER.** The same questions, plus: at which
       window level; whether the popup becomes the application's focused window (then the overlay
       holds its place over it, as tested); whether a tooltip appears under the parked pointer first
       (an item outside it, or a window the module's function passes over, waits for the next
       answer); what `ownsPoint` with `listed` answers for the popup's own number — `true` expected,
       never run.
-- [ ] **Template images do not follow `O:scale`.** A graphical toggle's, graphical button's or
+      Obsolete: the popups are painted inside the editor, and the drawn test handles them (item 5,
+      "Avenger's own popups on a Mac"), triage 2026-10-24.
+- [x] **Template images do not follow `O:scale`.** A graphical toggle's, graphical button's or
       slider's templates and a landmark are matched at their own `scales`. Stage 1 matches no image;
       a later stage that does, at a zoom other than the one the template was cut at, needs its
       `scales` worked out from the factor.
-- [ ] **Stage 2 documentation, before Avenger's later stages rely on it.** Undocumented in
+      Decided by the maintainer on 2026-10-24 (triage): the documented limit (docs/api/overlay.md,
+      `O:scale`).
+- [x] **Stage 2 documentation, before Avenger's later stages rely on it.** Undocumented in
       docs/api/overlay.md and not used by stage 1: `addTabControl` (a tab's `at`, `hotkey` and
       `hotkeyLabel`; `typeLabel`, `current`, `verticalStep` / `verticalName`,
       `hotkeyKeepsFocus`, `onSelect`) and `gotoTab` / `cycleTab` / `switchTab` /
@@ -7440,6 +7575,7 @@ of it has run on either system.
       `clickOffset`, `state`, `unavailable`, `rawOrigin`); `O.stateGeneration`; `O:adjust`; the
       calibration helpers `captureControl`, `captureRegion`, `captureFull`, `captureAll`. A tab
       control whose tabs are read off the screen (the analysis's C1) is stage 2 work as well.
+      Done: every function named is in docs/api/overlay.md, triage 2026-10-24.
 
 ## VPS Avenger, stage 1: the module (2026-09-28)
 
@@ -7541,7 +7677,7 @@ tester's stage-1 instructions are a text of their own, not in the repository.
       primitive for the display scaling a window is drawn at (a general one, `GetDpiForWindow` on
       Windows, 1 on a Mac, where coordinates are points) would make the display factor known there
       as it is on a panel. Build it once an Avenger on Windows shows the case.
-- [ ] **Avenger's popups as windows** (MENU, the zoom list, the redo list): the `newWindow: a window
+- [x] **Avenger's popups as windows** (MENU, the zoom list, the redo list): the `newWindow: a window
       appeared …` lines; whether one comes to the front (`came to the front after …`: the overlay
       holds its place over it); how many clicks an item took (`clicking … again, n of 4`); whether
       the zoom list's row by its own height agrees with the table's row (the two numbers of the
@@ -7553,6 +7689,8 @@ tester's stage-1 instructions are a text of their own, not in the repository.
       popups belong to that process and every MENU, zoom and redo press ends with "no menu was
       seen" — the `newWindow: a window appeared` lines present in REAPER and missing in Logic answer
       it; the tester text asks for that sentence.
+      Obsolete: the popups are painted inside the editor, and the drawn test handles them (item 5,
+      "Avenger's own popups on a Mac"), triage 2026-10-24.
 - [ ] **A popup a choice left open is closed with a second click on its opener.** The project
       closes the zoom list that way; that MENU's popup closes the same way is JUCE's modal popup,
       not measured. The `[avenger] '…': its popup was left open (…) — clicking its opener again`
@@ -7593,18 +7731,20 @@ tester's stage-1 instructions are a text of their own, not in the repository.
       Whether Avenger's editor is a `JUCE_<hex>` child and the only one (the calibration shot's
       roster), the header line at 100 and 150 % display scaling (`display factor 1.50`) and its
       offsets with and without the (-2, +2), and NVDA in the redo list.
-- [ ] **◀, ▶ and the redo list's right click are the module's own clicks**, with the runtime's
+- [x] **◀, ▶ and the redo list's right click are the module's own clicks**, with the runtime's
       checks repeated (placed through the frame and scale, inside the plug-in, `ownsPoint`),
       because a hotspot has no hook for what its click changed or that it opened a popup. A hotspot
       that says what its click changed once it has (a read-back through `O:watch`) would be a
       runtime building block for every plug-in; lift it when a second module needs the same.
+      Decided by the maintainer on 2026-10-24 (triage): a design note; a read-back hotspot is lifted
+      into the runtime when a second module needs one.
 - [ ] **Hotkeys.** Stage 1 has none: which keys Logic and REAPER leave to a plug-in window is not
       measured. Previous and next preset on keys first, once the Logic keyboard question is
       answered.
 - [ ] **A zoom chosen directly.** The project's tool sets a zoom in one action (`set_zoom`); the
       Zoom control steps one entry at a time, so 50 to 200 % is twenty steps. Home and End, or a
       first step to 100 %, choose that entry of the list in one pick.
-- [ ] **Stage 2 — oscillators and macros.** Runtime, documented first: the tab control with tabs
+- [x] **Stage 2 — oscillators and macros.** Runtime, documented first: the tab control with tabs
       read off the screen (the documentation item above), coarse steps on a stepper (Page Up and
       Down), a right-button double-click, a public "focus this control", a toggle by the share of
       matching pixels in a box (`host.screen.cells`). Module: the OSC tabs (their count from the
@@ -7617,16 +7757,21 @@ tester's stage-1 instructions are a text of their own, not in the repository.
       be detected, and only after measuring whether `host.input.text` or a letter at a time through
       `host.input.send` reaches a JUCE editor at all (the project found neither synthetic keys nor
       the clipboard arrive).
-- [ ] **Stage 3 — drums, the sample editor and Drum SQ**: twelve slots with their columns and menus,
+      Done: built through the page and the ring (2f135a6, 2cd4e7c, d8752fe); turning the ring's
+      knobs stays open under "The ring's knobs turned", triage 2026-10-24.
+- [x] **Stage 3 — drums, the sample editor and Drum SQ**: twelve slots with their columns and menus,
       the kit, the sample editor's tabs, knobs and menus, Drum SQ's length, speed, patterns and
       menus, and the playing pattern said as it changes, on a poll cadence while the Drum SQ tab is
       seen. The sample editor sits low (y 407 at 50 %), off a small screen above about 70 %.
+      Done: 3252a34, triage 2026-10-24.
 - [ ] **Stage 4 — the expansion browser**: a list control in the runtime (items from a function,
       first-letter jumps, "n of N"); expansions, categories and presets read by OCR and clicked by
       the word read, not by the project's tables for one library's size; the wheel, measured;
       **free-text search in a native field from `host.gui`** (the maintainer's decision). The page's
       browser does the reading, the clicking by the word and the wheel since slice 9 (VPS Avenger,
       the page, below); the ring's list control and the search field stay open.
+      Deferred by the maintainer on 2026-10-24 (triage): the ring's list control is dropped unless
+      the Mac tester finds the page's browser not enough.
 - [x] **The preset database** (the maintainer's decisions of 2026-09-28): the module may orient
       itself on the avenger_control project's database, as the project's tool does, and says
       whatever it did not read off the screen marked "from the database". The developer has
@@ -7660,9 +7805,10 @@ tester's stage-1 instructions are a text of their own, not in the repository.
       has not been published and has no licence, and its developer gave the database without
       restriction, to be integrated. The data module is GPL-3.0-or-later like the rest
       (`convert.py` writes it so); its `NOTICE` names where the data comes from.
-- [ ] **The Mac package writes no licence text at all** — not the GPL, and not where the source
+- [x] **The Mac package writes no licence text at all** — not the GPL, and not where the source
       is (the Windows package's `licences\README.txt` does both). Not the database's matter any
       more, but noticed with it.
+      Done: package-macos.sh:353-385 writes it (7f2eeab), triage 2026-10-24.
 - [x] **Credits in the catalog** (2026-10-02). Two expansions, "The Collection" 1 and 2, name their
       categories after producers — VPS's published credits, as Avenger's own browser shows them,
       not anything about who owns what — and Preset info says them ("category …"). The
@@ -7705,7 +7851,7 @@ tester's stage-1 instructions are a text of their own, not in the repository.
       runtime's OCR read-out, which has no hook to change its text, and Preset info, ◀ and ▶ are
       where the catalog's spelling is said. A general `format` for an OCR read-out would do it;
       not built, as nothing here needed the runtime changed.
-- [ ] **Undo does not forget the database's position** — Undo is the runtime's hotspot, which tells
+- [x] **Undo does not forget the database's position** — Undo is the runtime's hotspot, which tells
       the module nothing of its click (the project's tool forgets its position there: "Undo can
       revert a preset change"). A MENU item chosen, the redo list opened and the overlay leaving
       the front do forget it. A stale position shows where a read fails: a step whose name before
@@ -7715,23 +7861,29 @@ tester's stage-1 instructions are a text of their own, not in the repository.
       crosshair in the runtime's calibration shot and its "not available" answer, both stage 1's
       and pinned by its scenarios; or a general after-click hook on the runtime's hotspot button.
       Whether Avenger's undo can change the preset at all is not known.
-- [ ] **A step overtaken by another press says "the preset name cannot be read now"** when its watch
+      Done: Undo calls `DB.forget('Undo')` (vps-avenger main.luau:792-800), triage 2026-10-24.
+- [x] **A step overtaken by another press says "the preset name cannot be read now"** when its watch
       runs out, two seconds after the later step said its name (found while adding the database;
       stage-1 behaviour, kept as it was): the overtaken watch reads nothing more (`nameAfter`) and
       gives up with nothing. An overtaken watch should say nothing — `gen ~= names.gen` in its
       `onGiveUp` — which the database's rule already does for its own part (`decided`).
+      Done: it returns silently (vps-avenger main.luau:479), triage 2026-10-24.
 - [ ] **How long Preset info is**: about 220 characters on average over the catalog, up to 440,
       "from the database" three or four times. Tabs and macros nobody named are said with
       Avenger's own captions ("OSC 3", "MacroBtn 1"), as the tool's Info shows them; saying
       "buttons unnamed" instead, or one marker for the whole answer, is a choice for after the
       tester has heard it (the reader's `default` flag has what it needs).
-- [ ] **What else the catalog gives, later**: the oscillator and macro names as the vocabulary a
+- [x] **What else the catalog gives, later**: the oscillator and macro names as the vocabulary a
       stage-2 read of the tabs is checked against (five or eight words per preset); stage 4's
       lists of categories and presets, and free-text search over all 17,571 names.
+      Done: the OSC names are checked against the catalog (read/open.luau:246), and the browser's
+      lists come from `DB.lists`, triage 2026-10-24.
 - [ ] **Everything the project's tool does** is the goal: what is left of its actions after stages
       1 to 4, then what it never reached (ARP, Step SQ, the effects, the mixer, the modulation
       envelopes, zones). And a standalone Avenger, if there is one and it is wanted: an `O.window`
       binding beside the embedded one, as sforzando has.
+      Deferred by the maintainer on 2026-10-24 (triage): not before the tester has run slices 4 to
+      10.
 
 ## VPS Avenger, the page: the avenger_control panel ported (2026-10-12)
 
@@ -8539,7 +8691,9 @@ Built and tested against the scripted host only (`overlay_avenger_tests.rs`,
       (a name shared, the rows shown only those): reading the categories of both, or more rows,
       could tell them apart; a key typed in another spelling of the one in effect is "unchanged"
       and keeps the spelling stored.
-- [ ] **The next stages**: the ring's knobs turned (above).
+      Deferred by the maintainer on 2026-10-24 (triage): it waits for the tester's steps 4 and 6.
+- [x] **The next stages**: the ring's knobs turned (above).
+      Obsolete: only a pointer to "The ring's knobs turned", triage 2026-10-24.
 
 ## HTML pages, stage 1: `host.gui.webview` and the Windows probe (2026-09-28)
 
@@ -8742,7 +8896,7 @@ maintainer's German test instructions are a text of their own, not in the reposi
       prepare: the part that is waited for is most of a cold start, which is what stage 3's build
       that does not wait at all is for. **Alt+F4** gave the front back to the FX window, and the
       word typed into the search field was still there when F7 brought the page back.
-- [ ] **Notes from that run, for later.** **W2 c:** the log has 26 automatic shows. Windows
+- [x] **Notes from that run, for later.** **W2 c:** the log has 26 automatic shows. Windows
       declined 13 of them (`shown, and Windows DECLINED to bring it to the front`), and in 12 of
       those 13 the page came to the front all the same, 58 to 146 ms later (its foreground event
       in the log); only once, at 1791681014, did the FX window keep the front — the maintainer's
@@ -8758,6 +8912,8 @@ maintainer's German test instructions are a text of their own, not in the reposi
       region and the host's speech in one callback — he heard it once; NVDA may get both and drop
       the first. Which of the two was heard, and whether the host's interrupting speech cancels the
       live region's or one of them never reaches NVDA, is open.
+      Decided by the maintainer on 2026-10-24 (triage): closed; W9 stays open under "The Windows
+      probe, W1–W9".
 - [x] **W3: acting in the plug-in without the round trip** (2026-10-11). Each action that brings
       the plug-in window forward and the page back is heard: NVDA announces the focus leaving the
       page and coming back, and says the selected element of the page again — irritating, the
@@ -9154,6 +9310,8 @@ maintainer's German test instructions are a text of their own, not in the reposi
       act asks `trip:inFront()` after each wait. **Left:** the nested overlays (a page for Kontakt
       inside Komplete Kontrol); a docked plug-in's way back (W7: the probe finds no plug-in window
       there); daw-hosts' "back to the plug-in" as a building block.
+      Deferred by the maintainer on 2026-10-24 (triage): the three leftovers are parked until a
+      module wants a page in a nested or docked plug-in.
       - [ ] **Its verification on Windows** (the port's slice 3), the maintainer, with NVDA in
         REAPER, through a verification patch on ON:EAR's overlay (the session's `rg1-verify.patch`,
         not committed: "Read", "Step", "Back" on a page): a trip — NVDA announces the plug-in's
@@ -9517,9 +9675,11 @@ maintainer's German test instructions are a text of their own, not in the reposi
       objc2's `exception` and `disable-encoding-assertions` as the revision does, so
       check-macos.ps1 keeps needing its clang, and a debug build on a Mac keeps going without
       objc2's encoding checks.
-- [ ] **Stage 5 — Avenger's first page**, after the maintainer's decisions: what a page is for, the
+- [x] **Stage 5 — Avenger's first page**, after the maintainer's decisions: what a page is for, the
       native search field of Avenger's stage 4 or a page, whether two window changes per action are
       acceptable. The Tab ring stays.
+      Obsolete: replaced by the page port ("VPS Avenger, the page"; 447db31 to ac62f49), triage
+      2026-10-24.
 
 ## VoiceOver's AppleScript box, caught (2026-10-01)
 
@@ -9798,6 +9958,8 @@ overlay runtime's focus reads off the event loop. Not now: anything that makes I
       pass, and the first pass is a cost per process — then it can go again, and the event loop's
       first synchronous read needs no warm-up of its own either. `ocr-bench threads` asks the same
       on fixed pictures.
+      Deferred by the maintainer on 2026-10-24 (triage): it waits for the Air's line ("The next
+      ordinary Mac session", above); the warm-up itself is the triage's open question 84.
 - [ ] **The focus reads off the loop, live**: on the Air — the sentence as late as the read, but no
       stall of the keys and no tap switched off by OCR (the `[read]` line's `ms` against the
       `[focus]` line's); on Windows with NVDA — Tab and Return through sforzando's and a Kontakt
@@ -9808,16 +9970,20 @@ overlay runtime's focus reads off the event loop. Not now: anything that makes I
       plug-in entry: an overlay brought to the front by the landmark poll asks its arrival's read
       from a timer, so as a background read — does it wait behind the detection reads of entry
       (up to 4.8 s there) before the arrival is said? The `[read]` line's `ms` says.
-- [ ] **A key between an OCR button's press and its answer drops the press's click** (logged).
+- [x] **A key between an OCR button's press and its answer drops the press's click** (logged).
       Chosen because a click after the user moved on — a menu opening over the control they went
       to — cannot be undone by pressing again; the other choice, the image button's, clicks while
       the overlay is on the same window. The price: Return twice inside one read (on the Air,
       within half a second) clicks once. For the maintainer to confirm, or to turn the other way.
-- [ ] **A press's watch and the arrival over a key**: a hotspot toggle's or graphical toggle's
+      Decided by the maintainer on 2026-10-24 (triage): kept; a click after the user moved on cannot
+      be undone.
+- [x] **A press's watch and the arrival over a key**: a hotspot toggle's or graphical toggle's
       announcement after a press, and the arrival's, are not made when a key of the overlay's own
       came after them; a stepper's (`announceWhenChanged`) still is, while the focus is on it —
       with a held arrow it says each value it sees settle, as it always did. Whether held keys
       there want the same rule is open.
+      Decided by the maintainer on 2026-10-24 (triage): steppers keep speaking while an arrow is
+      held.
 - [ ] **The language of a focus read on a Mac** is now the user's first one Vision reads, where
       `recognize` gave Vision none. Whether `de-DE` reads a plug-in's English labels and values
       ("64", "DEF", "-3.0 dB") as Vision's default did is not measured: no tester has had German
@@ -9833,7 +9999,7 @@ overlay runtime's focus reads off the event loop. Not now: anything that makes I
       one, the line read each time) and two passes at once (1.8 to 2.3 times as long each).
       "One accurate pass about 150 ms" on the Air is worked out (a read less its capture), not
       timed; the slow-read lines time it.
-- [ ] **The modules' own synchronous reads, not moved** — each is not a focus announcement the
+- [x] **The modules' own synchronous reads, not moved** — each is not a focus announcement the
       runtime makes, or needs more than the runtime's pattern:
       - `modules/kontakt/src/actions.luau:265`, `invokeMenuItem`: reads the open file menu to find
         a row, then clicks it, in a timer. Read-then-click, not an announcement; moving it puts the
@@ -9857,6 +10023,8 @@ overlay runtime's focus reads off the event loop. Not now: anything that makes I
         `measureNoteArea`): helpers whose callers want the answer at once; each would be
         restructured around a callback. Melodyne's read-out watcher and its time signature
         (`withBeatsPerBar`) read with a callback since B4.
+      - Obsolete: all of them; `recognize` without a callback waits only in its handler now
+        (docs/api/ocr.md), triage 2026-10-24.
 
 ## Text recognition off the event loop: steps 1 to 3, and a mailbox per module (2026-10-04)
 
@@ -9910,11 +10078,12 @@ kind of place that says how long the first held the loop.
       before. The scripted test host records every member it lacks (`S.missing`) and fails a
       scenario that leaves one, or a hook's raise line, at its end
       (crates/host/src/overlay_runtime_marks_tests.rs).
-- [ ] **NVDA check of step 3, before it is committed** — nothing should sound different, because
+- [x] **NVDA check of step 3, before it is committed** — nothing should sound different, because
       the announcement and both OCR clicks were rewritten onto the mark: Tab through an overlay
       with an OCR value (sforzando's read-outs), a press on an OCR button, an OCREdit (Komplete
       Kontrol's "Save as"). sforzando's part passed (2026-10-04); Komplete Kontrol's "Save as" is
       still to be tried — its scan at start takes long.
+      Obsolete: what is left is "What NVDA session A left of step 11.3's check", triage 2026-10-24.
 - [x] **Step K, the key scope and the menu flag per module** (the mailbox plan's first step,
       b0-final.md): `host.keys.scope` and `menuOpen` are the calling module's own (the VM's:
       a code dependency's count for the module that depends on it), kept by the host
@@ -10091,13 +10260,15 @@ kind of place that says how long the first held the loop.
       meanwhile; the memo is written by the answer, so a read that failed or never answered is asked
       again. Melodyne 0.1.2, on `com.platform.overlay >= 0.2`; scenarios in
       overlay_melodyne_tests.rs.
-- [ ] **NVDA check of step B4, before it is committed**: the same sentences as before — a note
+- [x] **NVDA check of step B4, before it is committed**: the same sentences as before — a note
       walked with the arrows and its cents changed, a move in the note area said under a tool with
       no read-out (under Time, "right, one beat" or "right, one step"), a tool switch whose name
       the read-outs do not talk over and after which no sentence about the new tool's read-outs
       comes; Tab, the arrows and Alt+F answer as before. An answer that comes after the tool
       switch's hold, and the keys that no longer wait behind the watcher, are the tests'
       (overlay_melodyne_tests.rs).
+      Obsolete: covered by the later NVDA checks (Melodyne 0.1.5, step 11.3's session A, step V2),
+      triage 2026-10-24.
 - [ ] **Melodyne's reading after a tool switch still waits** (found building B4):
       `reportFieldsAfterSwitch` reads both boxes and the wide field in its `host.timer.after`
       handler, for the log only, so Melodyne's keys wait behind those two reads after every tool
@@ -10151,7 +10322,7 @@ kind of place that says how long the first held the loop.
       W2), but a task it waits for that the worker has already keeps the priority it was sent with.
       A priority the worker reads at its next batch (an atomic in the task) would let the key's
       wait go before the polls; whether it matters is for session C's Melodyne check to say.
-- [ ] **`matchCells` checks and decodes its states on the event loop** (review of W2): in a
+- [x] **`matchCells` checks and decodes its states on the event loop** (review of W2): in a
       handler, as with `matchCellsAsync`, every state is read out of the VM, checked and decoded
       from hex at the call, before the wait — 0.4 ms for 100 states of 360 cells, 4.4 ms for 1024,
       29 ms at the limits (1024 states of 4096 cells) on a release build (screen.md's `matchCells`
@@ -10164,6 +10335,8 @@ kind of place that says how long the first held the loop.
       Slice F gave `matchCells` its callback form, and both forms still check and decode the
       states at the call, so a bad digit raises there in both; moved to the worker, it would be
       answered `nil` and why to a callback and raised at the resume of a wait.
+      Decided by the maintainer on 2026-10-24 (triage): the decoding stays at the call, so a bad
+      digit raises at the caller's line.
 - [ ] **What the note area costs the event loop now**: the capture is off it, and since
       `host.screen.profile` takes a callback (below) so is the reduction of its 910x522 profile;
       the profile's tables and the comparison are not, and since W2 `bodyBetween`'s small row
@@ -10355,7 +10528,7 @@ kind of place that says how long the first held the loop.
       window the tap noted at the press is what decides, as for every capture. Provoked only where a
       module is busy while its overlay lets a key go: the log line is the evidence, or a probe step
       written for it.
-- [ ] **The rest, as a mailbox per module** (b0-final.md, wbr-final.md): step 11, the waits of a
+- [x] **The rest, as a mailbox per module** (b0-final.md, wbr-final.md): step 11, the waits of a
       read moved off the loop and the input barrier removed; and step 12, the places that still
       cannot wait raising, once CI's `could not wait here` check has stayed green since B5. With
       them the `host.screen` calls that capture become waits (wbr-final.md, W1a to W4). Done on
@@ -10873,6 +11046,7 @@ kind of place that says how long the first held the loop.
       messages), overlay.md, settings.md, module-runtime-and-lifecycle.md (threads, a handler
       waits), the index, macos-port.md, the frame-sharing design note, the feasibility study,
       the in-memory templates note. Nothing audible changes.
+      Done: every step named is built (2da1d39 to e502058), triage 2026-10-24.
 - [ ] **NVDA check of step V1 (session B, with V2 and T2)** — nothing should sound different.
       Kontakt with a CSS library in REAPER: a hotspot toggle pressed (its state said after the
       press, as before); the snapshot camera and its dropdown with the bar shut and open (the bar
@@ -10968,17 +11142,20 @@ kind of place that says how long the first held the loop.
       Down click the old tool's variant icons. The same shape as Kontakt's view after F10, and the
       same cure: after its own click the module knows which tool it chose, and reads again at each
       question until the strip shows it. A Melodyne refinement, after the W slices.
-- [ ] **Step 12a never ran on a Mac** (type-checked only, with the ocr-bench build): the read
+- [x] **Step 12a never ran on a Mac** (type-checked only, with the ocr-bench build): the read
       thread's ladder with `counts` in place of `!on_event_loop` (the pass made only for the
       counts, the `gave up … rather than keep the reads behind it waiting` line), and ocr-bench's
       own ladder. The next ocr-bench run in CI says whether `prod`'s figures stayed where they
       were.
-- [ ] **Step W1a never ran on a Mac** (type-checked only): a handler's `host.screen.snapshot`
+      Done: ran on the Mac runners, with the same Vision passes before and after (runs 38015202773
+      and 40051316448), triage 2026-10-24.
+- [x] **Step W1a never ran on a Mac** (type-checked only): a handler's `host.screen.snapshot`
       taken by ScreenCaptureKit on the `screen-capture` thread, as a `snapshotAsync`'s is, and the
       handler going on with it; the capture probe's `snapshot 200x60 waited … ms` line in the
       macOS jobs, which the next CI run reads; a calibrating run's press waiting for its menu shot
       before the opener's click.
-- [ ] **Step W1b never ran on a Mac** (type-checked only): a handler's `host.screen.pixel` and
+      Done: "snapshot 200x60 waited 133 ms" on macos-15, 76 ms on macos-26, triage 2026-10-24.
+- [x] **Step W1b never ran on a Mac** (type-checked only): a handler's `host.screen.pixel` and
       `pixels` read on the `screen-capture` thread through `capture::points` — `capture_rgba` at
       point resolution, one ScreenCaptureKit capture per planned rectangle, a single point black
       with `pixel()`'s line when it cannot be read — while `pixel()`'s tile stays with the event
@@ -10986,6 +11163,7 @@ kind of place that says how long the first held the loop.
       snapshot's at 10,10 agree` lines in the macOS jobs, which the next CI run shows (a `DIFFER`
       is a warning, not a failure: point resolution against a picture drawn down); the probes of
       Kontakt 8 in a DAW, which wait for their capture now.
+      Done: "pixel(10,10) waited 130 ms", "pixels of 6 points waited 133 ms", triage 2026-10-24.
 - [ ] **Step W2 never ran on a Mac** (type-checked only): a handler's `host.screen.profile` taken
       by ScreenCaptureKit on the `screen-capture` thread at the display's own resolution and drawn
       down — so its colours may differ a little from those of a profile made where it cannot wait,
@@ -11003,24 +11181,27 @@ kind of place that says how long the first held the loop.
       borrow image_search.rs): a search's PNG decoded on the image worker and a handle's picture
       made there; nothing in it is platform-specific, and the capture probe searches no template, so
       the first sign is a library overlay that is found as before.
-- [ ] **Step W4 never ran on a Mac** (type-checked only): `MacBackend`'s four reads asking the
+- [x] **Step W4 never ran on a Mac** (type-checked only): `MacBackend`'s four reads asking the
       screen guard, and `capture::points`, `frames_for_round` and the image worker's
       `capture_many` asking the variant no scope lets be (the first two asked the text guard
       before); the next CI run's capture probe on macOS 15, 14 and 26 should show no `[loop]
       screen capture on the event loop` line, and its `ScreenCaptureKit did not answer` check now
       reads "on the capture thread". A Mac module's `host.screen` call where it cannot wait
       captures on the pump thread as before, inside its scope.
+      Done: CI fails on "[loop] screen capture on the event loop", and it is green, triage
+      2026-10-24.
 - [ ] **Slice F never ran on a Mac** (type-checked only): `pixel` and `pixels` given a callback
       read on the `screen-capture` thread through ScreenCaptureKit, as a handler's are; a
       callback's `info.time` from that thread and from the image worker; the capture probe's
       `snapshot with a callback` line in the macOS jobs, which the next CI run reads.
-- [ ] **Step 12b never ran on a Mac** (type-checked only, with check-macos.ps1): `MacBackend`
+- [x] **Step 12b never ran on a Mac** (type-checked only, with check-macos.ps1): `MacBackend`
       without its four reads of the screen on the calling thread, and `capture.rs` without
       `pixel()` and its tile — a `host.screen` call where it cannot wait raises, so the pump
       thread captures nothing; `capture::points` answers a single point that cannot be read black
       with the line once a session, as `pixel()` did. The next CI run's capture probe on macOS 15,
       14 and 26 should show neither a `cannot wait` error nor a `[loop] screen capture on the event
       loop` line, and its `pixels of 6 points waited … ms` line as before.
+      Done: no "cannot wait" error in run 40051316448, triage 2026-10-24.
 - [ ] **NVDA check of step W1b (session C)** — nothing should sound different; announcements that
       read a pixel come about one tick later. Kontakt with a CSS library: Tab through the hotspot
       toggles and press one (its state said after the press); the header's status toggles: Tab,
@@ -11327,10 +11508,12 @@ Follow-ups this work found and did not take on:
       Done 2026-10-12 with "UIA on a thread of its own" above, as written here, with one change: a
       "no" to "is it a Komplete Kontrol" is asked again once per epoch rather than kept, off the loop,
       since a Komplete Kontrol whose tree is not up yet answers no the instant it appears.
-- [ ] **Luau's interrupt against a module that never ends.** Decide first whether there may be
+- [x] **Luau's interrupt against a module that never ends.** Decide first whether there may be
       a limit at all.
+      Done: the module watchdog (7bff1a9; vm_guard.rs:108-111, 834), triage 2026-10-24.
 - [ ] **A real thread per module** ("way A"), only if measurements after the mailbox and the
       `host.screen` waits ask for it.
+      Deferred by the maintainer on 2026-10-24 (triage): kept parked.
 - [ ] **An OCR stepper waits for a whole recognition before its step.** Photograph the value
       before the step instead of recognising it.
 - [ ] **Three existing timers decide what is said** (the review's F12): ON:EAR's look after a tile
@@ -11437,13 +11620,16 @@ time limit; a module past either is stopped until the next start.
       and each module's load time go back here.
 - [ ] **Set the `[cpu]` thresholds** (`CPU_LINE_PERCENT` 10 %, `CPU_LINE_CALLBACK` 250 ms, both
       provisional in vm_guard.rs) after the first measurements.
-- [ ] **Decide: loads are held to the same 2 s / 10 s.** A legitimately slow load would now fail
+- [x] **Decide: loads are held to the same 2 s / 10 s.** A legitimately slow load would now fail
       ("stopped while loading"). Check the first build's `[cpu]` lines for load costs, Avenger's
       above all.
-- [ ] **Decide: data-only dependents of a looping library stay on.** Today every library is a
+      Decided by the maintainer on 2026-10-24 (triage): kept; the load times come back with the NVDA
+      test of G1 and G2 above.
+- [x] **Decide: data-only dependents of a looping library stay on.** Today every library is a
       `code_module`, so a loop in daw-hosts' own code turns off daw-hosts and nearly every overlay
       at once; a module that depends on one for data only would not run its code, and stays on.
-- [ ] **Decide (changed after the reviews): turning a stopped module on builds it afresh**, as
+      Confirmed by the maintainer on 2026-10-24 (triage).
+- [x] **Decide (changed after the reviews): turning a stopped module on builds it afresh**, as
       a reload does, instead of turning on the same VM as the stop left it — which the G1 build
       did, with the stopped VM's owed `onDeactivate` run first. A stop ends a callback anywhere:
       the overlay runtime's `_deactivate` sets `active = false` before it unregisters its hotkeys,
@@ -11451,34 +11637,43 @@ time limit; a module past either is stopped until the next start.
       back to the OS while the overlay was not in front — swallowing keys in every program. The
       owed `onDeactivate` is gone with it (the rebuilt VM has no overlay active), and so is the
       design's alternative test `an_overlay_activated_again_without_a_deactivate_comes_up_whole`.
-- [ ] **Decide: ticking the library of a library's stop turns the whole group on** (each built
+      Confirmed by the maintainer on 2026-10-24 (triage); reusing the VM can leave hotkeys that
+      swallow keys.
+- [x] **Decide: ticking the library of a library's stop turns the whole group on** (each built
       afresh), and ticking one of the others turns on only it. The alternative was a tick per row;
       for the overlay runtime that is about a dozen.
-- [ ] **Decide: a stopped module's settings do not run** — they are stored, wait in its mailbox
+      Decided by the maintainer on 2026-10-24 (triage): kept.
+- [x] **Decide: a stopped module's settings do not run** — they are stored, wait in its mailbox
       rather than be refused by the stopped VM, and go with it when it is built afresh, which
       reads them as they are then; **a reload keeps it off** (built as designed).
+      Confirmed by the maintainer on 2026-10-24 (triage).
 - [ ] **Decide: controller presses during a stall** that ends in a stop: dropped like keys, or
       delivered late as now?
-- [ ] **Decide: the budgets in a debug build.** The host's own work counts on a callback's
+- [x] **Decide: the budgets in a debug build.** The host's own work counts on a callback's
       clocks, and a debug build runs it many times slower (one full-region image match took 12 s
       there), so a callback the release build finishes in a fraction of a second can be stopped
       under `run-dev.ps1` without `-Release`. Built: the same 2 s / 10 s in both, and the docs and
       the probe say to judge real modules on a release build. Alternative: larger budgets under
       `debug_assertions`.
-- [ ] **Keys pressed a moment before the stall** that waited in the same batch as the event that
+      Done: the maintainer decided on 2026-10-05 to keep the same limits, triage 2026-10-24.
+- [x] **Keys pressed a moment before the stall** that waited in the same batch as the event that
       stalled are dropped with the stall's (`drop_queued_input` takes the whole queue); the docs
       say so. Dropping only keys stamped after the slice began would need the hook's `kb.time` in
       `Taken` and the slice's start in tick terms.
-- [ ] **A memory error while `open` builds a handler's arguments** is reported as an error, not
+      Decided by the maintainer on 2026-10-24 (triage): accepted.
+- [x] **A memory error while `open` builds a handler's arguments** is reported as an error, not
       a stop; the module is stopped at its next event. Only a module that keeps its VM full and
       catches the error meets it (G1 open point). A page's message, decoded in
       `webview_lua::open_event` (up to 1 MiB of JSON, the largest of these arguments), is dropped
       instead, with a `[gui]` line that says its VM had no memory left to decode it.
-- [ ] **mlua's nil error for a memory error**: Luau calls a protected call's error handler for a
+      Decided by the maintainer on 2026-10-24 (triage): accepted.
+- [x] **mlua's nil error for a memory error**: Luau calls a protected call's error handler for a
       memory error too, and mlua's then returns nothing, so the error reaching the host is at times
       `RuntimeError("<nil>")` (seen through a Rust callback, in five runs of six of the pin test on
       Windows). The guard takes a nil error from a VM with less than 1/64 of its limit free for a
       memory error. Recheck when mlua is unpinned.
+      Decided by the maintainer on 2026-10-24 (triage): closed; the reminder belongs in the mlua pin
+      comment in crates/host/Cargo.toml.
 - [ ] **A sleep in the middle of a callback**: whether the wall clock (`Instant`) counts the
       time the machine was asleep was not measured; if it does, a callback running at the moment
       of a sleep would be stopped on waking. Rare (callbacks last milliseconds); the `[system]`
@@ -11487,12 +11682,15 @@ time limit; a module past either is stopped until the next start.
       pass-through flag, the speech sender, a second start that offers to end the frozen copy.
       It builds on `vm_guard`'s `slice_seq`, `slice_start_ns` and `call` (the watchdog already
       arms such a slice and logs it; nothing fires until the call returns).
-- [ ] **Stop by yield** in a handler instead of the sticky raise (a-guard.md 2.4, Y8), if a
+- [x] **Stop by yield** in a handler instead of the sticky raise (a-guard.md 2.4, Y8), if a
       module's `pcall` seeing the stop ever matters.
-- [ ] **A memory stop's sticky raise in a VM that is still full** can come as Luau's own
+      Decided by the maintainer on 2026-10-24 (triage): closed; reopened if a module author reports
+      it.
+- [x] **A memory stop's sticky raise in a VM that is still full** can come as Luau's own
       out-of-memory rather than the stop's text, until the settle collects the VM's garbage: the
       module is stopped either way, and only an outer callback of the same VM sees the other text.
       Collecting at the stop itself would cost the event loop a full collection at once.
+      Decided by the maintainer on 2026-10-24 (triage): accepted.
 - [ ] **`guard-bench`** (g12-design.md 8), not built: the time from arming to the stop, idle and
       under load, as a packaged command the Intel Mac runner (which runs no tests) can run, with a
       `GUARD BENCH:` line in CI.
@@ -11778,3 +11976,5 @@ time limit; a module past either is stopped until the next start.
   - **Purpose:** delivers exactly the parameters that the WindowMatcher ([docs/window-matching.md](docs/window-matching.md)) needs per OS, as well as coordinates/colors for calibration. Cross-platform (Win + macOS).
   - Built on the first-class primitives themselves (`host.window`/`host.a11y`/`host.screen`/cursor) → dogfooding the API.
   - **Related:** the *overlay calibrator* (above) builds on this — it records the inspected coordinates/regions/colors/images and stores them as module assets.
+  - Deferred by the maintainer on 2026-10-24 (triage): until someone asks; if built, a general
+    `host.element.atPoint(x, y, cb)`.
