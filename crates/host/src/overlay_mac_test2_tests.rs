@@ -299,8 +299,10 @@ rawset(T.host.window, "ownsPoint", function() return true end)
 S.windows = { T.INST }
 S.listed = { T.MAIN, T.LOGIC, T.LOAD_PANEL }
 S.inside = false
+-- S.insideAt: where the drawn menu answers now (default 300,200 100x80); another place after the item's
+-- click is the item taken.
 local inside = { name = "inside", cheap = true,
-  test = function(_, answer) answer(S.inside and { x = 300, y = 200, w = 100, h = 80 } or false) end }
+  test = function(_, answer) answer(S.inside and (S.insideAt or { x = 300, y = 200, w = 100, h = 80 }) or false) end }
 -- The overlay in Logic's plug-in window, its MENU chosen in: "Load preset", the item opening the panel.
 function T.avenger()
   T.at(T.LOGIC)
@@ -401,6 +403,266 @@ fn nothing_is_brought_back_to_a_plugin_window_or_while_the_dialog_is_listed() {
     run_dialog(&scenario("T.MAIN", "{ T.MAIN, T.LOGIC, T.LOAD_PANEL }", false, true));
     run_dialog(&scenario("T.MAIN", "{ T.MAIN, T.LOGIC }", true, true));
     run_dialog(&scenario("T.MAIN", "{ T.MAIN, T.LOGIC }", false, false));
+}
+
+/// O:afterDialog (since 0.14), for a press of the overlay's own outside a trip (finding 18, VPS
+/// Avenger's ring): called in the item's onDone, Logic's panel coming forward is the dialog — the
+/// overlay holding its place over it — and nothing bounds the wait once it was seen; fn(o, true) runs
+/// once, on the turn after the plug-in's window is in front again with the overlay on it. With no
+/// dialog within 8 seconds, fn(o, false). A second call drops the first, whose fn is never told; the
+/// overlay out of the front, `not_in_front` and nothing waits; a call with no function raises.
+#[test]
+fn after_dialog_waits_for_the_dialog_an_item_opened_and_the_plugin_again() {
+    run_dialog(r##"
+        local S = T.S
+        local o = T.avenger()
+        local told = {}
+        local ok, err
+        assert(T.call("key", function()
+          ok, err = o:chooseMenuItem({ label = "MENU", at = { 10, 10 }, menuItem = { 5, 5 }, retries = 0,
+            onDone = function(m, chosen)
+              if not chosen then return end
+              local okD, errD = m:afterDialog(function(ov, seen)
+                told[#told + 1] = { ov = ov, seen = seen, active = ov.active }
+              end)
+              assert(okD == true and errD == nil, T.what(errD))
+            end })
+        end) == "Ran")
+        assert(ok == true, "opened: " .. T.what(err))
+        S.inside = true
+        T.tick(1)
+        S.inside = false
+        assert(T.count("[menu] 'Avenger': waits for the dialog that comes next — a window of pid") == 1, T.dump())
+        T.panelUp(o)
+        assert(T.count("[menu] 'Avenger': a dialog came forward — 'Load Preset...' (Logic Pro X)") == 1, T.dump())
+        -- The user's time in the panel: past the 8 seconds, nothing told.
+        T.run(9000)
+        assert(#told == 0, "nothing bounds the wait once the dialog was seen: " .. #told)
+        -- It closes; the window of the press brought back, the overlay on it.
+        S.windows = { T.INST }
+        S.listed = { T.MAIN, T.LOGIC }
+        S.focusLands = function() S.front, S.chain = T.LOGIC, { T.LOGIC } end
+        T.show(T.MAIN, { T.MAIN })
+        T.tick(2)
+        T.land()
+        T.tick(1)
+        assert(o.active and #told == 1 and told[1].seen == true and told[1].active and told[1].ov == o,
+          "told once, back on the plug-in: " .. #told .. " " .. T.dump())
+        assert(T.count("[menu] 'Avenger': 'Inst 1' (Logic Pro X) is in front again after the dialog") == 1, T.dump())
+        T.tick(5)
+        T.event()
+        T.tick(1)
+        assert(#told == 1, "once: " .. #told)
+        -- No dialog: fn(o, false) at 8 seconds, not before.
+        local seenNone = {}
+        assert(o:afterDialog(function(_, seen) seenNone[#seenNone + 1] = seen end) == true)
+        T.run(7800)
+        assert(#seenNone == 0, "not before 8 seconds")
+        T.run(300)
+        assert(#seenNone == 1 and seenNone[1] == false and T.count("[menu] 'Avenger': no dialog came within 8000 ms") == 1,
+          T.dump())
+        -- A second call drops the first.
+        local a, b = {}, {}
+        o:afterDialog(function(_, seen) a[#a + 1] = seen end)
+        o:afterDialog(function(_, seen) b[#b + 1] = seen end)
+        assert(T.count("ms ago is dropped — another begins") == 1, T.dump())
+        T.run(8100)
+        assert(#a == 0 and #b == 1 and b[1] == false, "the second told alone: " .. #a .. " " .. #b)
+        -- Raises for a mistake; not in front, nothing waits.
+        assert(not pcall(o.afterDialog, o, "fn"), "raises")
+        o:_deactivate()
+        local okN, errN = o:afterDialog(function() error("never") end)
+        assert(okN == false and T.is(errN, "not_in_front", "the overlay is not in front"), T.what(errN))
+        T.run(8100)
+    "##);
+}
+
+/// O:afterDialog called in an `onDone` of a choice with its `retries` at the default, which comes
+/// once the item was taken and the dialog may be in front already: the window noted is the
+/// overlay's own, the one the press was made in, never the dialog. "taken": the panel comes over the
+/// menu, which the menu test then answers in another place, while the overlay holds its place over
+/// the panel — seen at the call, and fn(o, true) once the plug-in is back, never the plug-in taken
+/// for the dialog; the same where the menu test answers so only on a later tick, with no window
+/// event after it. "left": the menu gone and nothing held over the panel, the overlay leaves the
+/// front for it — the call in that onDone is accepted, the panel seen, and fn(o, true) once the
+/// overlay is in front on the plug-in again.
+#[test]
+fn after_dialog_in_a_choices_on_done_notes_the_window_of_the_press() {
+    let scenario = |how: &str| {
+        let left = how == "left";
+        let later = how == "taken later";
+        format!(r##"
+        local S = T.S
+        local o = T.avenger()
+        local told, chosen = {{}}, {{}}
+        assert(T.call("key", function()
+          o:chooseMenuItem({{ label = "MENU", at = {{ 10, 10 }}, menuItem = {{ 5, 5 }},
+            onDone = function(m, ok, err)
+              chosen[#chosen + 1] = tostring(ok) .. " " .. tostring(m.active)
+              if not ok then return end
+              local okD, errD = m:afterDialog(function(ov, seen)
+                told[#told + 1] = {{ seen = seen, active = ov.active }}
+              end)
+              assert(okD == true and errD == nil, T.what(errD))
+            end }})
+        end) == "Ran")
+        S.inside = true
+        T.tick(1)
+        assert(#S.clicks == 2, "the opener and the item: " .. T.dump())
+        if {left} then
+          -- The menu gone, and the panel not among the windows the menu test lists: nothing held.
+          S.inside = false
+          T.show(T.LOAD_PANEL, {{ T.LOAD_PANEL }})
+          T.tick(1)
+          assert(not o.active, "out of the front: " .. T.dump())
+          assert(T.count("the overlay left the front after it") == 1, T.dump())
+        else
+          -- The panel over the menu, which the menu test now answers in another place — at once, or
+          -- on a later tick of the menu tests, with no window event after it.
+          if not {later} then S.insideAt = {{ x = 400, y = 300, w = 100, h = 80 }} end
+          S.windows = {{ T.INST, T.PANEL }}
+          T.show(T.LOAD_PANEL, {{ T.LOAD_PANEL }})
+          T.tick(1)
+          if {later} then
+            assert(#chosen == 0, "not taken yet")
+            S.insideAt = {{ x = 400, y = 300, w = 100, h = 80 }}
+            T.tick(1)
+          end
+          S.inside, S.insideAt = false, nil
+          assert(o:_heldOnMenu(), "held over the panel: " .. T.dump())
+          assert(T.count("test 'inside' sees another window in its place") == 1, T.dump())
+        end
+        assert(#chosen == 1 and string.find(chosen[1], "^true"), table.concat(chosen, ","))
+        assert(T.count("[menu] 'Avenger': waits for the dialog that comes next — a window of pid 6000 other than "
+          .. "'Inst 1' (Logic Pro X)") == 1, T.dump())
+        assert(T.count("[menu] 'Avenger': a dialog came forward — 'Load Preset...' (Logic Pro X)") == 1, T.dump())
+        T.run(9000)
+        assert(#told == 0, "nothing bounds the wait once the dialog was seen: " .. #told)
+        -- The panel closes, and the plug-in has the keyboard again.
+        S.windows = {{ T.INST }}
+        S.listed = {{ T.MAIN, T.LOGIC }}
+        T.show(T.LOGIC, {{ T.LOGIC }})
+        T.tick(2)
+        assert(o.active and #told == 1 and told[1].seen == true and told[1].active, "told once, back on the plug-in: "
+          .. #told .. " " .. T.dump())
+        assert(T.count("[menu] 'Avenger': 'Inst 1' (Logic Pro X) is in front again after the dialog") == 1, T.dump())
+        assert(T.count("after the dialog, not on") == 0, T.dump())
+        T.run(9000)
+        assert(#told == 1, "once: " .. #told)
+        "##)
+    };
+    run_dialog(&scenario("taken"));
+    run_dialog(&scenario("taken later"));
+    run_dialog(&scenario("left"));
+}
+
+/// The press's menu as a window of its own is no dialog — held over before its item was clicked
+/// (the first answer placing nothing), or its item clicked in the very round that sees it come and
+/// begins the hold: O:afterDialog called at the item's click (retries 0), the overlay holding its
+/// place over the menu, notes the window of the press and does not take the menu for the dialog;
+/// nor called before the press, while the menu is held over and nothing is clicked in it yet. The
+/// menu closes with nothing after it: fn(o, false) at the bound, and no dialog seen. With Logic's
+/// panel after the menu: the panel is the dialog, and fn(o, true) once the plug-in is back.
+#[test]
+fn after_dialog_does_not_take_the_presss_own_menu_window_for_the_dialog() {
+    let scenario = |panel: bool, early: bool, before: bool| {
+        format!(r##"
+        local S = T.S
+        local MENU_WIN = {{ id = 33, layer = 0, class = "", x = 300, y = 200, w = 120, h = 90 }}
+        local MENU_FRONT = {{ id = 33, title = "", class = "AXWindow/AXUnknown/", app = T.MAC_LOGIC,
+          bounds = {{ x = 300, y = 200, w = 120, h = 90 }}, client = {{ x = 300, y = 200, w = 120, h = 90 }} }}
+        local o = T.avenger()
+        local told = {{}}
+        -- Early: the answers place nothing until S.place, so the hold over the menu begins before the
+        -- click.
+        local answers = 0
+        S.place = not {early}
+        local function item()
+          answers += 1
+          if not S.place then return false, "not yet" end
+          return {{ 5, 5 }}
+        end
+        local function wait(m) assert(m:afterDialog(function(_, seen) told[#told + 1] = seen end) == true) end
+        assert(T.call("key", function()
+          if {before} then wait(o) end
+          o:chooseMenuItem({{ label = "MENU", at = {{ 10, 10 }}, menuItem = item, retries = 0,
+            onDone = function(m, ok)
+              if ok and not {before} then wait(m) end
+            end }})
+        end) == "Ran")
+        -- The menu, a window of Logic's, held over; its item clicked in it.
+        S.windows = {{ T.INST, MENU_WIN }}
+        T.show(MENU_FRONT, {{ MENU_FRONT }})
+        T.tick(1)
+        if {before} then
+          assert(#S.clicks == 1 and o:_heldOnMenu() and answers >= 1, "held over the menu, its item not clicked yet: "
+            .. #S.clicks .. " " .. answers)
+          T.event()
+          T.tick(1)
+          assert(T.count("a dialog came forward") == 0, "the menu is no dialog before its click: " .. T.dump())
+        end
+        S.place = true
+        T.tick(2)
+        assert(#S.clicks == 2, "the opener and the item: " .. answers .. " " .. T.dump())
+        assert(o:_heldOnMenu(), "held over the menu")
+        assert(T.count("[menu] 'Avenger': waits for the dialog that comes next — a window of pid 6000 other than "
+          .. "'Inst 1' (Logic Pro X)") == 1, T.dump())
+        T.tick(2)
+        assert(T.count("a dialog came forward") == 0, "the menu is no dialog: " .. T.dump())
+        if {panel} then
+          S.windows = {{ T.INST, T.PANEL }}
+          T.show(T.LOAD_PANEL, {{ T.LOAD_PANEL }})
+          T.tick(2)
+          assert(T.count("[menu] 'Avenger': a dialog came forward — 'Load Preset...' (Logic Pro X)") == 1, T.dump())
+        end
+        S.windows = {{ T.INST }}
+        S.listed = {{ T.MAIN, T.LOGIC }}
+        T.show(T.LOGIC, {{ T.LOGIC }})
+        T.tick(2)
+        assert(o.active, "back on the plug-in: " .. T.dump())
+        if {panel} then
+          assert(#told == 1 and told[1] == true, "told after the panel and the plug-in: " .. #told)
+        else
+          assert(#told == 0, "nothing yet: " .. #told)
+          T.run(8100)
+          assert(#told == 1 and told[1] == false and T.count("a dialog came forward") == 0, "no dialog: " .. T.dump())
+        end
+        "##)
+    };
+    run_dialog(&scenario(false, true, false));
+    run_dialog(&scenario(true, true, false));
+    run_dialog(&scenario(false, false, false));
+    run_dialog(&scenario(false, true, true));
+}
+
+/// A hold of keys on one plug-in window ends "left" once the overlay is in front on another it also
+/// matches — a second instance of the plug-in — where the hold's keys, scoped to the first, would
+/// never come: onEnd told once, with why, and nothing held any more. A recheck on the same window
+/// ends nothing.
+#[test]
+fn a_hold_of_keys_ends_when_the_overlay_is_in_front_on_another_window() {
+    run_dialog(r##"
+        local S = T.S
+        local INST2 = { id = 22, title = "Inst 2", class = "AXWindow/AXDialog/", app = T.MAC_LOGIC,
+          bounds = { x = 300, y = 40, w = 900, h = 700 }, client = { x = 300, y = 40, w = 900, h = 700 } }
+        S.listed = { T.MAIN, T.LOGIC, INST2 }
+        local o = T.avenger()
+        local ends = {}
+        assert(o:holdKeys({ keys = { "PageUp", "PageDown" }, onKey = function() end,
+          onEnd = function(_, how, info) ends[#ends + 1] = how .. ": " .. tostring(info.why) end }) == true)
+        T.event()
+        T.tick(1)
+        assert(#ends == 0 and o._hold, "the same window: " .. table.concat(ends, ","))
+        T.show(INST2, { INST2 })
+        T.tick(1)
+        assert(o.active and o:hwnd() == 22, "in front on the other: " .. T.dump())
+        assert(#ends == 1 and ends[1] == "left: the overlay is in front on another window (22), not on the one its "
+          .. "hold began on (21)", table.concat(ends, ","))
+        assert(not o._hold and not S.holding["PageUp"] and not S.holding["PageDown"], "nothing held")
+        assert(T.count("[keys] 'Avenger': its hold of PageUp, PageDown ends (left)") == 1, T.dump())
+        T.tick(2)
+        assert(#ends == 1, "once")
+    "##);
 }
 
 /// C10, for the ring's knobs (the maintainer's decision of 2026-10-24): `O:holdKeys` takes keys for

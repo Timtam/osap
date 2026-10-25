@@ -3764,8 +3764,9 @@ end
 -- `onKey` and does not activate the focused control. They come to `onKey(o, key, mods, press)`, a
 -- handler of the module's where a read may wait; `true` from it ends the hold. `onEnd(o, how,
 -- info)` is told once, whatever ends it: "ended" (onKey's `true`; `info.key`), "left" (the overlay
--- left the front — another window, the page key's page, the module disabled; `info.why`) or
--- "replaced" (another hold began). The keys go back after it. Nothing is said: the module says
+-- left the front — another window, the page key's page, the module disabled — or is in front on
+-- another window it also matches, which the hold's keys, scoped to the window it began on, would
+-- never reach; `info.why`) or "replaced" (another hold began). The keys go back after it. Nothing is said: the module says
 -- what its hold is for. The trip's own hand-over (trip:handOver) is the same for a trip.
 function Overlay:holdKeys(spec)
   local who = ("overlay '%s': holdKeys"):format(tostring(self.label))
@@ -3800,8 +3801,10 @@ function Overlay:holdKeys(spec)
     return false, fail("hold_not_in_front")
   end
   if self._hold then self:_holdEnd("replaced", {}) end
-  -- `tokens`: the hold's capture of each key, by its name (host.keys.normalize).
-  local h = { keys = byKey, list = table.clone(keys), onKey = spec.onKey, onEnd = spec.onEnd, tokens = {} }
+  -- `tokens`: the hold's capture of each key, by its name (host.keys.normalize); `hwnd`: the window it
+  -- began on (O:hwnd), which _recheck ends it "left" off.
+  local h = { keys = byKey, list = table.clone(keys), onKey = spec.onKey, onEnd = spec.onEnd, tokens = {},
+    hwnd = self:hwnd() }
   -- Pinned before the keys are taken, as in _activate.
   host.keys.scope(true)
   for _, k in ipairs(keys) do
@@ -3849,8 +3852,8 @@ function Overlay:_holdKey(h, key, mods, press)
 end
 
 -- Hold `self._hold` ends `how` (see holdKeys): onEnd told, once, then its keys released, and the
--- overlay's own captures of them taken again — not when it ends with the front ("left"), whose
--- _deactivate lets every key go next.
+-- overlay's own captures of them taken again while it is still in front — not when it ends with the
+-- front ("left" from _deactivate), whose _deactivate lets every key go next.
 function Overlay:_holdEnd(how, info)
   local h = self._hold
   if not h then return end
@@ -3861,7 +3864,7 @@ function Overlay:_holdEnd(how, info)
     host.log.info(("[keys] '%s': holdKeys' onEnd failed: %s"):format(tostring(self.label), tostring(err)))
   end
   for _, tok in pairs(h.tokens) do pcall(host.keys.release, tok) end
-  if how ~= "left" then self:_retakeOwnKeys(h.keys) end
+  if self.active then self:_retakeOwnKeys(h.keys) end
 end
 
 -- Hold `h`'s capture of its key `name` made again, over the overlay's capture of it just made
@@ -4664,6 +4667,8 @@ function Overlay:_activate()
   end
   pages.arrived(self, false)
   announceArrival(self)
+  -- Back after a dialog of its own (O:afterDialog), through an ordinary activation.
+  if self._dialog then self:_dialogLook() end
 end
 
 -- A RESUMED focus on a control that has hidden itself since: moved to the visible control that
@@ -5004,9 +5009,19 @@ function Overlay:_recheck()
     if ((o and o.id) or false) ~= self._hotkeyOriginId then
       self:_syncControlHotkeys()
     end
+    -- A hold of keys (O:holdKeys) belongs to the window it began on: on another, its keys — scoped
+    -- to the first — never come, and what the module holds there (a knob's button) is the first
+    -- window's. It ends "left", as with the front.
+    local h = self._hold
+    if h and (o and o.id) ~= h.hwnd then
+      self:_holdEnd("left", { why = ("the overlay is in front on another window (%s), not on the one its hold "
+        .. "began on (%s)"):format(tostring(o and o.id), tostring(h.hwnd)) })
+    end
   end
   -- A trip of its page may have arrived with this look (see "An overlay's page").
   if self.active then pages.rechecked(self) end
+  -- A wait for a dialog of the overlay's own (O:afterDialog) may have seen it come, or go.
+  if self._dialog then self:_dialogLook() end
 end
 
 -- ── Declaration checks ───────────────────────────────────────────────────────
@@ -8489,10 +8504,17 @@ function Overlay:_menuLeave()
   st.open = false
   for _, t in ipairs(st.tests) do resetMenuTest(t) end
   st.escape, st.pressed, st.since, st.seenThisTick = nil, nil, nil, false
+  local press = st.press
   st.press, st.hold = nil, nil
   st.lookUntil = 0
   menuHook(self, "forget")
-  if self._pick then self:_pickEnd("left") end
+  if self._pick then
+    -- An item clicked is chosen now, and an onDone that asks O:afterDialog is still about the press:
+    -- the window it was made in is the overlay's own (afterDialogWindow).
+    self._leavingPress = press
+    self:_pickEnd("left")
+    self._leavingPress = nil
+  end
 end
 
 -- ── Choosing an item ─────────────────────────────────────────────────────────
@@ -8821,10 +8843,17 @@ function Overlay:_pickEnd(word, detail)
 end
 
 -- An item of the press's menu was clicked: a window that comes to the front after it, and is held, is
--- that item's — a dialog — and not the menu (_menuHold, _menuRefocus).
+-- that item's — a dialog — and not the menu (_menuHold, _menuRefocus, _dialogLook). The window in
+-- front at the click is noted (`itemClickedIn`): where the menu is a window of its own, the item is
+-- clicked in it, maybe in the very round that sees it come and begins the hold over it — that
+-- window is the menu still, never the item's dialog.
 function Overlay:_menuItemClicked()
   local st = self._menu
-  if st and st.press then st.press.itemClicked = true end
+  if st and st.press then
+    st.press.itemClicked = true
+    local a = host.window.active()
+    st.press.itemClickedIn = a and a.id
+  end
 end
 
 -- What is drawn at (x, y) over menu `m`, for control `c`: nil and how it was asked when it is the
@@ -9392,8 +9421,9 @@ function Overlay:_menuHold()
         -- _menuRefocus) — not a dialog the menu leads to, which the hold moves on to below.
         p.menuWindow, p.menuFront = a.id, a
         -- Held first after an item of the menu was clicked: the item's window, a dialog, not the
-        -- menu (the window given back after it, _menuRefocus).
-        p.dialog = p.itemClicked == true
+        -- menu (the window given back after it, _menuRefocus) — unless the item was clicked in this
+        -- very window, in the round just asked: the menu's own.
+        p.dialog = p.itemClicked == true and p.itemClickedIn ~= a.id
         -- Nor is it the dialog a trip of its page waits for (trip:afterDialog).
         pages.menuHeld(self, a.id)
       end
@@ -9553,6 +9583,119 @@ function Overlay:_menuHoldEnds()
   self:_menuKeysBack()
   -- A trip of its page waiting for this menu to close may have arrived (trip:afterMenu).
   pages.rechecked(self)
+end
+
+-- ── After a dialog, outside a trip (O:afterDialog, since 0.14) ──
+-- "The dialog that comes next, then the plug-in again, then fn" for a press of the overlay's own,
+-- as trip:afterDialog is for a trip of its page: VPS Avenger's ring chooses Load preset in its
+-- MENU, the user loads a preset in the DAW's file panel, and the ring says the name loaded once the
+-- plug-in is back (the second Mac test, 2026-10-24, finding 18). The call notes the overlay's own
+-- window (afterDialogWindow), not merely the one in front: a choice's onDone can come while the
+-- overlay holds its place over the dialog that covered the item ("taken"), or as it leaves the
+-- front for it ("left"), when the window in front is the dialog. From the call on, a window of that
+-- window's application, other than it, that is in front or comes to the front is the dialog — the
+-- overlay holding its place over it, or leaving the front for it — unless it is the window the
+-- overlay held its place over for its press's menu before an item of it was clicked, or the one the
+-- item was clicked in. Once seen, nothing bounds the wait: the user's time in a file dialog is
+-- theirs. fn(o, true) once the overlay is in front again on its window, holding its place over
+-- nothing; fn(o, false) when no dialog came within MENU_LOOK_MS, a bound on looking. Dropped, and
+-- logged, when the overlay comes to the front on another window after the dialog, and when another
+-- call begins a wait. Looked at at the call, by every recheck of the overlay and at its activation
+-- (_dialogLook); fn runs on the module's next turn, as a handler, and the overlay is asked again
+-- there.
+
+-- The overlay's own window and its application's pid, for O:afterDialog, or nil: not in front. As
+-- the overlay leaves the front in a choice's onDone (_menuLeave), the window its press was made in;
+-- in front, the window in front — unless that is another window of the press's application, the
+-- press's menu or a window that came after it, over which it holds its place, or nothing (a Mac's
+-- moment between a popup and its owner), when it is the press's window again.
+local function afterDialogWindow(self)
+  if self.away then return nil end
+  local p = self._leavingPress
+  if p then return p.front, p.pid end
+  if not self.active then return nil end
+  local a = host.window.active()
+  p = self._menu and self._menu.press
+  if p and (a == nil or (a.id ~= p.window and a.app and a.app.pid == p.pid)) then return p.front, p.pid end
+  return a, a and a.app and a.app.pid
+end
+
+function Overlay:afterDialog(fn)
+  if type(fn) ~= "function" then
+    error(("overlay '%s': afterDialog takes a function(overlay, seen), got %s"):format(tostring(self.label),
+      type(fn)), 2)
+  end
+  local a, pid = afterDialogWindow(self)
+  if not (a and pid) then
+    host.log.info(("[menu] '%s': afterDialog — the overlay is not in front; nothing waits"):format(
+      tostring(self.label)))
+    return false, fail("dialog_not_in_front")
+  end
+  if self._dialog then
+    host.log.info(("[menu] '%s': the wait for a dialog since %d ms ago is dropped — another begins"):format(
+      tostring(self.label), host.now() - self._dialog.since))
+  end
+  local d = { fn = fn, window = a.id, pid = pid, front = a, seen = false, since = host.now() }
+  self._dialog = d
+  host.log.info(("[menu] '%s': waits for the dialog that comes next — a window of pid %s other than %s — "
+    .. "for up to %d ms"):format(tostring(self.label), tostring(pid), frontName(a), MENU_LOOK_MS))
+  -- A dialog in front already — the one the overlay holds its place over, or leaves the front for — is
+  -- seen now: no recheck may come before it closes.
+  self:_dialogLook()
+  host.timer.after(MENU_LOOK_MS, function()
+    if self._dialog ~= d or d.seen then return end
+    self._dialog = nil
+    host.log.info(("[menu] '%s': no dialog came within %d ms"):format(tostring(self.label), MENU_LOOK_MS))
+    local ok, err = pcall(fn, self, false)
+    if not ok then
+      host.log.info(("[menu] '%s': afterDialog's fn failed: %s"):format(tostring(self.label), tostring(err)))
+    end
+  end)
+  return true
+end
+
+-- The wait of O:afterDialog looked at, at the call, at a recheck of the overlay and at its
+-- activation: a dialog seen, or the overlay in front again on the window of the call after it — fn
+-- then on the next turn, where it is asked again — or in front on another window, which drops the
+-- wait. Costs one host.window.active(), memoised per epoch, while a wait stands; nothing otherwise.
+function Overlay:_dialogLook()
+  local d = self._dialog
+  if not d or d.telling then return end
+  local a = host.window.active()
+  if not d.seen then
+    if not (a and a.id ~= d.window and a.app and a.app.pid == d.pid) then return end
+    -- The press's menu, a window of its own held before an item of it was clicked or the one its
+    -- item was clicked in, is no dialog.
+    local p = self._menu and self._menu.press
+    if p and ((not p.dialog and p.menuWindow == a.id) or p.itemClickedIn == a.id) then return end
+    d.seen = true
+    host.log.info(("[menu] '%s': a dialog came forward — %s, window id %s of pid %s, %d ms after the wait "
+      .. "began"):format(tostring(self.label), frontName(a), tostring(a.id), tostring(d.pid), host.now() - d.since))
+    return
+  end
+  if not self.active or self.away or (self._menu and self._menu.hold) or not a then return end
+  if a.id ~= d.window then
+    self._dialog = nil
+    host.log.info(("[menu] '%s': in front on %s after the dialog, not on %s — the wait for it is dropped")
+      :format(tostring(self.label), frontName(a), frontName(d.front)))
+    return
+  end
+  d.telling = true
+  host.timer.after(0, function()
+    if self._dialog ~= d then return end
+    local now = host.window.active()
+    if not (self.active and not self.away and not (self._menu and self._menu.hold) and now and now.id == d.window) then
+      d.telling = false
+      return
+    end
+    self._dialog = nil
+    host.log.info(("[menu] '%s': %s is in front again after the dialog, %d ms after the wait began"):format(
+      tostring(self.label), frontName(d.front), host.now() - d.since))
+    local ok, err = pcall(d.fn, self, true)
+    if not ok then
+      host.log.info(("[menu] '%s': afterDialog's fn failed: %s"):format(tostring(self.label), tostring(err)))
+    end
+  end)
 end
 
 -- ── An overlay's page ────────────────────────────────────────────────────────
@@ -11065,7 +11208,11 @@ end
 
 -- The page opened from the overlay in front (§2.2, case 4): the place noted, `open` asked to post
 -- the page its state, the place checked again after it — `open` may wait for a read — and the page
--- shown beside W.
+-- shown beside W. With `openLater` (since 0.14) `open` is handed `answer`, and the show waits for
+-- it: called once, at once or from a read's callback, its value as `open`'s return would be — the
+-- place checked again then, and nothing shown when the key was pressed again meanwhile (P.opening,
+-- the latest press's number), or the page came to the front, or a trip began. Nothing bounds the
+-- wait: an `open` that never answers shows nothing, and the next key asks afresh.
 function pg.openPage(P)
   local o = P.owner
   local mark = o:here()
@@ -11080,21 +11227,65 @@ function pg.openPage(P)
     origin = { id = c.id, class = c.class, bounds = pg.rectOf(c.bounds), stay = c.stay },
     entry = entryOfControl[c],
   }
-  local okOpen, v = pcall(P.spec.open, o)
+  -- `open`'s answer `v`: false shows nothing; otherwise the place checked again, and the show.
+  -- Whether the page was asked to show.
+  local function show(v)
+    if v == false then
+      pg.plog(P, "open answered false — nothing shown")
+      return false
+    end
+    local still, why = o:stillHere(mark, { place = true })
+    if not still then
+      pg.plog(P, "not shown — %s", tostring(why))
+      return false
+    end
+    pg.showAtKey(P, place)
+    return true
+  end
+  if not P.spec.openLater then
+    local okOpen, v = pcall(P.spec.open, o)
+    if not okOpen then
+      pg.plog(P, "open failed: %s", tostring(v))
+      return
+    end
+    show(v)
+    return
+  end
+  P.openSeq = (P.openSeq or 0) + 1
+  local seq = P.openSeq
+  P.opening = seq
+  local t0 = host.now()
+  local answered = false
+  local function answer(v)
+    if answered then
+      pg.plog(P, "open answered twice — the second answer is ignored")
+      return
+    end
+    answered = true
+    if P.opening ~= seq then
+      pg.plog(P, "open answered %d ms after the key, and the key was pressed again since — not shown", host.now() - t0)
+      return
+    end
+    P.opening = nil
+    if P.trip or P.away then
+      pg.plog(P, "open answered %d ms after the key, with the page in front or a trip under way — not shown again",
+        host.now() - t0)
+      return
+    end
+    pg.plog(P, "open answered %d ms after the key", host.now() - t0)
+    -- Nothing shown, nor waiting to be: the page key's hold, if it had one, goes (pg.fromWindow).
+    if not show(v) and not P.asked and not P.wanted then pg.keyHoldOut(P) end
+  end
+  pg.plog(P, "open answers later — the show waits for its answer")
+  local okOpen, ret = pcall(P.spec.open, o, answer)
   if not okOpen then
-    pg.plog(P, "open failed: %s", tostring(v))
-    return
+    if P.opening == seq then P.opening = nil end
+    answered = true
+    pg.plog(P, "open failed: %s", tostring(ret))
+  elseif ret == false and not answered then
+    -- `false` returned is the answer: nothing shown.
+    answer(false)
   end
-  if v == false then
-    pg.plog(P, "open answered false — nothing shown")
-    return
-  end
-  local still, why = o:stillHere(mark, { place = true })
-  if not still then
-    pg.plog(P, "not shown — %s", tostring(why))
-    return
-  end
-  pg.showAtKey(P, place)
 end
 
 -- THE PAGE FROM THE WINDOW IN FRONT (since 0.13). The page key with the overlay not in front opens
@@ -11147,8 +11338,9 @@ function pg.fromWindow(P)
   pg.plog(P, "the page key with the overlay not in front, in its plug-in's window '%s': the overlay comes "
     .. "up on the DAW's panel there, and the page opens", tostring(a.title))
   pg.openPage(P)
-  -- Nothing shown, nor waiting to be: the hold goes, and the ordinary match decides again.
-  if not P.asked and not P.wanted then pg.keyHoldOut(P) end
+  -- Nothing shown, nor waiting to be: the hold goes, and the ordinary match decides again. A later
+  -- answer of `open`'s (openLater) still to come keeps it until then.
+  if not P.asked and not P.wanted and not P.opening then pg.keyHoldOut(P) end
   return true
 end
 
@@ -11386,6 +11578,7 @@ local ADD_PAGE_FIELDS = {
   { "describe", "function" }, { "key", "string" }, { "open", "function" }, { "onMessage", "function" },
   { "notHere", "string", true }, { "onReady", "function", true }, { "onClose", "function", true },
   { "onShown", "function", true }, { "onBack", "function", true }, { "prime", "table", true },
+  { "openLater", "boolean", true },
 }
 local PAGE_METHODS = { "show", "hide", "post", "isShown", "prepare", "close" }
 
@@ -11443,8 +11636,8 @@ function Overlay:addPage(spec)
   for _, f in ipairs(ADD_PAGE_FIELDS) do known[f[1]] = true end
   for k in pairs(spec) do
     if not known[k] then
-      error(("overlay '%s': addPage has no field '%s' (it has describe, key, open, onMessage, notHere, "
-        .. "onReady, onClose, onShown, onBack and prime)"):format(who, tostring(k)), 2)
+      error(("overlay '%s': addPage has no field '%s' (it has describe, key, open, openLater, onMessage, "
+        .. "notHere, onReady, onClose, onShown, onBack and prime)"):format(who, tostring(k)), 2)
     end
   end
   for _, f in ipairs(ADD_PAGE_FIELDS) do

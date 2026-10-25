@@ -5,7 +5,7 @@ sidebar_position: 0
 
 # All functions
 
-Every call the platform offers a module, in one place. 242 entries.
+Every call the platform offers a module, in one place. 243 entries.
 
 A module reaches the host through the global `host` table, which is always there. The overlay is a module like any other and is imported: `local O = host.require("com.platform.overlay")`.
 
@@ -181,6 +181,7 @@ Controls a module defines over a plug-in window, walked with Tab and spoken alou
 | [`O:addStepper(opts)`](overlay#o-addstepper) | Appends a **value changed with Left and Right**, where the module knows how to change it. |
 | [`O:addTabControl(opts)`](overlay#o-addtabcontrol) | Appends a **tab control** |
 | [`O:adjust(dir)`](overlay#o-adjust) | One step of the **focused** control's value, as Left (`-1`) and Right (`+1`) make it |
+| [`O:afterDialog(fn)`](overlay#o-afterdialog) | "The dialog that comes next, then the plug-in again, then `fn`" |
 | [`O:afterIdle(key, ms, fn)`](overlay#o-afteridle) | Runs `fn` **once**, `ms` after the last call carrying the same `key`. |
 | [`O:attach(matcher, opts)`](overlay#o-attach) | Binds the overlay as a **standalone** context |
 | [`O:attachEmbedded(spec, opts)`](overlay#o-attachembedded) | Binds the overlay as an **embedded** context: active while keyboard focus is inside a plug-in hosted in a DAW. |

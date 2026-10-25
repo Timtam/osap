@@ -288,6 +288,9 @@ return {
     -- ── O:holdKeys, at the call ──
     hold_not_in_front = { code = "not_in_front", message = "the overlay is not in front", entries = { "o-holdkeys" } },
 
+    -- ── O:afterDialog, at the call ──
+    dialog_not_in_front = { code = "not_in_front", message = "the overlay is not in front", entries = { "o-afterdialog" } },
+
     -- ── O:pageKey ──
     key_parse = { code = "invalid", message = "… is not a key spec", entries = { "o-pagekey" } },
     key_tap = {

@@ -87,7 +87,13 @@ name = "Overlay runtime"
 # a new window of the plug-in over the item's point is the item taken; and O:holdKeys takes keys for
 # the module while the overlay is in front, Return included. A module that calls O:holdKeys depends
 # on "com.platform.overlay >= 0.13".
-version = "0.13.0"
+# 0.14.0 (the second Mac test of VPS Avenger, its rest): O:afterDialog, the dialog an overlay's own
+# press opened and the plug-in in front again after it, outside a trip; and O:addPage's
+# `openLater`, a page's `open` that answers later, its show waiting for that answer. A module that
+# uses either depends on "com.platform.overlay >= 0.14". And O:holdKeys' hold ends "left" where the
+# overlay comes up on another window it also matches, and a press's menu window an item was clicked
+# in is no item's dialog.
+version = "0.14.0"
 # Loaded into the VM of every module that depends on it, so its functions
 # (O.new, O.container, the Overlay methods) are reachable via host.require.
 code_module = true

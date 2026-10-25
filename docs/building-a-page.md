@@ -710,7 +710,7 @@ Steps 4 to 6 built the round trip by hand, for a window no overlay lives on. A m
 **The module's part.**
 
 - `describe(on)` describes the page, handing the runtime its three events: `onMessage = on.message`, `onReady = on.ready`, `onClose = on.close`. It is yours because the page's `file` is relative to your folder.
-- `open(o)` posts what the page shows, then where its focus goes — the order of Step 5: the state, then the error or the focus, then the show (the runtime shows after `open` returns).
+- `open(o)` posts what the page shows, then where its focus goes — the order of Step 5: the state, then the error or the focus, then the show (the runtime shows after `open` returns). With `openLater = true` (runtime 0.14) `open(o, answer)` may ask its reads with callbacks and return at once; the page is shown when it calls `answer()` ([O:addPage](api/overlay.md#o-addpage), **A later answer**).
 - `onMessage(o, m)` is every message from the page. For an action in the plug-in it calls `o:inPlugin{ … }`; for "Back" it calls `o:pageBack()`.
 - A trip's `act(o, trip)` works in the plug-in as any handler of the overlay does — it reads, clicks, reads again — and asks `trip:inFront()` after every wait, before it clicks or reads. It ends with `trip:done(result)`. `after(o, result)` posts the result, and returns a sentence for when the page does not come back.
 

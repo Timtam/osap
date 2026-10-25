@@ -453,6 +453,80 @@ fn open_that_waited_while_the_user_moved_shows_nothing() {
     "##);
 }
 
+/// `openLater` (since 0.14, for VPS Avenger's page key, the second Mac test's A19): `open` is handed
+/// `answer`, returns at once, and the page is shown only when `answer()` comes — from a later turn,
+/// the place checked again then — with onShown told as at the key. `answer(false)` shows nothing,
+/// and so does `false` returned; a second call is ignored. The key pressed again before the first
+/// answer: the first answer comes too late and shows nothing, the second's shows. The user gone
+/// elsewhere before the answer: nothing shown. A spec field other than a boolean raises.
+#[test]
+fn open_later_shows_the_page_when_its_answer_comes() {
+    run(r##"
+        local S = T.S
+        T.show(T.W, T.IN)
+        local answers = {}
+        T.synth({ page = { openLater = true, open = function(o, answer)
+          T.ok(type(answer) == "function", "open is handed its answer")
+          answers[#answers + 1] = answer
+          o.page:post({ kind = "state" })
+        end } })
+        S.pg.ready = true
+        local from = #S.order
+        T.key()
+        T.ok(#S.pg.shows == 0 and #answers == 1 and T.since(from) == "post state", "nothing shown yet: " .. T.since(from))
+        T.ok(T.count("[page] 'Synth': open answers later — the show waits for its answer") == 1, T.dump())
+        T.queued()
+        answers[1]()
+        T.ok(#S.pg.shows == 1 and S.pg.shows[1].focus == true and #S.shown == 1 and S.shown[1].ok == true,
+          "shown at the answer: " .. #S.pg.shows)
+        T.ok(T.count("[page] 'Synth': open answered ") == 1, T.dump())
+        answers[1]()
+        T.ok(#S.pg.shows == 1 and T.count("open answered twice — the second answer is ignored") == 1, "twice: ignored")
+    "##);
+    run(r##"
+        local S = T.S
+        T.show(T.W, T.IN)
+        local answers = {}
+        T.synth({ page = { openLater = true, open = function(o, answer) answers[#answers + 1] = answer end } })
+        S.pg.ready = true
+        T.key()
+        answers[1](false)
+        T.ok(#S.pg.shows == 0 and T.count("open answered false — nothing shown") == 1, "false: nothing shown")
+        -- The key again before the answer: the first answer is too late.
+        T.key()
+        T.key()
+        answers[2]()
+        T.ok(#S.pg.shows == 0 and T.count("and the key was pressed again since — not shown") == 1, T.dump())
+        answers[3]()
+        T.ok(#S.pg.shows == 1, "the latest answer shows")
+    "##);
+    run(r##"
+        local S = T.S
+        T.show(T.W, T.IN)
+        local answers = {}
+        T.synth({ page = { openLater = true, open = function(o, answer)
+          answers[#answers + 1] = answer
+          if S.refuse then return false end
+        end } })
+        S.pg.ready = true
+        S.refuse = true
+        T.key()
+        T.ok(#S.pg.shows == 0 and T.count("open answered false — nothing shown") == 1, "false returned is the answer")
+        answers[1]()
+        T.ok(#S.pg.shows == 0, "and its later call counts for nothing")
+        S.refuse = false
+        T.key()
+        T.show(T.OTHER)
+        T.queued()
+        answers[2]()
+        T.ok(#S.pg.shows == 0 and T.count("[page] 'Synth': not shown — the overlay is") == 1, "gone elsewhere: " .. T.dump())
+        local other = T.O.new("Other")
+        local raised, why = pcall(other.addPage, other, T.pageSpec({ openLater = "yes" }))
+        T.ok(not raised and string.find(tostring(why), "addPage's `openLater` must be a boolean, got string", 1, true),
+          tostring(why))
+    "##);
+}
+
 /// A page not ready when the key is pressed is shown from its `onReady` — with `open` asked afresh —
 /// only while the overlay is still on that control; after the user moved to another plug-in first,
 /// it is not shown.
