@@ -84,10 +84,7 @@ cargo build --release
 The **first** build compiles wxWidgets from source: the `wxdragon-sys` build script
 downloads the pinned wxWidgets 3.3.4 zip (47,309,846 bytes, about 45 MB), checks it against
 its SHA-256, and builds it with CMake. Expect
-several minutes and a network connection. Later builds reuse it. Cargo also fetches wry, the web
-view, from its Git repository at a fixed revision until a release carries the fix the Mac needs
-(`crates/host/Cargo.toml` says which); an offline build needs that repository in Cargo's Git
-cache from an earlier build.
+several minutes and a network connection. Later builds reuse it.
 
 Then, for something a person can actually run:
 
@@ -561,8 +558,8 @@ knowing which one catches what:
   `#[link]`, or an undefined Carbon symbol shows up — and the only place the GUI layer is
   compiled for macOS at all, since the check crate deliberately excludes it. Before it builds,
   it asks Cargo (`cargo metadata --locked`) which wry each slice resolves to, and stops unless
-  it is the revision that carries wry's activation fix (#1866, at `66cdfa1`) or a release from
-  0.57.1 on: wry 0.57.0 activates the application for every web view it builds.
+  it is a release from 0.57.1 on, the first with wry's activation fix (#1866): wry 0.57.0
+  activates the application for every web view it builds.
   It does not run on its own: every push to `main` that touches code runs the **Build** workflow
   (`.github/workflows/build.yml`), which runs it beside the Windows build, so a run that
   succeeds holds both downloads — `automation-platform-<version>-<commit>-macos.zip` and

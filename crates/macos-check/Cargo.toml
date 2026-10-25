@@ -78,11 +78,11 @@ dispatch2 = "0.3"
 ort = { version = "=2.0.0-rc.10", default-features = false, features = ["std", "ndarray", "tracing", "load-dynamic"] }
 ndarray = "0.16"
 tracing = { version = "0.1", default-features = false, features = ["log"] }
-# `host.gui.webview` on the Mac: as host's macOS table, wry from the revision that carries its
-# activation fix (#1866), under the name host gives it; host's comment says why. Its objc2
-# `exception` feature compiles one Objective-C file in a build script, the one C compile of this
-# check, which is why check-macos.ps1 looks for a clang.
-wry-mac = { package = "wry", git = "https://github.com/tauri-apps/wry", rev = "66cdfa1d76265cd9a5b1773087d7eec98918adc5", default-features = false }
+# `host.gui.webview` on the Mac: as host's macOS table, wry from 0.57.1 on, the first release with
+# its activation fix (#1866); host's comment says why. Its objc2 `exception` feature compiles one
+# Objective-C file in a build script, the one C compile of this check, which is why
+# check-macos.ps1 looks for a clang.
+wry = { version = "0.57.1", default-features = false }
 
 [target.'cfg(target_os = "macos")'.dependencies.objc2-foundation]
 version = "0.3"

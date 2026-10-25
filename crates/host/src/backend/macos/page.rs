@@ -137,7 +137,6 @@ use objc2_web_kit::{
     WKContentRuleList, WKContentRuleListStore, WKContentWorld, WKWebView, WKWebViewConfiguration,
     WKWebsiteDataStore,
 };
-use wry_mac as wry;
 use wry::raw_window_handle::{AppKitWindowHandle, HandleError, HasWindowHandle, RawWindowHandle, WindowHandle};
 use wry::{
     http, BackgroundThrottlingPolicy, NewWindowResponse, PageLoadEvent, PermissionResponse, WebView,
@@ -1125,8 +1124,10 @@ pub(crate) fn build(spec: &BuildSpec, rules: &WKContentRuleList) -> Result<Nativ
     let number = u32::try_from(window.windowNumber()).unwrap_or(0);
 
     // A fresh configuration every build: a scheme handler cannot be registered twice in one, and
-    // AppKit raises if it is. A data store that keeps nothing, no windows opened by script, and
-    // the rule list.
+    // AppKit raises if it is; and wry (from 0.57.1 on) installs its `ipc` handler and the
+    // initialisation scripts, the shim among them, only on a controller no other live web view
+    // uses (#1876). A data store that keeps nothing, no windows opened by script, and the rule
+    // list.
     // SAFETY: WebKit's own objects, made and set up on the main thread.
     let config = unsafe {
         let config = WKWebViewConfiguration::new(mtm);
@@ -1242,7 +1243,7 @@ pub(crate) fn build(spec: &BuildSpec, rules: &WKContentRuleList) -> Result<Nativ
             PermissionResponse::Deny
         })
         .with_devtools(false)
-        // Built hidden from the keyboard: this revision of wry then neither makes the web view the
+        // Built hidden from the keyboard: wry (from 0.57.1 on) then neither makes the web view the
         // first responder nor activates the application (#1866). Showing does both, when asked.
         .with_focused(false)
         .with_visible(true)

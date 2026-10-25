@@ -624,9 +624,13 @@ and to build it as soon as the usage allows.
       past `platform.post`, and wry aborts on the message without a body (`did_receive` calls
       `msg.body()`, which objc2-web-kit declares non-null). Neither can be taken from the page: wry
       defines `window.ipc` frozen and not configurable, and WebKit's handler is the page's. Report it
-      to wry (the body read as nullable, a message without one dropped) and take the fix with the
-      move to 0.57.1; until then a module's page must not call the channel itself. On Windows what
-      wry makes of a non-string message is not measured.
+      to wry (the body read as nullable, a message without one dropped). wry 0.57.1 does not change
+      it (read 2026-10-25): `WryWebViewDelegate::did_receive`
+      (src/wkwebview/class/wry_web_view_delegate.rs) is the same at 66cdfa1 and in 0.57.1 and
+      still calls `msg.body()` without a check, objc2-web-kit 0.3.2, still the newest, declares
+      `body` non-null, and no wry issue or pull request asks for it (GitHub search, 2026-10-25). So
+      a module's page must still not call the channel itself. On Windows what wry makes of a
+      non-string message is not measured.
 - [ ] **A data dependency's arrays: plain frozen copies?** `host.require` and `host.tryRequire`
       hand a legacy data dependency's lists out with the conversion's protected metatable (mlua's
       array metatable, `__metatable = false`), so `getmetatable` answers `false` and
@@ -10498,7 +10502,7 @@ maintainer's German test instructions are a text of their own, not in the reposi
       data lines say of a page's clipboard (`navigator.clipboard`), `isSecureContext` and WebRTC,
       read from CI's artifacts and written into gui.md's macOS block of what a page is served,
       which says until then that it is not written down yet.
-- [ ] **wry 0.57.1 on both platforms, the day it is on crates.io** (its release, #1852, was still
+- [x] **wry 0.57.1 on both platforms, the day it is on crates.io** (its release, #1852, was still
       open on 2026-10-11). Until then the Mac builds wry from its repository at 66cdfa1, the merge
       of #1866, under the name `wry-mac` in both macOS tables (crates/host and crates/macos-check),
       and Windows stays on 0.57.0: one name from two sources is an error in Cargo, and two 0.57
@@ -10515,6 +10519,30 @@ maintainer's German test instructions are a text of their own, not in the reposi
       objc2's `exception` and `disable-encoding-assertions` as the revision does, so
       check-macos.ps1 keeps needing its clang, and a debug build on a Mac keeps going without
       objc2's encoding checks.
+
+      **Taken** (2026-10-25, wip/deps step B): wry 0.57.1 came out on 2026-10-23 (#1852, merged as
+      2446fea, with 66cdfa1 among its ancestors). One `wry = "0.57.1"` stands in both of
+      crates/host's tables and in crates/macos-check's; `wry-mac`, its Git source in Cargo.lock and
+      page.rs's `use wry_mac as wry` are gone. macos-build.yml's check of the Mac's wry stays and
+      now takes only a crates.io release from 0.57.1 on (its branch for the revision is gone).
+      Rewritten with them: the comments on the three manifest entries and on the check,
+      README's Windows build note, building-on-macos.md's two passages and gui.md's macOS block of
+      `host.gui.webview`. This list was wrong in one place: webview.rs's comment on
+      `Refusal::Unsupported` says nothing of the pin, so nothing changed there. What stays is as
+      above: check-macos.ps1's clang, and a Mac debug build without objc2's encoding checks. What
+      else moved in wry and reaches us, read in its sources, not seen: on a Mac a web view on a
+      controller another live web view uses gets neither the `ipc` handler nor the scripts
+      (#1876), which page.rs's fresh configuration per build keeps away (the comment there says
+      so); a drag whose source publishes only per-item file URLs no longer reaches an `unwrap` in
+      wry's drag handler (#1844). On Windows the WebView2 code is the edition-2024 rewrite, and
+      `evaluate_script_with_callback`, which the host never calls, now uses
+      `ExecuteScriptWithResult` (#1868). The probe run it asked for is not done: the item below.
+- [ ] **Live (Windows with NVDA, and CI's macOS job): pages on wry 0.57.1** (built 2026-10-25,
+      not run). Before wip/deps is merged, the short Windows probe run the item above asked for:
+      W1 and W3 of "The Windows probe, W1–W9" (NVDA, the HTML probe in REAPER), since Windows' web
+      view moved from 0.57.0 with it. And the first macOS job on 0.57.1 (CI's, no Mac session):
+      its check of the Mac's wry says `wry 0.57.1, a release with the fix (#1866)` for both
+      slices, and page-check passes on the Mac runners as it did on 66cdfa1.
 - [x] **Stage 5 — Avenger's first page**, after the maintainer's decisions: what a page is for, the
       native search field of Avenger's stage 4 or a page, whether two window changes per action are
       acceptable. The Tab ring stays.
