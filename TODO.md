@@ -840,7 +840,7 @@ vps-avenger-presets to 1.3.0. The avenger part's rest — A10's parts 3 and 6, A
 and A19 — takes the overlay runtime to 0.14.0 (O:afterDialog, a page's `openLater`) and vps-avenger
 to 0.11.0. The core part, in the plan's order:
 
-- [ ] **DirectML.dll ships with its terms (the maintainer's decision of 2026-10-24).** The Windows
+- [x] **DirectML.dll ships with its terms (the maintainer's decision of 2026-10-24).** The Windows
       package keeps `DirectML.dll` (1.15.4, from `ort`'s download of ONNX Runtime ms@1.22.0) and
       carries Microsoft's terms for it. **Built, and held back on the local branch
       `wip/directml-licence`** (one commit on main 93b9844): `crates/host/licences/directml/SOURCE.txt`
@@ -859,6 +859,8 @@ to 0.11.0. The core part, in the plan's order:
       plan's question 4): take `LICENSE.txt` and `ThirdPartyNotices.txt` from it unchanged into
       `crates/host/licences/directml/` on that branch, compare its `bin\x64-win\DirectML.dll` with
       SOURCE.txt's hash, and merge it.
+      **Merged (2026-10-24, f435c88 and c521e07):** both files are in `crates/host/licences/directml/`,
+      unchanged from the NuGet package (202 MB, not 30 MB), and its DLL has SOURCE.txt's hash.
 - [x] **The stale entry for Accessibility and Input Monitoring (finding 1).** Two sessions went by
       with Accessibility switched on in the list for an earlier ad-hoc build, and Re-check said only
       "Nothing has changed". **Built.** On an ad-hoc build (`codesign`'s `Signature=adhoc`, asked
