@@ -166,6 +166,7 @@ local S = {
   out = {},         -- key -> how many requests with a callback asked with it are out (host.screen.pending)
   captured = {},    -- spec -> callback, as host.keys.capture was last handed it
   holding = {},     -- spec -> token, while that capture has not been released
+  menuTaken = {},   -- spec -> true while its capture was made with { menu = "taken" }
   tokens = {},      -- token -> spec
   hot = {},         -- hotkey id -> spec, while registered
   finds = 0,
@@ -324,27 +325,38 @@ T.host = strict("host", {
     normalize = function(spec) return spec end,
     describe = function(spec) return spec end,
     check = function() return { reasons = {} } end,
-    capture = function(spec, fn)
+    capture = function(spec, fn, opts)
       -- S.captureRaises: the message of a capture the host cannot make (a Mac without the
       -- Accessibility grant), for every spec, or for the specs a table names: answered `nil, err`
       -- with `denied`, nothing registered, as the host answers it.
       local raises = S.captureRaises
       if type(raises) == "table" then raises = raises[spec] end
       if raises then return nil, T.E("denied", raises) end
+      -- The host's options: `menu` is "through" or "taken" (keys.md), and the others are not
+      -- scripted here.
+      if opts ~= nil then
+        assert(type(opts) == "table", "host.keys.capture's options are a table")
+        for k in pairs(opts) do assert(k == "menu" or k == "taps" or k == "within", "no option " .. tostring(k)) end
+        assert(opts.menu == nil or opts.menu == "through" or opts.menu == "taken", "menu: " .. tostring(opts.menu))
+      end
       local id = nextId()
       S.captured[spec] = fn
       S.holding[spec] = id
       S.tokens[id] = spec
+      S.menuTaken[spec] = (opts ~= nil and opts.menu == "taken") or nil
       return id
     end,
     release = function(id)
       local spec = S.tokens[id]
-      if spec and S.holding[spec] == id then S.holding[spec] = nil end
+      if spec and S.holding[spec] == id then
+        S.holding[spec] = nil
+        S.menuTaken[spec] = nil
+      end
       S.tokens[id] = nil
     end,
     releaseAll = function()
       S.releasedAll = (S.releasedAll or 0) + 1
-      S.holding, S.tokens = {}, {}
+      S.holding, S.tokens, S.menuTaken = {}, {}, {}
     end,
     -- The window the hook scopes captured keys to (the one in front at the call), or false.
     scope = function(on) S.scopedTo = on and S.front and S.front.id or false end,
@@ -855,7 +867,8 @@ end
 -- A key typed in the window in front, as the hook decides it (docs/api/keys.md): while the module's
 -- flag counts there — its last menuOpen true, a capture held, its scope that window or every window
 -- — an unmodified Return or Escape goes through to the application and is recorded for
--- passedThrough, captured or not, and so is any other key it captures; otherwise a capture of it,
+-- passedThrough, captured or not, and so is any other key it captures but one captured with
+-- `menu = "taken"`, which its capture takes all the same; otherwise a capture of it,
 -- scoped there or everywhere, takes it, and its callback runs through the mailbox as a captured
 -- key's does (`T.call("key", …)`); otherwise it reaches the application unrecorded. A disabled
 -- module's captures are out of the hook. `mods` as a capture's callback gets them (default none), and
@@ -868,7 +881,8 @@ function T.typed(key, mods, press)
   local inScope = not S.scopedTo or S.scopedTo == front
   local captured = S.holding[key] ~= nil and plain and not S.disabled
   local flag = S.menuOpen[#S.menuOpen] == true and next(S.holding) ~= nil and inScope and not S.disabled
-  if flag and (captured or (plain and (key == "Return" or key == "Escape"))) then
+  local taken = captured and S.menuTaken[key] == true
+  if flag and not taken and (captured or (plain and (key == "Return" or key == "Escape"))) then
     if #S.passed < 32 then S.passed[#S.passed + 1] = { vk = 0, mask = 0, key = key } end
     return "passed"
   end

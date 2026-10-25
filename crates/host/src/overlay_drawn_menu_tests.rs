@@ -27,11 +27,36 @@ S.ownsAsked = {}
 
 rawset(T.host, "input", T.strict("host.input", {
   -- Answered as the host answers a click: true, or false and its error value (S.clickErr, for
-  -- every click asked while it is set).
-  click = function(x, y, opts)
-    S.clicks[#S.clicks + 1] = { x, y, button = opts and opts.button }
+  -- every click asked while it is set). A double-click (`clicks = 2`) as the host makes one on a
+  -- thread of its own: its first click at the call, refused there with S.clickErr; its second, and
+  -- the callback, 100 ms later, as long as the host's gesture takes — the second not sent and the
+  -- callback told S.secondErr while that is set. Each of its clicks is an entry of S.clicks marked
+  -- with its number, `double`. The callback of any click is answered once, on a later tick, as the
+  -- host answers it.
+  click = function(x, y, opts, cb)
+    local double = opts and opts.clicks == 2
+    S.clicks[#S.clicks + 1] = { x, y, button = opts and opts.button, double = double and 1 or nil }
     S.order[#S.order + 1] = "click"
-    if S.clickErr then return false, S.clickErr end
+    local function later(fn, ms) S.after[#S.after + 1] = { at = S.now + (ms or 0), fn = fn } end
+    if S.clickErr then
+      local err = S.clickErr
+      if cb then later(function() cb(false, err) end) end
+      return false, err
+    end
+    if double then
+      later(function()
+        local err = S.secondErr
+        if err == nil then
+          S.clicks[#S.clicks + 1] = { x, y, button = opts.button, double = 2 }
+          S.order[#S.order + 1] = "click"
+        end
+        if cb then
+          if err ~= nil then cb(false, err) else cb(true) end
+        end
+      end, 100)
+    elseif cb then
+      later(function() cb(true) end)
+    end
     return true
   end,
 }))
@@ -695,12 +720,14 @@ fn a_choice_follows_the_test_that_placed_its_item_not_another_of_its_name() {
     "##);
 }
 
-/// RG4: `O.doubleClick` with `button`, both clicks with it and the callback once the second has gone
-/// out (90 ms later, as a handler of the timer's); without options, two plain clicks as ever; a
-/// button it does not know, options that are not a table and a callback that is not a function
-/// raise, naming them. And D41: it answers as a click does, `true` and the second click's answer to
-/// the callback; a first click that is not made sends no second, answers its error, and the
-/// callback hears the same table on the next turn.
+/// RG4: `O.doubleClick` with `button` — one double-click of the host's (`clicks = 2`), both clicks
+/// with it — and the callback once, after the second click has gone out; without options, or with
+/// the left button, a double-click of the left button; a button it does not know, options that are
+/// not a table and a callback that is not a function raise, naming them, and click nothing. And
+/// D41: it answers as the host's click does, `true` at the call and the gesture's answer to the
+/// callback; a double-click the host refuses at the call answers its error there and the callback
+/// hears the same table on a later turn; one whose second half the host did not send — the window at
+/// the point changed — is `true` at the call and `covered` to the callback, handed on as it came.
 #[test]
 fn a_double_click_takes_a_button_and_calls_back_after_the_second_click() {
     run(r##"
@@ -709,16 +736,18 @@ fn a_double_click_takes_a_button_and_calls_back_after_the_second_click() {
         T.ok(T.call("key", function()
           T.O.doubleClick(410, 120, { button = "right" }, function() after = #S.clicks end)
         end) == "Ran")
-        T.ok(#S.clicks == 1 and S.clicks[1].button == "right" and after == nil, "the first click, right")
+        T.ok(#S.clicks == 1 and S.clicks[1].button == "right" and S.clicks[1].double == 1 and after == nil,
+          "one double-click asked of the host, its first click at the call, right")
         T.tick(1)
-        T.ok(#S.clicks == 2 and S.clicks[2].button == "right" and S.clicks[2][1] == 410 and after == 2,
-          "the second, then the callback: " .. tostring(after))
+        T.ok(#S.clicks == 2 and S.clicks[2].button == "right" and S.clicks[2].double == 2 and S.clicks[2][1] == 410
+          and after == 2, "the second, then the callback: " .. tostring(after))
         T.O.doubleClick(5, 6)
         T.tick(1)
-        T.ok(#S.clicks == 4 and S.clicks[3].button == nil and S.clicks[4].button == nil, "two plain clicks")
+        T.ok(#S.clicks == 4 and S.clicks[3].button == nil and S.clicks[4].button == nil and S.clicks[4].double == 2,
+          "a double-click of the left button")
         T.O.doubleClick(5, 6, { button = "left" })
         T.tick(1)
-        T.ok(#S.clicks == 6 and S.clicks[6].button == nil, "left is a plain click")
+        T.ok(#S.clicks == 6 and S.clicks[6].button == nil, "left is the host's default button")
         local ok, err = pcall(T.O.doubleClick, 1, 2, { button = "x" })
         T.ok(not ok and string.find(err, 'O.doubleClick: opts.button must be "left", "right" or "middle", got x', 1, true), err)
         ok, err = pcall(T.O.doubleClick, 1, 2, "right")
@@ -727,21 +756,34 @@ fn a_double_click_takes_a_button_and_calls_back_after_the_second_click() {
         T.ok(not ok and string.find(err, "the callback (fourth argument) must be a function or nil, got number", 1, true), err)
         T.ok(#S.clicks == 6, "nothing clicked by a call that raised")
         local answers = nil
-        local first = table.pack(T.O.doubleClick(410, 120, nil, function(...) answers = table.pack(...) end))
+        local calls = 0
+        local first = table.pack(T.O.doubleClick(410, 120, nil, function(...) calls += 1; answers = table.pack(...) end))
         T.ok(first.n == 1 and first[1] == true, "true at the call")
         T.tick(1)
-        T.ok(answers and answers[1] == true and answers[2] == nil, "the callback hears the second click's answer")
+        T.ok(answers and answers[1] == true and answers[2] == nil, "the callback hears the gesture's answer")
+        T.tick(2)
+        T.ok(calls == 1, "called once: " .. calls)
         local covered = T.E("covered", "something else is drawn over the point")
         S.clickErr = covered
         answers = nil
         local ok2, err2 = T.O.doubleClick(410, 120, nil, function(...) answers = table.pack(...) end)
         T.ok(ok2 == false and rawequal(err2, covered) and #S.clicks == 9 and answers == nil,
-          "the first click's error at the call, and nothing called back yet: " .. T.what(err2))
+          "the host's refusal at the call, and nothing called back yet: " .. T.what(err2))
         T.tick(1)
         T.ok(#S.clicks == 9 and answers and answers[1] == false and rawequal(answers[2], covered),
           "no second click, and the callback hears the same error value")
-        T.ok(T.count("overlay: a double-click's first click at (410,120) was not made — something else is drawn over "
-          .. "the point; no second is sent") == 1, T.dump())
+        T.ok(T.count("overlay: a double-click at (410,120) was not made — something else is drawn over the point") == 1,
+          T.dump())
         S.clickErr = nil
+        -- The second half not sent by the host: true at the call, `covered` to the callback.
+        local cut = T.E("covered", "the window at the point changed after the first click: the second click was not sent")
+        S.secondErr = cut
+        answers = nil
+        local ok3 = T.O.doubleClick(410, 120, { button = "right" }, function(...) answers = table.pack(...) end)
+        T.ok(ok3 == true and #S.clicks == 10, "true at the call, the first click made")
+        T.tick(1)
+        T.ok(#S.clicks == 10 and answers and answers[1] == false and rawequal(answers[2], cut),
+          "the second not made, and the callback hears the host's error value: " .. T.what(answers and answers[2]))
+        S.secondErr = nil
     "##);
 }

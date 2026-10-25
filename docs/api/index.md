@@ -78,7 +78,7 @@ local hotkeyId = id   -- kept even when it is not held now: the claim is tried a
 - **A field of the answer**: a text reading has `status = "failed"` and its `error`.
 - **An argument of a hook** the module wrote into a spec, such as a page's `onClose(how, err)` or a menu choice's `onDone`.
 
-A call that hands its work on answers once it has handed it on. What fails after that reaches only its callback or hook. A click with `via = "noactivate"` is one ([`host.input.click`](input.md#host-input-click)). An overlay's [`O:chooseMenuItem`](overlay.md#o-choosemenuitem), whose `onDone` hears how the choice ended, is another.
+A call that hands its work on answers once it has handed it on. What fails after that reaches only its callback or hook. A click with `via = "noactivate"` or `clicks = 2` is one ([`host.input.click`](input.md#host-input-click)). An overlay's [`O:chooseMenuItem`](overlay.md#o-choosemenuitem), whose `onDone` hears how the choice ended, is another.
 
 ### Returns and Errors, on every page {#returns-and-errors}
 
@@ -153,7 +153,7 @@ Controls a module defines over a plug-in window, walked with Tab and spoken alou
 | [`O.away`](overlay#o-away) | Whether the overlay's group is **away** |
 | [`O.calibrating()`](overlay#o-calibrating) | Whether calibration is switched on |
 | [`O.contentSize(origin)`](overlay#o-contentsize) | The width and height of an origin's **content**, which is what coordinates are measured against |
-| [`O.doubleClick(x, y, opts?, cb?)`](overlay#o-doubleclick) | Two clicks at the same point, far enough apart in time to **be** a double-click. |
+| [`O.doubleClick(x, y, opts?, cb?)`](overlay#o-doubleclick) | A double-click at the point, made by the host as **one gesture**. |
 | [`O.embedded(spec, opts?)`](overlay#o-embedded) | A binding to a plug-in **embedded** in a DAW: what `O:attachEmbedded(spec, opts)` does when an overlay is bound by it. |
 | [`O.errors`](overlay#o-errors) | The codes of the runtime's error values, as constants |
 | [`O.hosts(...)`](overlay#o-hosts) | Concatenates host lists and skips `nil`, so that an optional host, a plug-in that may not be installed, can be listed inline. |

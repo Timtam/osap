@@ -880,6 +880,8 @@ end
 
 Say nothing as the keyboard goes over where the screen reader announces the plug-in's field itself; the page's button can carry the help ("Type the new name, then press Return").
 
+**A key the plug-in must not get.** Where a key of the user's habits does something unwanted in the plug-in while it has the keyboard — VPS Avenger switches its oscillators on Tab — the hand-over can swallow it: `swallow = { keys = { "Tab", "Shift+Tab" }, say = "Return keeps the name, Escape cancels." }`, since version 0.16 of the runtime. The keys do nothing while it lasts and reach neither the plug-in nor your hooks, and the first of them says your sentence once, so that a user who pressed Tab out of habit hears how to get out. [`O:holdKeys`](api/overlay.md#o-holdkeys) takes the same `swallow`.
+
 **The keyboard on Windows.** A trip and the way back ask for the plug-in's own control, not its window, and the host lands the keyboard in it ([`host.window.focus`](api/window.md#host-window-focus)): brought forward, the window's keyboard can be on REAPER's FX list or nowhere, which the host corrects — at most twice, and never after the user pressed a key. The page's own close box gives the keyboard back to the control it took the front from as well ([`page:hide`](api/gui.md#page-hide)).
 
 **On a Mac** the plug-in is the DAW's panel inside its window, and the way back and a trip ask for that window. Whether VoiceOver lands in the plug-in after the way back is unmeasured; the runtime's log says where the keyboard was at each arrival (`[page] … in the plug-in after N ms; the keyboard on …`).

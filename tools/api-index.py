@@ -427,7 +427,7 @@ FAILURES = [
     'err)` or a menu choice\'s `onDone`.',
     '',
     'A call that hands its work on answers once it has handed it on. What fails after that '
-    'reaches only its callback or hook. A click with `via = "noactivate"` is one '
+    'reaches only its callback or hook. A click with `via = "noactivate"` or `clicks = 2` is one '
     '([`host.input.click`](input.md#host-input-click)). An overlay\'s '
     '[`O:chooseMenuItem`](overlay.md#o-choosemenuitem), whose `onDone` hears how the choice '
     'ended, is another.',

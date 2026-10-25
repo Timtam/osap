@@ -93,7 +93,22 @@ name = "Overlay runtime"
 # uses either depends on "com.platform.overlay >= 0.14". And O:holdKeys' hold ends "left" where the
 # overlay comes up on another window it also matches, and a press's menu window an item was clicked
 # in is no item's dialog.
-version = "0.14.0"
+# 0.15.0 (the third Mac test of VPS Avenger, 2026-10-25): O.doubleClick is the host's double-click,
+# host.input.click's `clicks = 2` — click states 1 and 2 on a Mac, the press held 20 ms and the
+# second 60 ms after the first release, two clicks Windows counts itself — made on a thread of the
+# host's, and its callback once both clicks are out. A second half the host did not send, the
+# window at the point having changed after the first click, answers `covered` to the callback; a
+# refusal at the call reaches the callback on a later turn, from the host. The runtime's 90 ms timer
+# between two plain clicks is gone. A module that relies on it depends on
+# "com.platform.overlay >= 0.15".
+# 0.16.0 (2026-10-25, from the maintainer): a hold's and a trip's hand-over's `swallow = { keys, say
+# }` — O:holdKeys and trip:handOver of every kind — takes keys that do nothing for as long as it
+# lasts: captured with host.keys.capture's `menu = "taken"`, so a hand-over's menu flag leaves them
+# swallowed, they reach neither the plug-in nor `onKey` nor the overlay's own claims of them, and
+# the module's sentence of how it ends is said once, at the first of them; every end gives them back
+# with the rest. VPS Avenger swallows Tab and Shift+Tab, which switch its oscillators on Windows. A
+# module that uses it depends on "com.platform.overlay >= 0.16".
+version = "0.16.0"
 # Loaded into the VM of every module that depends on it, so its functions
 # (O.new, O.container, the Overlay methods) are reachable via host.require.
 code_module = true

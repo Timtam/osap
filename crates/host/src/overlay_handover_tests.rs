@@ -833,6 +833,169 @@ fn a_keys_hand_over_is_ended_by_the_page_key_and_a_window_change_too() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Keys swallowed while it lasts (`swallow`, runtime 0.16).
+// ---------------------------------------------------------------------------------------------
+
+/// `swallow = { keys, say }` takes its keys for as long as the hand-over lasts, of every kind: the
+/// hook takes them even while a `typing` or `browse` hand-over's flag lets its other keys through
+/// (`menu = "taken"`), so they reach neither the plug-in nor the record of keys gone through, nor the
+/// module's `onKey`; nothing is said at the start, the module's sentence once at the first of them,
+/// interrupting, and never again in that hand-over; the end keys end it as ever, and the swallowed
+/// keys go back with them. A second hand-over says its sentence again, once.
+#[test]
+fn swallowed_keys_do_nothing_say_once_and_reach_neither_the_plugin_nor_the_module() {
+    for kind in ["typing", "browse", "keys"] {
+        let scenario = r##"
+            local S = T.S
+            local kind = "@KIND@"
+            local SAY = "Return confirms, Escape cancels."
+            T.show(T.W, T.IN)
+            T.synth()
+            T.openPage()
+            S.got = {}
+            local function spec()
+              local over = { swallow = { keys = { "Tab", "Shift+Tab" }, say = SAY } }
+              if kind == "keys" then
+                over.kind, over.keys, over.ends = "keys", { "PageUp", "Return" }, false
+                over.onKey = function(o, trip, key)
+                  S.got[#S.got + 1] = key
+                  return key == "Return"
+                end
+              elseif kind == "browse" then
+                over.kind = "browse"
+              end
+              return over
+            end
+            for round = 1, 2 do
+              S.ended, S.endsAsked, S.got = {}, {}, {}
+              local said = #S.speech
+              local ok, why = T.handOver(spec())
+              T.ok(ok == true and why == nil, T.what(why))
+              T.ok(S.holding["Tab"] and S.holding["Shift+Tab"] and S.menuTaken["Tab"] and S.menuTaken["Shift+Tab"],
+                "captured, taken in a menu")
+              T.ok(S.hoTokens["Tab"] ~= nil and S.hoTokens["Shift+Tab"] ~= nil, "the hand-over's")
+              T.ok(#S.speech == said, "nothing said at the start")
+              T.ok(T.count("the module's scope pinned there; Tab, Shift+Tab swallowed there; it ends on ") == round, T.dump())
+              T.ok(T.typed("Tab") == "taken", kind .. ": Tab taken")
+              T.ok(#S.passed == 0, "not recorded as gone through")
+              T.ok(#S.speech == said + 1 and T.last() == SAY and T.lastInterrupts() == true, T.saidSince(said))
+              T.ok(T.typed("Shift+Tab") == "taken" and T.typed("Tab") == "taken", "again")
+              T.ok(#S.speech == said + 1, "said once: " .. T.saidSince(said))
+              T.ok(T.count("[page] 'Synth': trip 'Next preset': Tab swallowed — it does nothing and never reaches the "
+                .. "plug-in: said \"" .. SAY .. "\"") == round, T.dump())
+              T.ok(T.count("swallowed — it does nothing and never reaches the plug-in, said once already") == 2 * round, T.dump())
+              T.tick()
+              T.runDue()
+              T.ok(#S.ended == 0 and #S.endsAsked == 0 and #S.got == 0 and S.trip.stage == "waiting",
+                "no end, nothing for the module")
+              -- The end key ends it as ever; the swallowed keys go back with the rest.
+              T.ok(T.typedAndTicked("Return") == (kind == "keys" and "taken" or "passed"), "the end key")
+              T.ok(#S.ended == 1 and S.ended[1].as == "ended" and S.ended[1].info.key == "Return", tostring(S.ended[1]))
+              T.ok(table.concat(S.ended[1].info.passed, ",") == "Return", "nothing swallowed among what went through: "
+                .. table.concat(S.ended[1].info.passed, ","))
+              T.ok(table.concat(S.got, ",") == (kind == "keys" and "Return" or ""), "onKey: " .. table.concat(S.got, ","))
+              T.ok(not S.holding["Tab"] and not S.holding["Shift+Tab"] and not T.hoHeld(), "given back")
+              T.ok(T.count("released with Tab, Shift+Tab, swallowed") == round, T.dump())
+              T.ok(#S.speech == said + 1, "nothing more said: " .. T.saidSince(said))
+              T.runDue()
+              T.pageFront()
+              T.allBack()
+            end
+        "##;
+        let scenario = scenario.replace("@KIND@", kind);
+        run(&scenario);
+        run_mac(&scenario);
+    }
+}
+
+/// Every end gives the swallowed keys back, with the rest, at that moment: its own, the page key,
+/// another application, the page closed, the window gone, a hook that raised, `done`, and a disable
+/// and enable — where a swallowed key that a capture takes with the page not shown ends the trip
+/// itself, as an end key does. A swallowed key's capture that comes after the end releases itself
+/// and says nothing.
+#[test]
+fn every_end_gives_the_swallowed_keys_back() {
+    for end in ["ended", "page key", "another application", "page closed", "gone", "failed", "done", "disable", "disable tab"] {
+        let scenario = r##"
+            local S = T.S
+            local ending = "@END@"
+            T.show(T.W, T.IN)
+            T.synth()
+            T.openPage()
+            if ending == "failed" then S.endsFn = function() error("ends broke") end end
+            if ending == "done" then
+              S.endsFn = function(o, trip, info, answer) trip:done({}) end
+            end
+            T.handOver({ swallow = { keys = { "Tab", "Shift+Tab" }, say = "Return keeps the name, Escape cancels." } })
+            local onTab = S.captured["Tab"]
+            T.ok(S.hoTokens["Tab"] ~= nil and S.hoTokens["Shift+Tab"] ~= nil, "swallowed")
+            if ending == "ended" or ending == "failed" or ending == "done" then
+              T.typedAndTicked("Return")
+            elseif ending == "page key" then
+              T.key()
+            elseif ending == "another application" then
+              T.show(T.OTHER)
+            elseif ending == "page closed" then
+              T.closed("user")
+            elseif ending == "gone" then
+              S.controls = { T.LIST, T.WRAP }
+              T.event()
+            elseif ending == "disable" then
+              T.disable()
+              T.enable()
+            elseif ending == "disable tab" then
+              T.disable()
+              T.enable()
+              T.ok(T.typed("Tab") == "taken", "a capture takes it: no flag")
+              T.ok(T.count("Tab was taken by the hand-over's capture with the page not shown") == 1, T.dump())
+            end
+            for _ = 1, 4 do
+              T.tick()
+              T.runDue()
+            end
+            T.event()
+            T.runDue()
+            local want = ({ ended = "ended", done = "done", ["page key"] = "cancelled", ["another application"] = "moved_on",
+              ["page closed"] = "closed", gone = "gone", failed = "failed", disable = "closed", ["disable tab"] = "closed" })[ending]
+            T.ok(#S.ended == 1 and S.ended[1].as == want, ending .. ": " .. #S.ended .. " " .. tostring(S.ended[1] and S.ended[1].as))
+            T.ok(not T.hoHeld() and S.hoTokens["Tab"] ~= nil, ending .. ": the keys back, the swallowed ones among them")
+            -- The old capture's callback, come late: released, nothing said.
+            local said = #S.speech
+            T.call("key", onTab, {})
+            T.ok(T.count("Tab came to a capture of a hand-over that has ended — released") == 1, T.dump())
+            T.ok(#S.speech == said and #S.ended == 1, "nothing said, still once")
+        "##;
+        run(&scenario.replace("@END@", end));
+    }
+}
+
+/// A swallowed key whose capture's callback runs with another window in front — a window of the
+/// plug-in's application, the trip going on — does nothing and says nothing; the sentence waits for
+/// the first one pressed with the plug-in in front.
+#[test]
+fn a_swallowed_key_with_another_window_in_front_says_nothing() {
+    run(r##"
+        local S = T.S
+        T.show(T.W, T.IN)
+        T.synth()
+        T.openPage()
+        T.handOver({ kind = "browse", swallow = { keys = { "Tab" }, say = "To go back, press Return." } })
+        local said = #S.speech
+        T.show(T.MAINWIN)
+        T.call("key", S.captured["Tab"], {})
+        T.ok(#S.speech == said and T.count("Tab swallowed with ") == 1 and T.count("in front — it does nothing; nothing said") == 1,
+          T.dump())
+        T.show(T.W, T.IN)
+        T.runDue()
+        T.ok(T.typed("Tab") == "taken" and #S.speech == said + 1 and T.last() == "To go back, press Return.", T.saidSince(said))
+        T.ok(#S.ended == 0, "still going on")
+        T.key()
+        T.pageFront()
+        T.allBack()
+    "##);
+}
+
+// ---------------------------------------------------------------------------------------------
 // Where it may be asked, and how it answers.
 // ---------------------------------------------------------------------------------------------
 
@@ -864,6 +1027,16 @@ fn hand_over_raises_outside_acting_with_a_wait_or_another_hand_over_pending_and_
           try("a key twice", trip, T.spec({ keys = { "Return", "Return" } }))
           try("nine keys", trip, T.spec({ keys = { "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9" } }))
           try("no keys", trip, T.spec({ keys = {} }))
+          try("swallow not a table", trip, T.spec({ swallow = "Tab" }))
+          try("swallow's field", trip, T.spec({ swallow = { keys = { "Tab" }, say = "x", when = 1 } }))
+          try("swallow without keys", trip, T.spec({ swallow = { say = "x" } }))
+          try("swallow nine keys", trip, T.spec({ swallow = { keys = { "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9" },
+            say = "x" } }))
+          try("swallow without say", trip, T.spec({ swallow = { keys = { "Tab" } } }))
+          try("swallow empty say", trip, T.spec({ swallow = { keys = { "Tab" }, say = "" } }))
+          try("swallow unreadable", trip, T.spec({ swallow = { keys = { "Nope+Q" }, say = "x" } }))
+          try("swallow twice", trip, T.spec({ swallow = { keys = { "Tab", "Tab" }, say = "x" } }))
+          try("swallow an end key", trip, T.spec({ swallow = { keys = { "Tab", "Escape" }, say = "x" } }))
           trip:afterDialog(function() end)
           try("a wait pending", trip, T.spec())
           S.trip = trip
@@ -872,7 +1045,7 @@ fn hand_over_raises_outside_acting_with_a_wait_or_another_hand_over_pending_and_
         T.land()
         T.runDue()
         local want = {
-          ["not a table"] = "handOver takes { kind, keys?, onKey?, ends?, onEnd }, got string",
+          ["not a table"] = "handOver takes { kind, keys?, onKey?, ends?, onEnd, swallow? }, got string",
           ["unknown field"] = "handOver has no field 'wait'",
           ["bad kind"] = "kind must be \"typing\", \"browse\" or \"keys\", got voice",
           ["no onEnd"] = "needs `onEnd`, a function(overlay, trip, how, info), got nil",
@@ -885,6 +1058,15 @@ fn hand_over_raises_outside_acting_with_a_wait_or_another_hand_over_pending_and_
           ["a key twice"] = "names one key twice: Return and Return",
           ["nine keys"] = "`keys` must be a list of 1 to 8 key specs",
           ["no keys"] = "`keys` must be a list of 1 to 8 key specs",
+          ["swallow not a table"] = "handOver's `swallow` takes { keys, say }, got string",
+          ["swallow's field"] = "handOver's `swallow` has no field 'when' (it has keys and say)",
+          ["swallow without keys"] = "handOver's `swallow.keys` must be a list of 1 to 8 key specs",
+          ["swallow nine keys"] = "handOver's `swallow.keys` must be a list of 1 to 8 key specs",
+          ["swallow without say"] = "handOver's `swallow.say` must be the sentence said at the first key swallowed, got nil",
+          ["swallow empty say"] = "`swallow.say` must be the sentence said at the first key swallowed, got an empty string",
+          ["swallow unreadable"] = "handOver's swallowed key Nope+Q is no key spec",
+          ["swallow twice"] = "handOver swallows one key twice: Tab and Tab",
+          ["swallow an end key"] = "handOver names Escape in its keys and in `swallow`: a key is held or swallowed, not both",
           ["a wait pending"] = "handOver while a dialog wait is pending — one wait at a time",
         }
         for name, text in pairs(want) do

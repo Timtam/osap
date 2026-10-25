@@ -95,39 +95,32 @@ local MATCH_SCALES = { 1.0, 0.9, 1.1, 0.8, 1.2, 1.25, 0.75, 1.5, 0.67, 2.0 }
 -- introduced (verified: no bare specificity numbers remain outside the runtime).
 O.layer = { chrome = 10, base = 20, content = 30, dialog = 40 }
 
--- How far apart the two halves of a DELIBERATE double-click are sent.
---
--- Not zero, which is the mistake worth naming. Two clicks sent back to back go out in the same
--- instant, and an application deciding whether it has seen a double-click is looking at the
--- interval between two presses — an interval of zero reads as easily as one press with a
--- stutter as it does as two. Ninety milliseconds is plainly two, and plainly inside any
--- double-click time a system would use: the Windows default is 500 ms and nothing sets it
--- below about 200.
-local DOUBLE_CLICK_GAP = 90
-
--- A double-click, on purpose.
+-- A double-click, on purpose: the host's (host.input.click's `clicks = 2`).
 --
 -- Worth having in one place because the same fact is needed from both sides. A plug-in that
 -- resets a control to its default on a double-click is offering a genuinely useful gesture —
 -- one keystroke instead of twenty steps — and reaching it means sending two clicks close
 -- enough together. The same fact is a hazard everywhere else, which `Overlay:afterIdle` exists
--- to avoid; keeping both here means neither can drift away from the other's timing.
+-- to avoid: two clicks of the host's own gesture are 80 ms apart, press to press.
+--
+-- The host makes it, as one gesture on a thread of its own, since 0.15: two clicks sent by this
+-- runtime 90 ms apart were two single clicks on a Mac — each with a click state of 1 — and VPS
+-- Avenger's resets did not take them (the third Mac test, 2026-10-25). The host's carries click
+-- states 1 and 2 there, its press held 20 ms and its second press 60 ms after the first release,
+-- as the VPS Avenger control tool's are; Windows counts its two clicks itself, as from a mouse.
 --
 -- `opts.button` is the button both clicks are made with — "left" (the default), "right" or
 -- "middle": VPS Avenger resets Pan and Random Pitch with a double-click of the RIGHT button, as
--- the avenger_control project's tool does. `cb`, when given, runs once the second click has gone
--- out, as a handler of its own (the timer's), so a module can start watching for what the
--- double-click changed from there rather than from a guess at when it is over. Anything else
--- raises at the call, naming it: a mistyped button would otherwise click with the left one.
+-- the avenger_control project's tool does. `cb`, when given, runs once, as a handler of its own,
+-- once both clicks have gone out — or the host stopped before the second — so a module can start
+-- watching for what the double-click changed from there rather than from a guess at when it is
+-- over. Anything else raises at the call, naming it: a mistyped button would otherwise click with
+-- the left one.
 --
--- Falls back to two immediate clicks with no timer, which is not a double-click and says so in
--- the log rather than silently doing something else; `cb` then runs at once, after them.
---
--- It answers as host.input.click does: true, or false and the click's error value. A first click
--- that is not made sends no second — one click alone is not what was asked — and the call answers
--- its error, which `cb` is handed too, `cb(false, err)`, on the next turn as a handler of its own;
--- otherwise `cb` gets the second click's answer, `cb(true)` or `cb(false, err)`. Without a timer the
--- call answers the second click's, both being made in it.
+-- It answers as host.input.click does: true once the host has the gesture, or false and its error
+-- value when it refused it at the call — which `cb` is handed too, `cb(false, err)`, on a later
+-- turn. `cb` gets the gesture's answer: `cb(true)`, or `cb(false, err)` — `covered` when the window
+-- at the point changed after the first click and the second was not sent.
 function O.doubleClick(x, y, opts, cb)
   if opts ~= nil and type(opts) ~= "table" then
     error(("O.doubleClick: opts must be a table { button = … } or nil, got %s"):format(type(opts)), 2)
@@ -140,34 +133,16 @@ function O.doubleClick(x, y, opts, cb)
   if cb ~= nil and type(cb) ~= "function" then
     error(("O.doubleClick: the callback (fourth argument) must be a function or nil, got %s"):format(type(cb)), 2)
   end
-  -- The left button as a plain click, as it always went out: nothing changes for those calls.
-  local clickOpts = (button ~= nil and button ~= "left") and { button = button } or nil
-  local function click()
-    if clickOpts then return host.input.click(x, y, clickOpts) end
-    return host.input.click(x, y)
-  end
-  local ok, err = click()
+  local clickOpts = (button ~= nil and button ~= "left") and { clicks = 2, button = button } or { clicks = 2 }
+  -- The host calls back once, on a later tick, whichever way it went: refused at the call too.
+  local ok, err = host.input.click(x, y, clickOpts,
+    cb and function(made, e) cb(made, handOn("o-doubleclick", "host-input-click", e)) end or nil)
   if ok == false then
-    host.log.info(("overlay: a double-click's first click at (%s,%s) was not made — %s; no second is sent")
+    host.log.info(("overlay: a double-click at (%s,%s) was not made — %s")
       :format(tostring(x), tostring(y), tostring(err)))
-    err = handOn("o-doubleclick", "host-input-click", err)
-    if cb then
-      if host.timer then host.timer.after(0, function() cb(false, err) end) else cb(false, err) end
-    end
-    return false, err
+    return false, handOn("o-doubleclick", "host-input-click", err)
   end
-  if host.timer then
-    host.timer.after(DOUBLE_CLICK_GAP, function()
-      local ok2, err2 = click()
-      if cb then cb(ok2, handOn("o-doubleclick", "host-input-click", err2)) end
-    end)
-    return true
-  end
-  host.log.info("overlay: no timer, so a double-click went out as two immediate clicks")
-  local ok2, err2 = click()
-  err2 = handOn("o-doubleclick", "host-input-click", err2)
-  if cb then cb(ok2, err2) end
-  return ok2, err2
+  return true
 end
 
 -- The width and height of an origin's CONTENT, which is what coordinates are measured
@@ -3755,6 +3730,59 @@ function Overlay:_captureKeys(list)
   return tokens
 end
 
+-- ── Keys swallowed while a hold or a hand-over lasts (`swallow`, since 0.16) ──
+-- A hold (O:holdKeys) and a trip's hand-over (trip:handOver) may also take keys that do NOTHING
+-- while they last: VPS Avenger on Windows switches its oscillators on Tab, so a Tab pressed while
+-- the user turns a knob, renames a field or chooses in its browser must not reach it (the
+-- maintainer's decision of 2026-10-25). `swallow = { keys, say }`: the keys captured for as long as
+-- it lasts and handed to nobody — not the plug-in, not `onKey`, not the overlay's own claims of them
+-- (Tab moving the focus) — and `say`, the module's sentence of how it ends ("Return confirms,
+-- Escape cancels."), said once per hold or hand-over, at the first of them pressed; the log names
+-- every one. They are captured with `menu = "taken"` (host.keys.capture), so a hand-over's menu
+-- flag, which lets every other captured key of the module through to the plug-in, leaves them
+-- swallowed; a menu the system drew still gets them. Every end gives them back with the rest.
+
+-- The capture's options for a swallowed key.
+Overlay._SWALLOWED = { menu = "taken" }
+
+-- `swallow` of a hold's or a hand-over's spec, read, or nil when there is none: { keys (as given),
+-- names (the host's spelling → as given), say }. `held` is the spec's own keys by name, which a
+-- swallowed key must not be one of. Raises naming the module's line (`who`'s caller's caller).
+function Overlay._swallowOf(who, swallow, held)
+  if swallow == nil then return nil end
+  if type(swallow) ~= "table" then
+    error(("%s's `swallow` takes { keys, say }, got %s"):format(who, type(swallow)), 3)
+  end
+  for k in pairs(swallow) do
+    if k ~= "keys" and k ~= "say" then
+      error(("%s's `swallow` has no field '%s' (it has keys and say)"):format(who, tostring(k)), 3)
+    end
+  end
+  local keys = swallow.keys
+  local count = 0
+  if type(keys) == "table" then
+    for _ in pairs(keys) do count += 1 end
+  end
+  if type(keys) ~= "table" or count < 1 or count > 8 or count ~= #keys then
+    error(("%s's `swallow.keys` must be a list of 1 to 8 key specs"):format(who), 3)
+  end
+  if type(swallow.say) ~= "string" or swallow.say == "" then
+    error(("%s's `swallow.say` must be the sentence said at the first key swallowed, got %s"):format(who,
+      swallow.say == "" and "an empty string" or type(swallow.say)), 3)
+  end
+  local names = {}
+  for _, k in ipairs(keys) do
+    local name = type(k) == "string" and host.keys.normalize(k) or nil
+    if not name then error(("%s's swallowed key %s is no key spec"):format(who, tostring(k)), 3) end
+    if names[name] then error(("%s swallows one key twice: %s and %s"):format(who, names[name], k), 3) end
+    if held[name] then
+      error(("%s names %s in its keys and in `swallow`: a key is held or swallowed, not both"):format(who, k), 3)
+    end
+    names[name] = k
+  end
+  return { keys = table.clone(keys), names = names, say = swallow.say }
+end
+
 -- ── Holding keys outside a trip (O:holdKeys, since 0.13) ──
 -- A control's `onActivate` takes a few keys for the module while it does something that takes
 -- more than one key — VPS Avenger's ring holds a knob pressed and turns it with Page Up and Page
@@ -3767,13 +3795,16 @@ end
 -- left the front — another window, the page key's page, the module disabled — or is in front on
 -- another window it also matches, which the hold's keys, scoped to the window it began on, would
 -- never reach; `info.why`) or "replaced" (another hold began). The keys go back after it. Nothing is said: the module says
--- what its hold is for. The trip's own hand-over (trip:handOver) is the same for a trip.
+-- what its hold is for — but for `swallow`'s sentence, said once at the first key it swallows (the
+-- section above; since 0.16). The trip's own hand-over (trip:handOver) is the same for a trip.
 function Overlay:holdKeys(spec)
   local who = ("overlay '%s': holdKeys"):format(tostring(self.label))
-  local HOLD_FIELDS = { keys = true, onKey = true, onEnd = true }
-  if type(spec) ~= "table" then error(("%s takes { keys, onKey, onEnd }, got %s"):format(who, type(spec)), 2) end
+  local HOLD_FIELDS = { keys = true, onKey = true, onEnd = true, swallow = true }
+  if type(spec) ~= "table" then error(("%s takes { keys, onKey, onEnd, swallow? }, got %s"):format(who, type(spec)), 2) end
   for k in pairs(spec) do
-    if not HOLD_FIELDS[k] then error(("%s has no field '%s' (it has keys, onKey and onEnd)"):format(who, tostring(k)), 2) end
+    if not HOLD_FIELDS[k] then
+      error(("%s has no field '%s' (it has keys, onKey, onEnd and swallow)"):format(who, tostring(k)), 2)
+    end
   end
   if type(spec.onKey) ~= "function" then
     error(("%s needs `onKey`, a function(overlay, key, mods, press), got %s"):format(who, type(spec.onKey)), 2)
@@ -3796,19 +3827,30 @@ function Overlay:holdKeys(spec)
     if seen[name] then error(("%s names one key twice: %s and %s"):format(who, seen[name], k), 2) end
     seen[name], byKey[name] = k, k
   end
+  local sw = Overlay._swallowOf(who, spec.swallow, byKey)
   if not self.active or self.away then
     host.log.info(("[keys] '%s': holdKeys — the overlay is not in front; nothing held"):format(tostring(self.label)))
     return false, fail("hold_not_in_front")
   end
   if self._hold then self:_holdEnd("replaced", {}) end
   -- `tokens`: the hold's capture of each key, by its name (host.keys.normalize); `hwnd`: the window it
-  -- began on (O:hwnd), which _recheck ends it "left" off.
+  -- began on (O:hwnd), which _recheck ends it "left" off. `keys` holds the swallowed keys too, so that
+  -- they are the hold's over the overlay's own claims and come back to the overlay at its end;
+  -- `swallow` says which they are (as given), `say` and `said` its sentence.
   local h = { keys = byKey, list = table.clone(keys), onKey = spec.onKey, onEnd = spec.onEnd, tokens = {},
-    hwnd = self:hwnd() }
+    hwnd = self:hwnd(), swallow = {}, say = sw and sw.say, said = false }
+  local all = table.clone(keys)
+  if sw then
+    for name, k in pairs(sw.names) do
+      byKey[name] = k
+      h.swallow[k] = true
+    end
+    for _, k in ipairs(sw.keys) do all[#all + 1] = k end
+  end
   -- Pinned before the keys are taken, as in _activate.
   host.keys.scope(true)
-  for _, k in ipairs(keys) do
-    local ok, tok, err = pcall(host.keys.capture, k, self:_holdKeyFn(h, k))
+  for _, k in ipairs(all) do
+    local ok, tok, err = pcall(host.keys.capture, k, self:_holdKeyFn(h, k), h.swallow[k] and Overlay._SWALLOWED or nil)
     if not ok or tok == nil then
       for _, held in pairs(h.tokens) do pcall(host.keys.release, held) end
       -- The keys taken before this one replaced the overlay's own captures of them.
@@ -3825,8 +3867,8 @@ function Overlay:holdKeys(spec)
     h.tokens[host.keys.normalize(k)] = tok
   end
   self._hold = h
-  host.log.info(("[keys] '%s' holds %s for its module until its onKey ends it"):format(tostring(self.label),
-    table.concat(keys, ", ")))
+  host.log.info(("[keys] '%s' holds %s for its module until its onKey ends it%s"):format(tostring(self.label),
+    table.concat(keys, ", "), sw and ("; " .. table.concat(sw.keys, ", ") .. " swallowed meanwhile") or ""))
   return true
 end
 
@@ -3842,6 +3884,7 @@ end
 function Overlay:_holdKey(h, key, mods, press)
   if self._hold ~= h then return end
   self._keys += 1
+  if h.swallow[key] then return self:_holdSwallowed(h, key) end
   local ok, v = pcall(h.onKey, self, key, mods, press)
   if not ok then
     host.log.info(("[keys] '%s': holdKeys' onKey failed: %s — the hold ends"):format(tostring(self.label), tostring(v)))
@@ -3849,6 +3892,15 @@ function Overlay:_holdKey(h, key, mods, press)
     return
   end
   if v == true and self._hold == h then self:_holdEnd("ended", { key = key }) end
+end
+
+-- Key `key` of hold `h`'s `swallow`: nothing done with it; the hold's sentence said at the first.
+function Overlay:_holdSwallowed(h, key)
+  local first = not h.said
+  h.said = true
+  host.log.info(("[keys] '%s': %s swallowed by its hold — it does nothing%s"):format(tostring(self.label), key,
+    first and (": said \"" .. h.say .. "\"") or ", said once already"))
+  if first then host.speech.output(h.say, { interrupt = true }) end
 end
 
 -- Hold `self._hold` ends `how` (see holdKeys): onEnd told, once, then its keys released, and the
@@ -3871,7 +3923,8 @@ end
 -- (_captureKey). Where the host cannot make it, the overlay's stands, which hands the key to the
 -- hold as well.
 function Overlay:_holdTake(h, name)
-  local ok, tok = pcall(host.keys.capture, h.keys[name], self:_holdKeyFn(h, h.keys[name]))
+  local spec = h.keys[name]
+  local ok, tok = pcall(host.keys.capture, spec, self:_holdKeyFn(h, spec), h.swallow[spec] and Overlay._SWALLOWED or nil)
   if ok and tok ~= nil then h.tokens[name] = tok end
 end
 
@@ -10759,6 +10812,10 @@ end
 --   browse   the same with Return alone: Escape and every other key are the plug-in's
 --   keys     the keys `keys` names, captured for the module's `onKey`, and no flag
 --
+-- and, of every kind, the keys `swallow` names (since 0.16): captured with `menu = "taken"`, so the
+-- flag leaves them swallowed, handed to nobody, and its sentence said once at the first of them
+-- (see "Keys swallowed while a hold or a hand-over lasts", above O:holdKeys).
+--
 -- WHY TWO CAPTURES AND A FLAG. While a module's menu flag counts for the window in front, the host
 -- lets every captured key through to it, and records it, with every unmodified Return and Escape,
 -- for host.keys.passedThrough; and a flag counts only while its module holds a capture, for the
@@ -10792,7 +10849,7 @@ pg.HAND_OVER = {
   browse = { keys = { "Return" }, flag = true },
   keys = { flag = false },
 }
-pg.HAND_OVER_FIELDS = { kind = true, keys = true, onKey = true, ends = true, onEnd = true }
+pg.HAND_OVER_FIELDS = { kind = true, keys = true, onKey = true, ends = true, onEnd = true, swallow = true }
 
 -- `pg.handing`: the VM's hand-over that holds the module's keys, or nil — one per VM, since the
 -- flag, the scope and the record are the module's.
@@ -10912,6 +10969,36 @@ function pg.handOverKey(P, t, w, key)
   end
 end
 
+-- The callback of hand-over `w`'s capture of swallowed key `key`, a handler of the module's: the key
+-- did nothing, and reached neither the plug-in nor the module; the hand-over's sentence is said at
+-- the first with the plug-in's window in front. A capture of a hand-over that has ended is
+-- released, and one that comes with the page not shown ends the trip, as an end key's does.
+function pg.handOverSwallowed(P, t, w, key)
+  return function()
+    if w.released or P.trip ~= t or not t.live then
+      local tok = w.tokenOf[key]
+      if tok then pcall(host.keys.release, tok) end
+      pg.plog(P, "trip '%s': %s came to a capture of a hand-over that has ended — released", tostring(t.label), key)
+      return
+    end
+    if not pg.shownNow(P) then
+      pg.plog(P, "trip '%s': %s was taken by the hand-over's capture with the page not shown — the module was "
+        .. "disabled and enabled again; the trip ends", t.label, key)
+      return pg.giveUp(P, t, "page closed", true)
+    end
+    local f = pg.frontNow()
+    if not (f ~= nil and f.id == P.held.window.id) then
+      pg.plog(P, "trip '%s': %s swallowed with %s in front — it does nothing; nothing said", t.label, key, pg.frontLine())
+      return
+    end
+    local first = not w.swallowSaid
+    w.swallowSaid = true
+    pg.plog(P, "trip '%s': %s swallowed — it does nothing and never reaches the plug-in%s", t.label, key,
+      first and (": said \"" .. w.swallow.say .. "\"") or ", said once already")
+    if first then pg.say(w.swallow.say, true) end
+  end
+end
+
 -- Over: the keys back, then `onEnd(o, trip, "ended", info)` in this handler, the trip acting. One
 -- that raises gives the trip up, "failed", and is not told again.
 function pg.handOverOver(P, t, w, o)
@@ -10982,9 +11069,11 @@ function pg.handOverRelease(P, t, how)
       after = "; went through after the end: " .. table.concat(names, ", ")
     end
   end
-  pg.plog(P, "trip '%s': the hand-over ends — %s, after %d ms; %s released%s, the scope %s%s", t.label, w.how,
-    w.endedAt - w.started, table.concat(w.keys, ", "), w.flag and (", the menu flag " .. tostring(flag)) or "",
-    pinned and "left to the overlay in front" or "every window", after)
+  pg.plog(P, "trip '%s': the hand-over ends — %s, after %d ms; %s released%s%s, the scope %s%s", t.label, w.how,
+    w.endedAt - w.started, table.concat(w.keys, ", "),
+    w.swallow and (" with " .. table.concat(w.swallow.keys, ", ") .. ", swallowed") or "",
+    w.flag and (", the menu flag " .. tostring(flag)) or "", pinned and "left to the overlay in front" or "every window",
+    after)
 end
 
 -- `onEnd(o, trip, how, info, err)` once in the VM's life, after the release: `how` is "ended" (its
@@ -11011,11 +11100,11 @@ function Trip:handOver(spec)
   local P = rawget(self, "_P")
   local who = ("trip '%s': handOver"):format(tostring(self.label))
   if type(spec) ~= "table" then
-    error(("%s takes { kind, keys?, onKey?, ends?, onEnd }, got %s"):format(who, type(spec)), 2)
+    error(("%s takes { kind, keys?, onKey?, ends?, onEnd, swallow? }, got %s"):format(who, type(spec)), 2)
   end
   for k in pairs(spec) do
     if not pg.HAND_OVER_FIELDS[k] then
-      error(("%s has no field '%s' (it has kind, keys, onKey, ends and onEnd)"):format(who, tostring(k)), 2)
+      error(("%s has no field '%s' (it has kind, keys, onKey, ends, onEnd and swallow)"):format(who, tostring(k)), 2)
     end
   end
   local kind = pg.HAND_OVER[spec.kind]
@@ -11054,6 +11143,7 @@ function Trip:handOver(spec)
     if seen[name] then error(("%s names one key twice: %s and %s"):format(who, seen[name], k), 2) end
     seen[name], names[i] = k, name
   end
+  local sw = Overlay._swallowOf(who, spec.swallow, seen)
   pg.mayWait(self, "handOver", spec.onEnd)
   local busy = pg.handing
   if busy then
@@ -11077,13 +11167,20 @@ function Trip:handOver(spec)
   host.keys.scope(true)
   local w = { kind = "handover", type = spec.kind, P = P, t = self, keys = table.clone(keys), endKeys = {},
     flag = kind.flag, tokens = {}, tokenOf = {}, passed = {}, seen = false, started = host.now(),
-    ends = spec.ends, onKey = spec.onKey, onEnd = spec.onEnd }
+    ends = spec.ends, onKey = spec.onKey, onEnd = spec.onEnd, swallow = sw, swallowSaid = false }
   for _, name in ipairs(names) do w.endKeys[name] = true end
-  for _, k in ipairs(keys) do
+  -- The hand-over's own keys, then the swallowed ones, each with its callback.
+  local all = {}
+  for _, k in ipairs(keys) do all[#all + 1] = { k, pg.handOverKey(P, self, w, k) } end
+  for _, k in ipairs(sw and sw.keys or {}) do
+    all[#all + 1] = { k, pg.handOverSwallowed(P, self, w, k), Overlay._SWALLOWED }
+  end
+  for _, each in ipairs(all) do
+    local k = each[1]
     -- A capture the host cannot make answers nil and why, having registered nothing (keys.md): that
     -- error is handOver's. One that raises — a spec normalize read and capture did not — is the
     -- host's failure, answered as one.
-    local ok, tok, err = pcall(host.keys.capture, k, pg.handOverKey(P, self, w, k))
+    local ok, tok, err = pcall(host.keys.capture, k, each[2], each[3])
     if not ok or tok == nil then
       for _, held in ipairs(w.tokens) do pcall(host.keys.release, held) end
       if not anotherActive(nil) then host.keys.scope(false) end
@@ -11104,9 +11201,10 @@ function Trip:handOver(spec)
   pg.handing = w
   self.wait = w
   self.stage = "waiting"
-  pg.plog(P, "trip '%s' hands the keyboard over (%s): %s %s window id %s, the module's scope pinned there; it ends "
-    .. "on %s, the page key or another application — nothing bounds it", self.label, spec.kind,
+  pg.plog(P, "trip '%s' hands the keyboard over (%s): %s %s window id %s, the module's scope pinned there%s; it "
+    .. "ends on %s, the page key or another application — nothing bounds it", self.label, spec.kind,
     table.concat(keys, ", "), kind.flag and "let through to" or "captured for the module in", tostring(W.id),
+    sw and ("; " .. table.concat(sw.keys, ", ") .. " swallowed there") or "",
     kind.flag and (#keys > 1 and "one of them" or "it") or "its onKey")
   return true
 end

@@ -665,6 +665,99 @@ fn a_hold_of_keys_ends_when_the_overlay_is_in_front_on_another_window() {
     "##);
 }
 
+/// `O:holdKeys`' `swallow` (runtime 0.16; the maintainer's decision of 2026-10-25): its keys are
+/// the hold's for as long as it lasts, over the overlay's own claims of them, and do nothing — Tab
+/// moves no focus and reaches neither the plug-in nor `onKey`, also while a menu flag lets the
+/// module's other keys through, and also once the overlay has captured Tab again while the hold
+/// stands; the module's sentence is said once per hold, interrupting, at the first key swallowed, and
+/// nothing at the start. Every end gives them back: "ended" and "replaced" to the overlay — Tab moves
+/// the focus again — and "left" with every other key. A mistake in `swallow` raises at the module's
+/// line.
+#[test]
+fn hold_keys_swallows_its_swallow_keys_says_once_and_gives_them_back() {
+    run_with_helpers("windows", &[], r##"
+        local S = T.S
+        local SAY = "Return confirms, Escape cancels."
+        local o = T.overlay(nil, "Avenger")
+        o.focus = 2
+        o:_syncNativeKeys()
+        local keys, ends = {}, {}
+        local function hold()
+          return o:holdKeys({ keys = { "PageUp", "Return", "Escape" }, swallow = { keys = { "Tab", "Shift+Tab" }, say = SAY },
+            onKey = function(_, key)
+              keys[#keys + 1] = key
+              return key == "Return" or key == "Escape"
+            end,
+            onEnd = function(_, how) ends[#ends + 1] = how end })
+        end
+        local said = #S.speech
+        local ok, err = hold()
+        assert(ok == true and err == nil, T.what(err))
+        assert(S.menuTaken["Tab"] and S.menuTaken["Shift+Tab"], "taken in a menu")
+        assert(#S.speech == said, "nothing said at the start")
+        assert(T.count("[keys] 'Avenger' holds PageUp, Return, Escape for its module until its onKey ends it; Tab, "
+          .. "Shift+Tab swallowed meanwhile") == 1, T.dump())
+        local at = o.focus
+        T.tab()
+        assert(o.focus == at, "Tab moves nothing")
+        assert(#S.speech == said + 1 and S.speech[#S.speech].text == SAY and S.speech[#S.speech].interrupt == true,
+          "said: " .. tostring(S.speech[#S.speech] and S.speech[#S.speech].text))
+        assert(T.typed("Shift+Tab") == "taken" and T.typed("Tab") == "taken" and o.focus == at, "taken by the hook")
+        -- A menu flag lets the module's other keys through; the swallowed ones stay the hold's.
+        T.host.keys.menuOpen(true)
+        assert(T.typed("PageUp") == "passed" and T.typed("Tab") == "taken", "through, and taken")
+        T.host.keys.menuOpen(false)
+        -- The overlay captures its keys again while the hold stands: Tab stays the hold's.
+        o:_suspendCapturedKeys(true)
+        o:_suspendCapturedKeys(false)
+        assert(S.menuTaken["Tab"], "the hold's capture again")
+        T.tab()
+        assert(o.focus == at and #S.speech == said + 1, "still swallowed, said once")
+        assert(T.count("[keys] 'Avenger': Tab swallowed by its hold — it does nothing: said \"" .. SAY .. "\"") == 1, T.dump())
+        assert(T.count("swallowed by its hold — it does nothing, said once already") == 4, T.dump())
+        assert(#keys == 0 and #ends == 0, "nothing for onKey: " .. table.concat(keys, ","))
+        -- Its end gives Tab back to the overlay.
+        assert(T.typed("Return") == "taken" and table.concat(ends, ",") == "ended", table.concat(ends, ","))
+        assert(table.concat(keys, ",") == "Return", table.concat(keys, ","))
+        assert(not S.menuTaken["Tab"] and not S.menuTaken["Shift+Tab"], "the overlay's own again")
+        T.tab()
+        assert(o.focus ~= at, "Tab moves again")
+        -- A second hold says it again, once; replaced, it gives Tab back.
+        said = #S.speech
+        hold()
+        T.tab()
+        T.tab()
+        assert(#S.speech == said + 1 and S.speech[#S.speech].text == SAY, "once again")
+        local other = {}
+        o:holdKeys({ keys = { "PageDown" }, onKey = function() end, onEnd = function(_, how) other[#other + 1] = how end })
+        assert(table.concat(ends, ",") == "ended,replaced", table.concat(ends, ","))
+        at = o.focus
+        T.tab()
+        assert(o.focus ~= at and not S.menuTaken["Tab"], "Tab the overlay's after the replaced hold")
+        -- Left: every key goes.
+        hold()
+        o:_deactivate()
+        assert(table.concat(ends, ",") == "ended,replaced,left", table.concat(ends, ","))
+        assert(T.typed("Tab") == "application" and T.typed("Shift+Tab") == "application", "released with the front")
+        -- Mistakes in `swallow` raise at the module's line, before anything else is asked.
+        for _, case in ipairs({
+          { "Tab", "`swallow` takes { keys, say }, got string" },
+          { { keys = { "Tab" } }, "`swallow.say` must be the sentence said at the first key swallowed, got nil" },
+          { { keys = {}, say = "x" }, "`swallow.keys` must be a list of 1 to 8 key specs" },
+          { { keys = { "Tab" }, say = "x", also = true }, "`swallow` has no field 'also' (it has keys and say)" },
+          { { keys = { "Return" }, say = "x" }, "names Return in its keys and in `swallow`: a key is held or swallowed, not both" },
+          { { keys = { "Tab", "Tab" }, say = "x" }, "swallows one key twice: Tab and Tab" },
+        }) do
+          local okR, errR = pcall(function()
+            return o:holdKeys({ keys = { "Return" }, swallow = case[1], onKey = function() end, onEnd = function() end })
+          end)
+          assert(not okR and string.find(tostring(errR), case[2], 1, true), tostring(errR))
+          assert(string.find(tostring(errR), '[string "scenario"]:', 1, true) == 1, "the module's line: " .. tostring(errR))
+        end
+        assert(not o._hold, "nothing held")
+    "##);
+}
+
 /// C10, for the ring's knobs (the maintainer's decision of 2026-10-24): `O:holdKeys` takes keys for
 /// the module while the overlay is in front, over every claim of the overlay's own — Return reaches
 /// onKey and activates no control — and Tab still moves. The harness keeps captures as the host
