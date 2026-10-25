@@ -1822,6 +1822,11 @@ into the changelog with that release.
   function, a symbol — where it answered `{ ok: true }` and on a Mac the application ended. On the
   build for other systems `host.hotkey.register` raises for a spec that does not parse, as Windows
   and a Mac do, where it answered `nil, err`.
+- **Windows: the neural text recogniser needs a processor with AVX2** (2026-10-25, `ort`
+  2.0.0-rc.15, ONNX Runtime 1.31 linked in). Without it the log says once that the recogniser is
+  not available, and `Windows.Media.Ocr` reads small regions alone, so a lone digit it refuses
+  comes back empty. Whether such a PC starts the application at all is not seen yet (the item
+  "Windows' ONNX Runtime needs AVX2").
 
 ## Implementation
 
@@ -2481,12 +2486,14 @@ See [docs/macos-port.md](docs/macos-port.md) for the decisions and
 - [ ] **The neural recogniser around macOS 13.3.** Microsoft builds 1.22 for 13.3, and the
       application does not open the library on an older macOS at all (`RUNTIME_MACOS` in
       `backend/paddle_ocr.rs`; the log says "not available" with the version, and Vision reads
-      alone), rather than trusting `dlopen` with `RTLD_NOW` to refuse it before any of its
-      initialisers runs. Not seen: whether 13.3 to 13.x loads it — no runner is older than macOS
-      14 — and whether `minos` is 13.3 in both slices, which the build job prints and warns about
-      when it is not. CI shows the refusal path only for a missing dylib and for one without this
-      Mac's half (macos-15).
-- [ ] **Windows stays on `ort` 2.0.0-rc.10.** Cargo allows one package with
+      alone), rather than trusting `dlopen` to refuse it before any of its initialisers runs.
+      Since 2026-10-25 `ort` opens it, with `RTLD_LAZY` where this file used `RTLD_NOW`; a slice
+      with chained fixups binds every symbol as it loads all the same, and the build job warns
+      about a slice without them. Not seen: whether 13.3 to 13.x loads it — no runner is older
+      than macOS 14 — and whether `minos` is 13.3 in both slices, which the build job prints and
+      warns about when it is not. CI shows the refusal path only for a missing dylib and for one
+      without this Mac's half (macos-15).
+- [x] **Windows stays on `ort` 2.0.0-rc.10.** Cargo allows one package with
       `links = "onnxruntime"` in the whole project, across every target, so the Mac's `ort` is the
       same version as Windows'. The way on: both together to rc.13, the Mac with its `api-22`
       feature; rc.13 needs Rust 1.88.
@@ -2494,6 +2501,61 @@ See [docs/macos-port.md](docs/macos-port.md) for the decisions and
       `crates/host/licences/onnxruntime` holds those of the release ort-sys 2.0.0-rc.10 links, and
       `package.ps1` and a test refuse another ort-sys in Cargo.lock until its own notices and
       `SOURCE.txt` are there.
+
+      **Taken** (2026-10-25, wip/deps step D), as 2.0.0-rc.15 on both platforms, not rc.13: rc.14
+      is the first that builds with `copy-dylibs` under Rust 1.100's build-dir layout, rc.15 fixes
+      over thirty cases of undefined behaviour and leaks, and the two ship the same `dist.tsv`
+      (MSRV 1.92). Windows links pyke's ms@1.31.0 `+directml` build (onnxruntime.lib 360 MB, was
+      303 MB), whose DirectML.dll is the same 1.15.4 file (FileVersion and SHA-256 as
+      `licences/directml/SOURCE.txt` says); the notices are v1.31.0's (ThirdPartyNotices.txt blob
+      75af6ad; LICENSE is the same blob, 48bc6bb). The Mac keeps Microsoft's universal 1.22.0:
+      1.23.2 is the last universal2 archive and needs macOS 13.4, 1.24 and later are arm64 only,
+      so the Intel tester could go no further, and nothing of `ort` asks for more. Both tables at
+      `api-22`, default features off, `tls-native` named for the download, `ndarray` gone (no code
+      used it). In `backend/paddle_ocr.rs`, read in rc.15's sources: one `builder` for both,
+      with `GraphOptimizationLevel::All`, because rc.11 made `Level3` ONNX Runtime's layout level
+      3, which 1.22 refuses (its `SetSessionGraphOptimizationLevel` takes 0, 1, 2 and 99), and
+      `AutoDevicePolicy::PreferCPU`, because at `api-22` every builder comes with `MaxEfficiency`
+      device selection (an NPU where ONNX Runtime finds one, Core ML on a Mac). Windows makes its
+      environment itself (`ort::init`, telemetry off), and the session holds it. Dropped, since
+      `ort` does it now: the Mac's own `dlopen`, `dlsym` and version check (`open_runtime`,
+      `RUNTIME_WANTED`) — `ort::init_from` loads the library and says why it cannot, and
+      `ort::util::probe` against `ort::MINOR_VERSION` keeps the pin to 1.22, so the log says
+      `ONNX Runtime 1.22` without the patch — and the unsafe `ReleaseEnv` of `ort`'s environment:
+      `ort` keeps none of its own, so the Mac keeps its handle beside the session (`ENVIRONMENT`)
+      and the release drops it. Kept: the release, `ENV_MADE`, the backstop, the warm-up join and
+      `settle`. New: Windows refuses the recogniser on a processor without AVX2 (below). The
+      comments on ort-sys's pkg-config and `ORT_` variables (macos-build.yml, package-macos.sh)
+      say what rc.15 does: its build script returns at once under `load-dynamic`. The macOS job
+      warns about a slice without chained fixups; build.yml's measured crates lose `ndarray` and
+      gain `libloading` for the Mac. tools/paddle-engines stays on rc.10 in its own workspace.
+      What is left: the three items below.
+- [ ] **Live (CI's OCR measurement, then Windows with NVDA): the recogniser on `ort` 2.0.0-rc.15**
+      (built 2026-10-25, not run). Windows links ONNX Runtime 1.31, nine minor versions on. A run
+      with `ocr-bench: both` on wip/deps, against main's 40228892320 (d2ef50e), whose Windows
+      `--paddle` read 23 of 27 small pictures right, 1 of 3 of "nothing is right too", and 4 of 9
+      pictures without text as something, with the session in 128 ms and the first recognition in
+      7.3 ms; its header says `all graph optimisations` now. A reading that changes, or a Mac
+      verdict that flips, is the finding; speed within the runners' noise is not. On the Macs: the
+      `ready` line says `ONNX Runtime 1.22`, the macos-15 copies still say "not available" with a
+      reason, the newer macOS's `--paddle-probe` says `ok`, no backstop line, and no warning about
+      chained fixups. Then Windows with NVDA: Melodyne's lone digits read as before, and the log
+      has no "not available" line.
+- [ ] **Windows' ONNX Runtime needs AVX2.** From `ort` 2.0.0-rc.11 on, pyke's x86_64 builds target
+      x86-64-v3: Intel from Haswell, AMD from the first Ryzen, and not the Atom-based Celerons and
+      Pentiums Windows 11 still supports. `init` refuses the recogniser without it
+      (`ort::sys::USING_PYKE_BINARIES` and `is_x86_feature_detected!`), so that its first call
+      cannot end the process; `ort` itself only warns on standard error. Not seen: what such a PC
+      does at all. ONNX Runtime is linked in, and code of it built for x86-64-v3 may run in the
+      executable's static initialisers, before `main`, where no guard reaches. If that matters,
+      the way around is an ONNX Runtime without that floor — Microsoft's own onnxruntime.dll,
+      which picks its kernels by processor at run time, loaded as on the Mac — not this guard.
+- [ ] **Before Rust 1.100: `copy-dylibs` and the tests.** ort 2.0.0-rc.14's notes: under the v2
+      build-dir layout, test executables no longer see the DLLs `copy-dylibs` places, and
+      Windows' test executables import DirectML.dll; look again when the toolchain moves. And
+      Windows CI does not cache `%LOCALAPPDATA%\ort.pyke.io`, so every run fetches and unpacks
+      pyke's LZMA2 archive again (`ORT_CACHE_DIR` is a build-time variable an `actions/cache`
+      keyed on ort-sys's version could use).
 - [ ] **The dylib on a tester's Mac: first start, translocation, quarantine.** Whether the bundled
       dylib loads in a download opened with its quarantine flag still set, and after "Open
       Anyway": it may stay in quarantine. Does loading then fail quietly — the log's "not

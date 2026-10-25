@@ -134,15 +134,16 @@ fi
 [ -x "$exe" ] || { echo "no executable at $exe — build first" >&2; exit 1; }
 
 # ONNX Runtime is opened by the application at run time (crates/host/src/backend/paddle_ocr.rs);
-# an executable that LINKS it does not start on a Mac without that file. ort-sys asks pkg-config
-# for it even so (`load-dynamic` downloads nothing but still asks), and a Homebrew onnxruntime on
-# the building Mac answers. Refused here, before anything is packaged — on a tester's own build
-# as in CI, where it would otherwise be found only after the download had gone out.
+# an executable that LINKS it does not start on a Mac without that file. ort-sys 2.0.0-rc.15 links
+# nothing under `load-dynamic` and asks pkg-config only for ort's `pkg-config` feature, but rc.10
+# asked it even so, and a Homebrew onnxruntime on the building Mac answered. Refused here, before
+# anything is packaged — on a tester's own build as in CI, where it would otherwise be found only
+# after the download had gone out.
 if command -v otool >/dev/null 2>&1; then
   links="$(otool -L "$exe" 2>/dev/null || true)"
   if printf '%s\n' "$links" | grep -i onnxruntime >/dev/null; then
     echo "$exe links ONNX Runtime; the application must only open it at run time" >&2
-    echo "(crates/host/Cargo.toml): build where pkg-config finds no onnxruntime — Homebrew's, for one" >&2
+    echo "(crates/host/Cargo.toml): ort stays load-dynamic, without its pkg-config feature, which finds Homebrew's onnxruntime" >&2
     exit 1
   fi
 fi

@@ -89,7 +89,7 @@ pub(crate) fn bench_rows(o: &Options, system: Option<SystemRead<'_>>, path: std:
         }
     };
     out.say(&format!(
-        "paddle | the session was made in {} ms: {}, one intra-op thread, graph optimisation level 3",
+        "paddle | the session was made in {} ms: {}, one intra-op thread, all graph optimisations",
         pure::ms(load),
         engine_words()
     ));

@@ -361,8 +361,10 @@ jobs:
       # and checksum are fixed. Read here, so that the cache below is keyed by them; fetched and
       # checked in the step after it.
       #
-      # None of the names here begins with ORT_: ort-sys's build script reads variables of that
-      # shape, and one set by accident would change what the executable is built against.
+      # None of the names here begins with ORT_, the shape of the variables `ort` reads: its build
+      # script, which under `load-dynamic` returns before it reads any (ort-sys 2.0.0-rc.15), and
+      # `ort` itself at run time (ORT_DYLIB_PATH) wherever no library was loaded by its path. One
+      # set by accident could change what the executable is built against, or what it opens.
       - name: Which ONNX Runtime the package carries
         id: onnxruntime-pin
         if: steps.reuse.outputs.reused != 'true'
@@ -396,11 +398,12 @@ jobs:
 
       # Fetched when the cache had none, checked, unpacked, and asked what the package will carry:
       # both slices (the application is universal, and a slice the dylib lacks is a Mac on which
-      # the recogniser does not load), the size, the macOS each slice is built for (`minos`), and
-      # whether either slice imports a Core ML symbol strongly that macOS 13.3 does not have —
-      # `MLComputePlan` and `MLOptimizationHints` are macOS 14.4 and later, and a strong import of
-      # either would refuse the whole library below that, which is the opposite of what the 13.3
-      # floor promises. Weak imports are fine: they resolve to nothing where they are missing.
+      # the recogniser does not load), the size, the macOS each slice is built for (`minos`), whether
+      # it binds its symbols as it loads (chained fixups), and whether either slice imports a Core
+      # ML symbol strongly that macOS 13.3 does not have — `MLComputePlan` and
+      # `MLOptimizationHints` are macOS 14.4 and later, and a strong import of either would refuse
+      # the whole library below that, which is the opposite of what the 13.3 floor promises. Weak
+      # imports are fine: they resolve to nothing where they are missing.
       #
       # And the archive's SHA-256 against the one tools/onnxruntime-mac.txt pins: one that differs
       # is refused, and so is a pin file without one — the error then names the archive's own, for
@@ -460,6 +463,13 @@ jobs:
             minos=$(vtool -arch "$a" -show-build "$lib" 2>/dev/null | awk '$1 == "minos" { print $2; exit }' || true)
             if [ -n "$minos" ] && [ "$minos" != 13.3 ]; then
               echo "::warning::the $a slice of ONNX Runtime is built for macOS $minos, and the application keeps 13.3 as its floor (RUNTIME_MACOS)"
+            fi
+            # `ort` opens the library with RTLD_LAZY. A slice with chained fixups binds every
+            # symbol as it loads all the same, so a macOS that lacks one refuses the load, with
+            # its reason, rather than the first call into it. Counted, not `grep -q`: see below.
+            fixups=$(otool -arch "$a" -l "$lib" | grep -c LC_DYLD_CHAINED_FIXUPS || true)
+            if [ "${fixups:-0}" = 0 ]; then
+              echo "::warning::the $a slice of ONNX Runtime has no chained fixups: ort opens it lazily, so a symbol a macOS lacks would fail at its first call rather than at its load"
             fi
             # Into a file, and searched there: `grep -q` stops reading at its first match, and
             # under pipefail a listing still being written into the pipe then fails the step
@@ -778,9 +788,10 @@ jobs:
           echo "neither obsoleted capture function is imported"
           # ONNX Runtime is opened by the application itself, at run time, from the bundle
           # (backend/paddle_ocr.rs); the executable must never name it among the libraries it
-          # loads. It would, without anyone writing so: ort-sys asks pkg-config first even with
-          # `load-dynamic` (its build.rs), and a Homebrew onnxruntime on a runner would be linked
-          # in — and then the application would not start on any Mac without that file.
+          # loads. It could, without anyone writing so: ort-sys 2.0.0-rc.15's build script links
+          # nothing under `load-dynamic` and asks pkg-config only for ort's `pkg-config` feature,
+          # but rc.10's asked it first even so, and a Homebrew onnxruntime on a runner would be
+          # linked in — and then the application would not start on any Mac without that file.
           # package-macos.sh refuses such an executable before anything is packaged, and so
           # before the upload; this asks the bundle that went out once more.
           if otool -L "$exe" | grep -i onnxruntime; then

@@ -111,7 +111,7 @@ function Assert-OrtSysOfNotices {
     throw ("ONNX Runtime's notices in crates\host\licences\onnxruntime are those of ONNX Runtime " +
       "$($ortSource['version']), for ort-sys $($ortSource['ort-sys']), and Cargo.lock builds ort-sys " +
       "${ortSys}: replace LICENSE and ThirdPartyNotices.txt with those of the ONNX Runtime it links " +
-      "(ort-sys's dist.txt names the release), from that release's tag, and both lines in SOURCE.txt")
+      "(ort-sys's build\download\dist.tsv names the release), from that release's tag, and both lines in SOURCE.txt")
   }
 }
 Assert-OrtSysOfNotices

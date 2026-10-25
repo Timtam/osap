@@ -278,10 +278,10 @@ jobs:
           # tables, which decide how the measured executable is compiled, measures both.
           crates_both=(
             ort ort-sys          # the neural recogniser's binding: Windows links the ONNX Runtime it downloads, a Mac loads the bundle's
-            ndarray              # its tensors
             image png            # the pictures, decoded
           )
           crates_macos=(
+            libloading           # what opens the bundle's ONNX Runtime (ort's load-dynamic)
             objc2-vision         # Vision
             objc2-core-ml        # the compute devices Vision is asked about
             objc2-core-graphics  # the CGImage Vision is handed

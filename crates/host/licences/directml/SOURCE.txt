@@ -1,11 +1,11 @@
 # DirectML's terms, for the Windows package (the maintainer's decision of 2026-10-24: the DLL stays
 # in the package, and its licence goes with it). DirectML.dll is the second OCR engine's GPU
 # runtime; it lies beside the executable, not linked into it. It reaches target\release through
-# `ort`'s download-binaries and copy-dylibs: pyke's build of ONNX Runtime ms@1.22.0 (the release
-# ../onnxruntime/SOURCE.txt names) carries it, as onnxruntime\lib\DirectML.dll in the download
-# under %LOCALAPPDATA%\ort.pyke.io\dfbin\x86_64-pc-windows-msvc\, and that download carries no
-# licence for it. Its FileVersion is 1.15.4+241025-1615.1.dml-1.15.fac7597, its product name
-# "DirectML Redistributable Library".
+# `ort`'s download-binaries and copy-dylibs: pyke's build of ONNX Runtime ms@1.31.0 (the release
+# ../onnxruntime/SOURCE.txt names) carries it, as DirectML.dll beside onnxruntime.lib in the
+# download, under %LOCALAPPDATA%\ort.pyke.io\dfbin\x86_64-pc-windows-msvc\<the download's
+# SHA-256>\, and that download carries no licence for it. Its FileVersion is
+# 1.15.4+241025-1615.1.dml-1.15.fac7597, its product name "DirectML Redistributable Library".
 #
 # Microsoft ships that release as the NuGet package Microsoft.AI.DirectML 1.15.4 (below), whose
 # LICENSE.txt (the Microsoft Software License Terms for DirectML) and ThirdPartyNotices.txt are its
@@ -14,9 +14,10 @@
 # It refuses to package while either is missing, and when the DirectML.dll it is about to ship is
 # not this release (its FileVersion does not begin with `version`) or not this file (`sha256`).
 #
-# `sha256` is the DLL `ort`'s download delivers, measured 2026-10-24. That it is byte for byte the
-# package's bin\x64-win\DirectML.dll is checked when the two files are taken from the package; a
-# DLL of another release brings its own package's two files and both lines changed.
+# `sha256` is the DLL `ort`'s download delivers, measured 2026-10-24 in ms@1.22.0's and again, the
+# same file, in ms@1.31.0's on 2026-10-25. That it is byte for byte the package's
+# bin\x64-win\DirectML.dll is checked when the two files are taken from the package; a DLL of
+# another release brings its own package's two files and both lines changed.
 #
 # key=value, one a line; a line starting with `#` is a comment.
 version=1.15.4

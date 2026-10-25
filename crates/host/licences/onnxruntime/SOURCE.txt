@@ -1,9 +1,10 @@
 # ONNX Runtime's licence and third-party notices, for the Windows package. There ONNX Runtime is
 # linked into the executable: `ort`'s download-binaries fetch pyke's static build of Microsoft's
-# release (ort-sys's dist.txt names it, `ms@1.22.0`), and that download carries neither file. So
-# both are kept here, as Microsoft's repository has them at the release's tag, unchanged: LICENSE
-# and ThirdPartyNotices.txt beside this file (git blobs 48bc6bb and 7b2bbdd there). package.ps1
-# ships them as licences\onnxruntime-MIT.txt and licences\onnxruntime-ThirdPartyNotices.txt.
+# release (ort-sys's build/download/dist.tsv names it, `ms@1.31.0`), and that download carries
+# neither file. So both are kept here, as Microsoft's repository has them at the release's tag,
+# unchanged: LICENSE and ThirdPartyNotices.txt beside this file (git blobs 48bc6bb and 75af6ad
+# there). package.ps1 ships them as licences\onnxruntime-MIT.txt and
+# licences\onnxruntime-ThirdPartyNotices.txt.
 #
 # The notices are one release's. package.ps1 refuses to package when Cargo.lock builds another
 # ort-sys than the one below, and so does a test (backend/paddle_ocr.rs): another ort-sys links
@@ -11,6 +12,6 @@
 # A Mac package carries the notices of the archive in tools/onnxruntime-mac.txt instead.
 #
 # key=value, one a line; a line starting with `#` is a comment.
-ort-sys=2.0.0-rc.10
-version=1.22.0
-source=https://github.com/microsoft/onnxruntime/tree/v1.22.0
+ort-sys=2.0.0-rc.15
+version=1.31.0
+source=https://github.com/microsoft/onnxruntime/tree/v1.31.0

@@ -46,8 +46,8 @@
 //! **On a Mac every process that made the engine releases it before it ends** ([`release`]): the
 //! session, then ONNX Runtime's environment, while everything they use is still there. ONNX
 //! Runtime 1.22 keeps the environment in a static `unique_ptr` (`OrtEnv::p_instance_`) whose
-//! destructor, run by `exit()`, deletes one that is still alive; and `ort` never releases it — it
-//! keeps it in a static that is never dropped, as this file keeps the session. That deletion
+//! destructor, run by `exit()`, deletes one that is still alive; and nothing else releases it —
+//! the session holds it, and this file keeps both in statics that are never dropped. That deletion
 //! locks the mutex of ONNX Runtime's logging (`DefaultLoggerMutex`), a function-local static made
 //! when the environment was, so destroyed by `exit()` before the `unique_ptr`; macOS's libc++
 //! throws "mutex lock failed: Invalid argument" out of a destructor, and the process aborts
@@ -61,7 +61,7 @@ use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError, SyncSender, TryR
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
-use ort::session::builder::GraphOptimizationLevel;
+use ort::session::builder::{AutoDevicePolicy, GraphOptimizationLevel, SessionBuilder};
 use ort::session::Session;
 use ort::value::Tensor;
 
@@ -88,9 +88,9 @@ fn engine() -> Option<&'static Engine> {
     made().as_ref().ok()
 }
 
-/// Makes the engine the first time, inside a catch: a panic while it is made — in `ort`, which
-/// panics rather than fails on a library it cannot load (see [`init`]) — is kept as the reason
-/// there is none, once, instead of panicking again on every region. On a Mac it says once in
+/// Makes the engine the first time, inside a catch: a panic while it is made — in `ort`, whose
+/// wrappers still panic on a few answers of ONNX Runtime's they do not expect — is kept as the
+/// reason there is none, once, instead of panicking again on every region. On a Mac it says once in
 /// the log whether the recogniser is ready; on Windows only when it is not, once, since the
 /// catch keeps the panic from the panic hook's own line and nothing makes it again.
 fn made() -> &'static Result<Engine, String> {
@@ -320,24 +320,56 @@ pub fn settle() {
 #[cfg(windows)]
 const MODEL: &[u8] = include_bytes!("../../models/ppocr-rec.onnx");
 
+/// The session's options, one set for both platforms: the CPU alone, one intra-op thread, every
+/// graph optimisation. Each is there for a reason the default does not cover:
+///
+/// - `PreferCPU`. Built at API level 22 (`api-22`, crates/host/Cargo.toml), `ort` hands out every
+///   builder with ONNX Runtime's device selection set to `MaxEfficiency`, which takes an NPU where
+///   ONNX Runtime finds one and, by `ort`'s own documentation, the Core ML provider on a Mac. A
+///   model this small gains nothing from either; `PreferCPU` takes the first CPU provider, which
+///   in both builds is ONNX Runtime's own, the one a session had before device selection existed.
+/// - `All` (`ORT_ENABLE_ALL`), what `Level3` was up to `ort` 2.0.0-rc.10. From rc.11 on `Level3`
+///   is ONNX Runtime's newer layout level, 3, which 1.22 refuses as not valid: a Mac would make no
+///   session, and Windows would lose the optimisations above it.
+/// - `ort::Result` rather than `anyhow`: each option hands its builder back inside its error
+///   (`ort::Error<SessionBuilder>`), which is not `Send`, and `?` here makes it the plain one.
+fn builder(environment: &ort::environment::Environment) -> ort::Result<SessionBuilder> {
+    Ok(Session::builder(environment)?
+        .with_auto_device(AutoDevicePolicy::PreferCPU)?
+        .with_optimization_level(GraphOptimizationLevel::All)?
+        .with_intra_threads(1)?)
+}
+
+/// Makes the engine on Windows: ONNX Runtime's environment, under this application's name and
+/// with telemetry off, as on a Mac, then the session from the embedded model with [`builder`]'s
+/// options. The session holds the environment, and [`ENGINE`] the session, for the life of the
+/// process.
+///
+/// Refused first on a processor without AVX2: pyke's builds of ONNX Runtime, which
+/// `download-binaries` links in, target x86-64-v3 from `ort` 2.0.0-rc.11 on, so their first call
+/// would end the process with an illegal instruction. `ort` itself only writes a warning to
+/// standard error, which nobody reads here.
 #[cfg(windows)]
 fn init() -> anyhow::Result<Engine> {
-    let session = Session::builder()?
-        .with_optimization_level(GraphOptimizationLevel::Level3)?
-        .with_intra_threads(1)?
-        .commit_from_memory(MODEL)?;
+    #[cfg(target_arch = "x86_64")]
+    if ort::sys::USING_PYKE_BINARIES && !std::is_x86_feature_detected!("avx2") {
+        anyhow::bail!("this processor has no AVX2, which the ONNX Runtime linked in needs");
+    }
+    let environment = ort::init().with_name("automation-platform").with_telemetry(false).build()?;
+    let session = builder(&environment)?.commit_from_memory(MODEL)?;
     Ok(Engine { session: Mutex::new(Some(session)), dict: paddle_pre::dict() })
 }
 
-/// The version of ONNX Runtime the Mac loaded, as its library says it (`GetVersionString`).
+/// The version of ONNX Runtime the Mac loaded: `1.` and the minor version its library gives
+/// (`ort::util::probe`), which is as much of it as `ort` reads.
 #[cfg(target_os = "macos")]
 static RUNTIME: OnceLock<String> = OnceLock::new();
 
-/// The version this build's `ort` (2.0.0-rc.10) is made for. `ort` takes a newer minor version
-/// with a warning and panics on an older one; Microsoft's 1.22.0 is what the package carries
-/// (`tools/onnxruntime-mac.txt`), so anything else is refused before `ort` sees it.
+/// ONNX Runtime's environment on a Mac, from [`init`] until [`release`] drops it. `ort` keeps only
+/// a weak handle to it, and the session holds the other strong one, so this one is the last once
+/// the session has gone.
 #[cfg(target_os = "macos")]
-const RUNTIME_WANTED: &str = "1.22.";
+static ENVIRONMENT: Mutex<Option<ort::environment::Environment>> = Mutex::new(None);
 
 /// Where the bundle keeps ONNX Runtime and the model: `Contents/Frameworks/libonnxruntime.dylib`
 /// and `Contents/Resources/ppocr-rec.onnx`, from the executable in `Contents/MacOS`, absolute.
@@ -357,47 +389,56 @@ fn bundle_files() -> Result<(std::path::PathBuf, std::path::PathBuf), String> {
 /// recogniser is not available:
 ///
 /// 1. Where the library and the model are ([`bundle_files`]).
-/// 2. `ort::init_from` with the library's path, at once and in every case, before anything else
-///    of `ort` is called. It does nothing but fix the path; `ort` reads `ORT_DYLIB_PATH` from the
-///    environment for whichever call of its comes first otherwise, and this application reads no
-///    environment variable for it. A source test below holds this order.
-/// 3. This macOS is one the library is built for ([`RUNTIME_MACOS`]): below it the library is
+/// 2. This macOS is one the library is built for ([`RUNTIME_MACOS`]): below it the library is
 ///    not opened at all, rather than trusting `dlopen` to refuse it cleanly.
-/// 4. The model is a file in the bundle.
-/// 5. The library opened by this file itself ([`open_runtime`]), and its version asked: `ort`
-///    panics on a library it cannot load or that is older than it expects, where this can say
-///    why. The handle stays open for the life of the process.
-/// 6. Only then the environment (`commit`) — said in [`ENV_MADE`] the moment it exists, and the
-///    [`backstop`] registered right after it — and the session, from the model's file. CPU only,
-///    one intra-op thread, graph optimisation level 3, as on Windows: the Core ML provider brings
+/// 3. The model and the library are files in the bundle.
+/// 4. `ort::init_from` with the library's path, the first call of `ort` in the process: `ort`'s
+///    own load, which opens the library, finds `OrtGetApiBase` and refuses a version older than
+///    the 1.22 this build is made for (`api-22`), each with its reason. Any other call of `ort`
+///    first, or after a load that failed, would read `ORT_DYLIB_PATH` from the environment and
+///    open what that names, or a library of that name wherever `dlopen` looks; this application
+///    reads no environment variable for it, and calls nothing of `ort` while there is no engine.
+///    A source test below holds this order. The library stays open for the life of the process.
+/// 5. Its minor version (`ort::util::probe`), which has to be the 1.22 the package carries
+///    (`tools/onnxruntime-mac.txt`): `ort` takes a newer one with a line in the log, and this
+///    file's release is written for 1.22's exit.
+/// 6. Only then the environment (`build`) — kept in [`ENVIRONMENT`], said in [`ENV_MADE`] the
+///    moment it exists, and the [`backstop`] registered right after it — and the session, from
+///    the model's file, with [`builder`]'s options as on Windows: the Core ML provider brings
 ///    nothing a model this small could use, and no Mac without a Neural Engine has one anyway.
 #[cfg(target_os = "macos")]
 fn init() -> anyhow::Result<Engine> {
-    let files = bundle_files();
-    let environment = ort::init_from(files.as_ref().map(|(dylib, _)| dylib.display().to_string()).unwrap_or_default())
-        .with_name("automation-platform")
-        .with_telemetry(false);
-    let (dylib, model) = files.map_err(anyhow::Error::msg)?;
+    let (dylib, model) = bundle_files().map_err(anyhow::Error::msg)?;
     macos_new_enough().map_err(anyhow::Error::msg)?;
     if !model.is_file() {
         anyhow::bail!("the model is not in the bundle: {}", model.display());
     }
-    let version = open_runtime(&dylib).map_err(anyhow::Error::msg)?;
-    let _ = RUNTIME.set(version);
-    environment.commit()?;
+    if !dylib.is_file() {
+        anyhow::bail!("ONNX Runtime is not in the bundle: {}", dylib.display());
+    }
+    let environment = ort::init_from(&dylib)?;
+    match ort::util::probe(&dylib) {
+        Some(minor) if minor == ort::MINOR_VERSION => {}
+        Some(minor) => anyhow::bail!(
+            "{} is ONNX Runtime 1.{minor}, and this build is made for 1.{}.x",
+            dylib.display(),
+            ort::MINOR_VERSION
+        ),
+        None => anyhow::bail!("{} gives no version of ONNX Runtime 1.x", dylib.display()),
+    }
+    let _ = RUNTIME.set(format!("1.{}", ort::MINOR_VERSION));
+    let environment = environment.with_name("automation-platform").with_telemetry(false).build()?;
+    *lock_even_if_poisoned(&ENVIRONMENT) = Some(environment.clone());
     // Before the session, which can fail: an environment made is released at the end whether
     // or not a session ever was.
     ENV_MADE.store(true, Ordering::SeqCst);
     register_backstop();
-    let session = Session::builder()?
-        .with_optimization_level(GraphOptimizationLevel::Level3)?
-        .with_intra_threads(1)?
-        .commit_from_file(&model)?;
+    let session = builder(&environment)?.commit_from_file(&model)?;
     Ok(Engine { session: Mutex::new(Some(session)), dict: paddle_pre::dict() })
 }
 
 /// Whether ONNX Runtime's environment exists and has not been released: set by [`init`] once
-/// `commit` has made it, cleared by [`release`] as it releases it. What the [`backstop`] asks.
+/// `build` has made it, cleared by [`release`] as it releases it. What the [`backstop`] asks.
 #[cfg(target_os = "macos")]
 static ENV_MADE: AtomicBool = AtomicBool::new(false);
 
@@ -506,27 +547,20 @@ fn take_session() -> bool {
     had
 }
 
-/// ONNX Runtime's environment released (`ReleaseEnv`), when [`init`] made it: its count goes from
-/// one to none, and ONNX Runtime deletes it now — its logging's mutex still there — and leaves
-/// `OrtEnv::p_instance_` empty for `exit()`. `ort` keeps its handle to it in a static that is
-/// never dropped, so it is not released twice; nothing of `ort` asks for it after, since a
-/// session is the only thing this file makes in it and none is made once [`IN_ORT`] is closed.
+/// ONNX Runtime's environment released (`ReleaseEnv`), when [`init`] made it: [`ENVIRONMENT`]'s
+/// handle dropped, the last one once the session has gone, and `ort` releases the environment
+/// with it. ONNX Runtime deletes it now — its logging's mutex still there — and leaves
+/// `OrtEnv::p_instance_` empty for `exit()`. Nothing of `ort` asks for it after, since a session
+/// is the only thing this file makes in it and none is made once [`IN_ORT`] is closed.
 #[cfg(target_os = "macos")]
 fn release_environment() -> bool {
-    use ort::AsPointer as _;
     if !ENV_MADE.swap(false, Ordering::SeqCst) {
         return false;
     }
-    // Made already, so this hands back `ort`'s own and makes none. Should it ever fail, the
-    // environment is still alive, and the backstop is armed for it again.
-    let Ok(environment) = ort::environment::get_environment() else {
-        ENV_MADE.store(true, Ordering::SeqCst);
-        return false;
-    };
-    // SAFETY: the environment `CreateEnv` made, released once, with no session left in it and no
-    // call of this process inside ONNX Runtime.
-    unsafe { (ort::api().ReleaseEnv)(environment.ptr().cast_mut()) };
-    true
+    let environment = lock_even_if_poisoned(&ENVIRONMENT).take();
+    let had = environment.is_some();
+    drop(environment);
+    had
 }
 
 /// Registers the [`backstop`] with `atexit`, once, right after the environment is made. The
@@ -576,9 +610,10 @@ pub(crate) const BACKSTOP_LINE: &[u8] =
 
 /// The oldest macOS Microsoft builds ONNX Runtime 1.22's dylib for, as major and minor version:
 /// its `minos`, which CI prints for both slices and warns about when it is another
-/// (`macos-build.yml`). Below it libc++ lacks symbols the library imports, and `dlopen` with
-/// `RTLD_NOW` should refuse it; no runner is that old to show it does (TODO.md), so the
-/// application does not ask there.
+/// (`macos-build.yml`). Below it libc++ lacks symbols the library imports, and `dlopen` should
+/// refuse it — `ort` opens it with `RTLD_LAZY`, but a library with chained fixups, which CI looks
+/// for in both slices, binds every symbol as it loads; no runner is that old to show it does
+/// (TODO.md), so the application does not ask there.
 #[cfg(target_os = "macos")]
 const RUNTIME_MACOS: (isize, isize) = (13, 3);
 
@@ -588,69 +623,16 @@ fn macos_new_enough() -> Result<(), String> {
     let v = objc2_foundation::NSProcessInfo::processInfo().operatingSystemVersion();
     if (v.majorVersion, v.minorVersion) < RUNTIME_MACOS {
         return Err(format!(
-            "macOS {}.{}.{} is older than the {}.{} ONNX Runtime {RUNTIME_WANTED}x is built for",
-            v.majorVersion, v.minorVersion, v.patchVersion, RUNTIME_MACOS.0, RUNTIME_MACOS.1
+            "macOS {}.{}.{} is older than the {}.{} ONNX Runtime 1.{}.x is built for",
+            v.majorVersion,
+            v.minorVersion,
+            v.patchVersion,
+            RUNTIME_MACOS.0,
+            RUNTIME_MACOS.1,
+            ort::MINOR_VERSION
         ));
     }
     Ok(())
-}
-
-/// Opens ONNX Runtime at `path` and asks its version: the version, or why it cannot be used.
-///
-/// `RTLD_NOW`, so that a library missing a symbol of this macOS — Microsoft builds 1.22 for macOS
-/// 13.3, and below that libc++ lacks some of what it imports — fails here, with `dlerror`'s
-/// reason, rather than on its first call. The same holds for a library without this Mac's slice.
-/// `RTLD_LOCAL`, so that its symbols do not join the process's. Never closed: `ort` opens the same
-/// file again by its path, and the two handles are one library.
-#[cfg(target_os = "macos")]
-fn open_runtime(path: &std::path::Path) -> Result<String, String> {
-    use std::ffi::{CStr, CString};
-    use std::os::unix::ffi::OsStrExt as _;
-    let c_path = CString::new(path.as_os_str().as_bytes()).map_err(|_| format!("{} holds a NUL byte", path.display()))?;
-    let said = || {
-        // SAFETY: `dlerror` returns this thread's last message or null, valid until the next call.
-        let e = unsafe { libc::dlerror() };
-        if e.is_null() {
-            "no reason given".to_string()
-        } else {
-            // SAFETY: a NUL-terminated string `dlerror` owns.
-            unsafe { CStr::from_ptr(e) }.to_string_lossy().into_owned()
-        }
-    };
-    if !path.is_file() {
-        return Err(format!("ONNX Runtime is not in the bundle: {}", path.display()));
-    }
-    // SAFETY: a NUL-terminated path; the handle is kept for the life of the process.
-    let handle = unsafe { libc::dlopen(c_path.as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL) };
-    if handle.is_null() {
-        return Err(format!("ONNX Runtime did not load from {}: {}", path.display(), said()));
-    }
-    // SAFETY: a live handle and a NUL-terminated name.
-    let symbol = unsafe { libc::dlsym(handle, c"OrtGetApiBase".as_ptr()) };
-    if symbol.is_null() {
-        return Err(format!("{} has no OrtGetApiBase: {}", path.display(), said()));
-    }
-    type GetApiBase = unsafe extern "C" fn() -> *const ort::sys::OrtApiBase;
-    // SAFETY: the address of `OrtGetApiBase`, whose C signature is the type above.
-    let get = unsafe { std::mem::transmute::<*mut libc::c_void, GetApiBase>(symbol) };
-    // SAFETY: ONNX Runtime's documented entry point, which takes nothing and returns a pointer to
-    // a static table, or null.
-    let base = unsafe { get() };
-    if base.is_null() {
-        return Err(format!("{}'s OrtGetApiBase answered nothing", path.display()));
-    }
-    // SAFETY: a valid table, whose `GetVersionString` returns a static NUL-terminated string.
-    let version = unsafe {
-        let v = ((*base).GetVersionString)();
-        if v.is_null() {
-            return Err(format!("{} gives no version", path.display()));
-        }
-        CStr::from_ptr(v).to_string_lossy().into_owned()
-    };
-    if !version.starts_with(RUNTIME_WANTED) {
-        return Err(format!("{} is ONNX Runtime {version}, and this build is made for {RUNTIME_WANTED}x", path.display()));
-    }
-    Ok(version)
 }
 
 /// What the engine is, for the bench's header: the model, where it comes from, and the runtime.
@@ -1519,27 +1501,27 @@ mod exit_safety_tests {
         assert_eq!(class_for(Qos::Reader, || 0x1a), 0x19, "a value the header does not name");
     }
 
-    /// On a Mac `ort::init_from` comes first in `init`, before anything else of `ort`: any other
-    /// call of it would make it read `ORT_DYLIB_PATH` and load whatever that names. And the
-    /// library is opened by this file, and its version asked, before `ort` loads it. Checked
-    /// where it is written, since the Mac's `init` compiles only there.
+    /// On a Mac `ort::init_from` is the first call of `ort` in `init`, and comes after the macOS
+    /// and the bundle's two files are checked: any other call of it first would make it read
+    /// `ORT_DYLIB_PATH` and load whatever that names, and nothing is loaded below the macOS the
+    /// library is built for. The version is asked of the library `ort` loaded, and the environment
+    /// and the session are made after that. Checked where it is written, since the Mac's `init`
+    /// compiles only there.
     #[test]
-    fn a_mac_fixes_the_librarys_path_before_any_other_call_of_ort() {
+    fn a_mac_loads_the_bundles_library_before_any_other_call_of_ort() {
         const SRC: &str = include_str!("paddle_ocr.rs");
-        let start = SRC.find("#[cfg(target_os = \"macos\")]
-fn init()").expect("the Mac's init");
-        let body = &SRC[start..start + SRC[start..].find("
-}
-").unwrap()];
+        let start = SRC.find("#[cfg(target_os = \"macos\")]\nfn init()").expect("the Mac's init");
+        let body = &SRC[start..start + SRC[start..].find("\n}\n").unwrap()];
         let first = |what: &str| body.find(what).unwrap_or_else(|| panic!("{what} is in the Mac's init"));
-        let pinned = first("ort::init_from(");
-        for later in ["open_runtime(", "environment.commit()", "Session::builder()", "commit_from_file("] {
-            assert!(pinned < first(later), "init_from comes before {later}");
+        let loaded = first("ort::init_from(&dylib)?");
+        for earlier in ["bundle_files()", "macos_new_enough()", "model.is_file()", "dylib.is_file()"] {
+            assert!(first(earlier) < loaded, "{earlier} comes before the load");
         }
-        assert!(first("open_runtime(") < first("environment.commit()"), "our own dlopen before ort's");
-        assert!(first("macos_new_enough(") < first("open_runtime("), "no dlopen below the macOS it is built for");
-        // Nothing of `ort` before it but its path, worked out without `ort`.
-        assert!(!body[..pinned].contains("ort::") && !body[..pinned].contains("Session"), "{}", &body[..pinned]);
+        for later in ["ort::util::probe(&dylib)", ".build()?", "builder(&environment)?", "commit_from_file("] {
+            assert!(loaded < first(later), "init_from comes before {later}");
+        }
+        // Nothing of `ort` before it: the files are found and the macOS asked without it.
+        assert!(!body[..loaded].contains("ort::") && !body[..loaded].contains("builder("), "{}", &body[..loaded]);
     }
 
     /// The release's order: nothing enters ONNX Runtime once it has begun, it waits for what is
@@ -1607,9 +1589,9 @@ fn init()").expect("the Mac's init");
 
     /// Every call of this file into ONNX Runtime is counted from before its first touch to after
     /// its last — the engine's making, and a run from its tensor to the drop of its outputs — and
-    /// the Mac's environment is said made and the backstop registered right after `commit`, before
-    /// the session that can fail. Checked where it is written: the real calls need the model, and
-    /// the Mac's only compile there.
+    /// the Mac's environment is kept, said made and the backstop registered right after `build`,
+    /// before the session that can fail. Checked where it is written: the real calls need the
+    /// model, and the Mac's only compile there.
     #[test]
     fn every_call_into_ort_is_counted_and_the_mac_backstop_follows_the_environment() {
         const SRC: &str = include_str!("paddle_ocr.rs");
@@ -1632,9 +1614,12 @@ fn init()").expect("the Mac's init");
         assert!(run.contains("held.as_mut()?"), "a session taken by the release answers nothing");
         let init = body("#[cfg(target_os = \"macos\")]\nfn init()");
         let at = |what: &str| init.find(what).unwrap_or_else(|| panic!("{what} in the Mac's init"));
-        assert!(at("environment.commit()?;") < at("ENV_MADE.store(true"));
+        assert!(at(".build()?;") < at("*lock_even_if_poisoned(&ENVIRONMENT) = Some(environment.clone());"));
+        assert!(at("*lock_even_if_poisoned(&ENVIRONMENT)") < at("ENV_MADE.store(true"), "kept before it is said made");
         assert!(at("ENV_MADE.store(true") < at("register_backstop();"));
-        assert!(at("register_backstop();") < at("Session::builder()"), "before the session, which can fail");
+        assert!(at("register_backstop();") < at("builder(&environment)?"), "before the session, which can fail");
+        let environment = body("fn release_environment() -> bool {");
+        assert!(environment.contains("lock_even_if_poisoned(&ENVIRONMENT).take()"), "the release drops the handle kept");
         let release = body("pub(crate) fn release() -> Released {");
         assert!(release.find("IN_FLIGHT.close()").unwrap() < release.find("release_with(").unwrap());
         assert!(release.contains("release_with(&IN_ORT, RELEASE_BOUND, take_session, release_environment)"));
@@ -1691,5 +1676,26 @@ fn init()").expect("the Mac's init");
             assert!(PACKAGE.contains(&format!("To = \"{shipped}\"")), "package.ps1 ships {shipped}");
         }
         assert!(PACKAGE.contains("name = \"ort-sys\""), "package.ps1 reads Cargo.lock's ort-sys");
+    }
+
+    /// Windows makes its session from the embedded model with [`builder`]'s options, under the
+    /// ONNX Runtime linked in, and reads the lone digit the recogniser is there for — or, on a
+    /// processor without AVX2, refuses to make it and says why. The real session, in this
+    /// process: an option the linked ONNX Runtime refuses (an optimisation level it does not know,
+    /// a device policy) fails here rather than in the bench or on a user's machine.
+    #[cfg(windows)]
+    #[test]
+    fn windows_makes_its_session_and_reads_a_lone_digit() {
+        let made = init_timed();
+        if !std::is_x86_feature_detected!("avx2") {
+            let why = made.expect_err("no recogniser without AVX2");
+            assert!(why.contains("AVX2"), "{why}");
+            return;
+        }
+        made.expect("the session is made");
+        let png = crate::ocr::bench::fixture("lone-1@1x").expect("the bench's lone digit").png;
+        let rgb = image::load_from_memory(png).expect("a PNG").to_rgb8();
+        let read = recognize_timed(&rgb, Tighten::WINDOWS).expect("the session runs the model");
+        assert_eq!(read.text, "1", "score {}", read.score);
     }
 }
