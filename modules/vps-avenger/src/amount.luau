@@ -1,6 +1,10 @@
--- The page's knobs turned in Avenger (the plan's slice 7): the avenger_control tool's amount mode,
--- as a trip whose act presses the knob, HOLDS the button and hands the keyboard over with the
--- overlay runtime's `trip:handOver{ kind = "keys" }` (docs/api/overlay.md):
+-- The knobs turned in Avenger (the plan's slice 7): the avenger_control tool's amount mode, as a
+-- trip of the page's whose act presses the knob, HOLDS the button and hands the keyboard over with
+-- the overlay runtime's `trip:handOver{ kind = "keys" }` (Am.run), or as a press of the ring's knob
+-- controls, which holds the same keys with the runtime's O:holdKeys while the overlay is in front
+-- (Am.hold, overlay runtime 0.13; docs/api/overlay.md) — one gesture for both, its sentences and its
+-- read the same; the tool's panel turned the ring's eight knobs this way (the maintainer's decision
+-- of 2026-10-24):
 --
 --   macro_amount {index}         a macro knob, at (736, 787 or 838; 480)
 --   osc_control {control}        the selected oscillator's Level (Volume, and Pan with the right
@@ -28,9 +32,17 @@
 -- knob stays where the keys moved it, and the page says its value not read. The filter has no
 -- reader (the tool read none, the page shows none): Return brings the page back claiming nothing.
 --
+-- From the ring the same, with the ring's words: the sentence behind the screen reader, and after
+-- Return what was read ("Volume 100 percent", "…, unchanged", "Volume cannot be read now"), after
+-- Escape the knob let go ("Volume 150 percent, unchanged" where nothing moved, "Volume let go, not
+-- read" where the keys moved it). The overlay's other keys work meanwhile: Tab moves on, and a
+-- press of another control says it is still working on the last one (ring.luau).
+--
 -- EVERY END lets go of the button exactly once (`letGo`): Return and Escape at once, in their key's
 -- handler; the page key, another window, the page closed, the plug-in's window gone, outranked and
--- a hook that raised first thing in `onEnd`. After a disable the host has let go already
+-- a hook that raised first thing in `onEnd` — from the ring, the overlay leaving the front or in
+-- front on another window (the hold's "left"), a key where it is not, and a key's handler that
+-- raised. After a disable the host has let go already
 -- (docs/api/input.md, mouseDown): the end that follows the enable finds the button off the host's
 -- record (host.input.held) and sends nothing more. A reload or a stop by the host runs no code of
 -- this VM's; the host lets go then.
@@ -116,9 +128,11 @@ end
 --   knob, box     Knob.read's `which` and its picture's table rectangle; nil for no reader
 --   band          a calibrating run's picture where there is no reader
 --   sentence(vb)  the tool's sentence; focus(vb) the page's element after it
---   merge(before, fields)   the part posted: `before` the strip read first ({ keys, values }, or
---                 nil), `fields` Knob.read's — nil: the knob's values not read
+--   merge(before, fields, last)   the part posted: `before` the strip read first ({ keys, values },
+--                 or nil), `fields` Knob.read's — nil: the knob's values not read — and `last` what
+--                 was last read where the gesture keeps its values (the page's window, the ring's stay)
 --   value(fields), words(v), unread()   the value read, in words, and the words for none
+--   title()       the knob's name, for the words after Escape; nil where there is no reader
 
 -- The fields of each oscillator knob, as Knob.read gives them.
 local KNOB_FIELDS = {
@@ -150,8 +164,8 @@ function Am.macro(args, label, known)
     end,
     focus = function() return string.format("macro-%d-slot-%d-amount", shown(), i) end,
     -- The amounts as last read, this knob's replaced.
-    merge = function(_, fields)
-      local was, list = lastRead().macroAmounts or {}, {}
+    merge = function(_, fields, last)
+      local was, list = last.macroAmounts or {}, {}
       for j = 1, 3 do list[j] = was[j] end
       list[i] = fields and fields.amount or nil
       return { keys = { "macroAmounts" }, values = { macroAmounts = list } }
@@ -159,6 +173,7 @@ function Am.macro(args, label, known)
     value = function(fields) return fields.amount end,
     words = function(v) return name() .. " " .. v .. " percent" end,
     unread = function() return name() .. "'s knob cannot be read now" end,
+    title = name,
   }
 end
 
@@ -187,8 +202,8 @@ function Am.osc(args, label, known)
     focus = function() return "osc-" .. (string.gsub(key, "_", "-")) end,
     -- The strip as read before the press, and the selected oscillator's knobs as last read where
     -- that read shows the same oscillator selected — this knob's values replaced.
-    merge = function(before, fields)
-      local vb, last = before.values, lastRead()
+    merge = function(before, fields, last)
+      local vb = before.values
       local osc = {}
       if last.osc and last.selectedType == "osc" and last.selectedIndex == vb.selectedIndex then
         osc = table.clone(last.osc)
@@ -202,6 +217,7 @@ function Am.osc(args, label, known)
     value = function(fields) return fields[c.field] end,
     words = c.words,
     unread = function() return Osc.CONTROL_NAMES[key] .. " cannot be read now" end,
+    title = function() return Osc.CONTROL_NAMES[key] end,
   }
 end
 
@@ -308,9 +324,19 @@ end
 
 -- ── The gesture ──────────────────────────────────────────────────────────────
 
--- Spec `spec`'s gesture in trip `trip` on overlay `o`: the trip's act, a handler where reads wait.
--- `trip:done` once, with what was read, or the trip's give-up says the rest (actions.luau, go).
-function Am.run(o, trip, spec)
+-- Spec `spec`'s gesture on overlay `o`, in a handler where reads wait, the way it runs `way`'s (a
+-- trip's, Am.run, or the ring's, Am.hold):
+--   inFront()            still where the gesture began, asked after every wait; false ends it there
+--                        (the trip given up, the ring's press over with nothing said)
+--   done(result)         the end, once, with what was read
+--   keys(onKey, onEnd)   the keys taken (Am.KEYS): `onKey(key)` per key, true ending it, and
+--                        `onEnd(how, err)` once — `how` "ended" after onKey's true — or false and why
+--   live()               after `keys` answered false: whether the gesture still says its end
+--   over(how, err)       an end of the keys other than their own, after the button was let go
+--   known()              what was last read where the gesture keeps its values
+--   unread(part)         part `part`, the knob not read, noted there
+--   say(words)           the tool's sentence, behind the screen reader
+local function gesture(o, way, spec)
   local function log(fmt, ...)
     host.log.info(("[avenger] [amount] '%s': " .. fmt):format(spec.name, ...))
   end
@@ -318,7 +344,7 @@ function Am.run(o, trip, spec)
   local k = origin and H.factor(origin)
   if not (origin and k) then
     log("nothing pressed — VPS Avenger cannot be placed now (no factor)")
-    return trip:done({ error = "VPS Avenger's size cannot be told now" })
+    return way.done({ error = "VPS Avenger's size cannot be told now" })
   end
   local pl = P.placer(origin, k, (H.zoom(origin)))
 
@@ -328,16 +354,16 @@ function Am.run(o, trip, spec)
   if spec.strip then
     local keysB, err
     vb, keysB, err = Act.partBefore(pl, spec.before or "strip", nil, log, spec.fields)
-    if not trip:inFront() then return end
-    if not vb then return trip:done({ error = err }) end
+    if not way.inFront() then return end
+    if not vb then return way.done({ error = err }) end
     before = { keys = keysB, values = vb }
     local why, focus = (spec.refuse or oscRefusal)(vb)
     if why then
       log("nothing pressed — %s", why)
-      return trip:done({ part = before, error = why, focus = focus })
+      return way.done({ part = before, error = why, focus = focus })
     end
   end
-  local function part(fields) return spec.merge(before, fields) end
+  local function part(fields) return spec.merge(before, fields, way.known() or {}) end
 
   -- A calibrating run's picture of the band, where no reader reads the knob (the filter): taken,
   -- written and let go. Whether one was taken — a wait, after which the trip is asked again.
@@ -353,39 +379,39 @@ function Am.run(o, trip, spec)
   end
 
   -- 2. The knob's picture before the press, held through the hand-over: the baseline of the one
-  -- change wait after Return. Its value is read for the log.
+  -- change wait after Return. Its value is read for the log, and for the words after an Escape.
   local held = {}
   local region = nil
-  local valueBefore = "no reader"
+  local valueBefore, vBefore = "no reader", nil
   if spec.knob then
     region = Open.region(pl, spec.box)
     if not region then
       log("nothing pressed — the knob is not on the screen")
-      return trip:done({ part = before, error = "that part of VPS Avenger is not on the screen" })
+      return way.done({ part = before, error = "that part of VPS Avenger is not on the screen" })
     end
     local okS, snap, why = pcall(host.screen.snapshot, { region = region })
     if not (okS and snap) then
       log("nothing pressed — no picture of the knob: %s", tostring(okS and why or snap))
-      return trip:done({ part = before, error = "VPS Avenger cannot be read now" })
+      return way.done({ part = before, error = "VPS Avenger cannot be read now" })
     end
     held.before = snap
-    if not trip:inFront() then return release(held) end
+    if not way.inFront() then return release(held) end
     local marks = {}
     local okK, fields, words = pcall(Knob.read, pl, snap, spec.knob, marks)
-    local v = okK and type(fields) == "table" and spec.value(fields) or nil
-    valueBefore = v ~= nil and spec.words(v) or "not read"
+    vBefore = okK and type(fields) == "table" and spec.value(fields) or nil
+    valueBefore = vBefore ~= nil and spec.words(vBefore) or "not read"
     log("before the press — %s; %s", valueBefore, okK and tostring(words) or ("the read failed: " .. tostring(fields)))
     shot(spec.name, "before", snap, region, marks, pl.zoom)
   elseif spec.band then
     bandShot("before")
-    if not trip:inFront() then return end
+    if not way.inFront() then return end
   end
 
   -- 3. Where the press goes, checked as every click of the module's is (main.luau's pointOf).
   local x0, y0 = E.ring.pointOf(o, spec.label, spec.at, true)
   if not x0 then
     release(held)
-    return trip:done({ part = before, sentence = y0 })
+    return way.done({ part = before, sentence = y0 })
   end
 
   -- The pointer's place along the travel, in table points: every point placed as the runtime places
@@ -422,7 +448,7 @@ function Am.run(o, trip, spec)
   end
 
   -- PageUp and PageDown: one move each; Return and Escape: the button let go of, and the end.
-  local function onKey(_, _, key)
+  local function onKey(key)
     if key == "Return" or key == "Escape" then
       letGo(key)
       ended = key
@@ -445,11 +471,11 @@ function Am.run(o, trip, spec)
     return false
   end
 
-  -- The knob read after Return, off picture `snap` (nil: none), and the trip done with it.
-  local function readAfter(t2, snap, how, info)
+  -- The knob read after Return, off picture `snap` (nil: none), and the gesture done with it.
+  local function readAfter(snap, how, info)
     if not snap then
       log("no picture after Return — %s", tostring(info))
-      return t2:done({ part = part(nil), error = spec.unread() })
+      return way.done({ part = part(nil), error = spec.unread() })
     end
     local marks = {}
     local okK, fields, words = pcall(Knob.read, pl, snap, spec.knob, marks)
@@ -463,78 +489,86 @@ function Am.run(o, trip, spec)
     log("read %s (%s before)%s; %s", v ~= nil and spec.words(v) or "nothing", valueBefore, info and string.format(
       " — changed %s, settled %s, after %s ms in %s picture(s)", tostring(info.changed), tostring(info.settled),
       tostring(info.waited), tostring(info.frames)) or "", tostring(words))
-    if v == nil then return t2:done({ part = part(fields), error = spec.unread() }) end
+    if v == nil then return way.done({ part = part(fields), error = spec.unread() }) end
     local said = spec.words(v)
     if how == "unchanged" then
-      return t2:done({ part = part(fields), note = "unchanged, " .. said, said = said .. ", unchanged" })
+      return way.done({ part = part(fields), note = "unchanged, " .. said, said = said .. ", unchanged" })
     end
-    t2:done({ part = part(fields), said = said, focus = spec.focus(vb) })
+    way.done({ part = part(fields), said = said, focus = spec.focus(vb) })
   end
 
-  -- What the keys did, not read (yet): the knob noted as not read in the state, so that a give-up
-  -- posts it so, not as it was before the press.
+  -- What the keys did, not read (yet): the knob noted as not read where the values are kept, so
+  -- that a give-up posts it so, not as it was before the press.
   local function notRead()
-    local w = E.plugin()
     local p = part(nil)
-    if w and p then S.part(w.id, p.keys, p.values) end
+    if p then way.unread(p) end
   end
 
-  local function onEnd(_, t2, how, _, err)
+  -- After Escape, in words (the ring says them; the page only where it does not come back): the
+  -- value read before where nothing moved, otherwise that the knob was let go and not read.
+  local function escaped()
+    if not spec.title then return nil end
+    if not moved and vBefore ~= nil then return spec.words(vBefore) .. ", unchanged" end
+    return spec.title() .. " let go, " .. (moved and "not read" or "unchanged")
+  end
+
+  local function onEnd(how, err)
     -- First, before anything that can raise: every end lets go of the button.
     letGo(err and tostring(err) or how)
-    if how ~= "ended" or not t2:inFront() then
+    if how ~= "ended" or not way.inFront() then
       release(held)
       if moved and spec.knob then notRead() end
+      if how ~= "ended" then way.over(how, err) end
       return
     end
     if ended == "Escape" then
       release(held)
-      return t2:done({ part = (moved and spec.knob) and part(nil) or nil, focus = spec.focus(vb) })
+      return way.done({ part = (moved and spec.knob) and part(nil) or nil, focus = spec.focus(vb), said = escaped() })
     end
     if not spec.knob then
-      if spec.band and bandShot("after") and not t2:inFront() then return end
-      return t2:done({ part = part(nil), focus = spec.focus(vb) })
+      if spec.band and bandShot("after") and not way.inFront() then return end
+      return way.done({ part = part(nil), focus = spec.focus(vb) })
     end
     -- Nothing moved: the knob as it is, read at once.
     if not moved then
       release(held)
-      local asked, err = pcall(host.screen.snapshot, { region = region }, function(snap, why)
-        if not t2:inFront() then
+      local asked, errS = pcall(host.screen.snapshot, { region = region }, function(snap, why)
+        if not way.inFront() then
           if snap then snap:release() end
           return
         end
-        readAfter(t2, snap, "read", snap == nil and why or nil)
+        readAfter(snap, "read", snap == nil and why or nil)
       end)
-      if not asked then readAfter(t2, nil, "read", err) end
+      if not asked then readAfter(nil, "read", errS) end
       return
     end
     -- Moved: what Avenger drew of it, waited for from the picture before the press — the knob noted
     -- as not read first, which a give-up during the wait posts and the read after it overwrites.
     notRead()
-    local asked, err = pcall(host.screen.snapshot, { region = region, change = { from = held.before,
+    local asked, errS = pcall(host.screen.snapshot, { region = region, change = { from = held.before,
       timeout = Act.CHANGE_WITHIN, tolerance = 16, minPixels = 4, settle = 50 } }, function(snap, why, info)
       release(held)
-      if not t2:inFront() then
+      if not way.inFront() then
         if snap then snap:release() end
         return
       end
-      if not snap then return readAfter(t2, nil, "unread", why) end
+      if not snap then return readAfter(nil, "unread", why) end
       local changed = type(info) == "table" and info.changed == true
-      readAfter(t2, snap, changed and "changed" or "unchanged", info)
+      readAfter(snap, changed and "changed" or "unchanged", info)
     end)
     if not asked then
       release(held)
-      readAfter(t2, nil, "unread", err)
+      readAfter(nil, "unread", errS)
     end
   end
 
-  -- 4. The keyboard, before the press: a hand-over refused leaves no button down.
-  local handed, errH = trip:handOver({ kind = "keys", keys = Am.KEYS, onKey = onKey, onEnd = onEnd })
+  -- 4. The keyboard, before the press: keys refused leave no button down.
+  local handed, errH = way.keys(onKey, onEnd)
   if not handed then
     release(held)
-    if not trip.live then return end -- given up already: onGiveUp posts it
+    if not way.live() then return end -- given up already: onGiveUp posts it
     log("nothing pressed — the keyboard was not handed over (%s)", tostring(errH))
-    return trip:done({ part = before, error = Am.NO_KEYBOARD })
+    return way.done({ part = before, error = Am.NO_KEYBOARD })
   end
 
   -- 5. The press, held; then the tool's sentence, behind the screen reader.
@@ -542,7 +576,85 @@ function Am.run(o, trip, spec)
   down = true
   log("pressed (%d,%d) with the %s button; PageUp moves %s, PageDown %s, 1 point × %.2f each, %d..%d", x0, y0,
     buttonName, spec.axis == "y" and "up" or "left", spec.axis == "y" and "down" or "right", k, spec.lo, spec.hi)
-  host.speech.output(spec.sentence(vb), { interrupt = false })
+  way.say(spec.sentence(vb))
+end
+
+-- Spec `spec`'s gesture in trip `trip` on overlay `o`: the trip's act, a handler where reads wait,
+-- the keys handed over (trip:handOver{ kind = "keys" }). `trip:done` once, with what was read, or
+-- the trip's give-up says the rest (actions.luau, go). Its values are kept with the state of the
+-- window the page was shown beside.
+function Am.run(o, trip, spec)
+  gesture(o, {
+    inFront = function() return trip:inFront() end,
+    done = function(result) trip:done(result) end,
+    keys = function(onKey, onEnd)
+      return trip:handOver({ kind = "keys", keys = Am.KEYS,
+        onKey = function(_, _, key) return onKey(key) end,
+        onEnd = function(_, _, how, _, err) onEnd(how, err) end })
+    end,
+    live = function() return trip.live end,
+    -- The trip's give-up posts the rest.
+    over = function() end,
+    known = lastRead,
+    unread = function(p)
+      local w = E.plugin()
+      if w then S.part(w.id, p.keys, p.values) end
+    end,
+    say = function(words) host.speech.output(words, { interrupt = false }) end,
+  }, spec)
+end
+
+-- Spec `spec`'s gesture from a press of the ring's (ring.luau), in the control's onActivate, a
+-- handler where reads wait: the keys held with O:holdKeys while the overlay is in front, its other
+-- keys working on. Still where it began is the overlay in the same stay on the same window
+-- (O:stillHere), asked after each wait and at each key; the hold's "left" — the overlay out of the
+-- front, or in front on another window — a key where it is not and a key's handler that raised end
+-- it as a trip's give-up does. `env`:
+--   known()        what the ring read in this stay
+--   seen(part)     a part — { keys, values } — merged into it
+--   say(words)     said behind the screen reader, as the ring says (and logs) its words
+--   done(result)   once: the page's result for the gesture, or nil — the overlay moved on, or left
+--                  the front — with nothing to say
+function Am.hold(o, spec, env)
+  local mark = o:here()
+  local over = false
+  local function finish(result)
+    if over then return end
+    over = true
+    env.done(result)
+  end
+  local function here()
+    if over then return false end
+    local fine, why = o:stillHere(mark)
+    if fine then return true end
+    host.log.info(("[avenger] [amount] '%s': not going on — %s"):format(spec.name, tostring(why)))
+    finish(nil)
+    return false
+  end
+  gesture(o, {
+    inFront = here,
+    done = finish,
+    keys = function(onKey, onEnd)
+      return o:holdKeys({ keys = Am.KEYS,
+        -- A key where the overlay is no longer where the press began — the runtime ends the hold on
+        -- another window at its recheck — ends the gesture as a give-up does: let go, nothing said.
+        onKey = function(_, key)
+          if not here() then return true end
+          return onKey(key)
+        end,
+        onEnd = function(_, how, info)
+          if how == "ended" and info.failed then return onEnd("failed", info.failed) end
+          onEnd(how, info.why)
+        end })
+    end,
+    live = here,
+    over = function(how)
+      finish(how == "failed" and { error = "something went wrong in this module" } or nil)
+    end,
+    known = env.known,
+    unread = env.seen,
+    say = env.say,
+  }, spec)
 end
 
 -- What actions.luau hands over: { ring = main.luau's helpers, plugin = () -> the window the page was

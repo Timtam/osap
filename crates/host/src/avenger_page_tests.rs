@@ -75,7 +75,9 @@ fn the_page_is_described_once_and_again_when_the_mac_page_mode_changes() {
         -- The new page is built by the key, which says so, and shown once it has loaded.
         T.openPage()
         T.ok(T.lastSaid() == "Building the page." and #T.page().shows == 1, T.said())
+        -- Loaded: `open` asked afresh, and the page shown on the turn its reads answer.
         T.pageReady()
+        T.tick()
         T.ok(#T.page().shows == 2 and S.front == T.PAGE_WIN, "shown once it has loaded")
         T.ok(S.sounds[#S.sounds] == "sounds/Open.wav", tostring(S.sounds[#S.sounds]))
     "##.replace("@KEY@", MAC_KEY).as_str());
@@ -355,8 +357,11 @@ const WORDS: &str = r#"{
 }"#;
 
 /// The key on Avenger at 80 % in REAPER's floating window: ONE snapshot of the plug-in's panel,
-/// waited for in the key's handler; every grid and profile of it waited for there too, and the page
-/// shown only once they and one text read of the same picture are in. The state carries
+/// waited for in the key's handler; every grid and profile of it asked there at once with a
+/// callback, and beside them the text read of what needs none of their answers (A19, the runtime's
+/// page answered later: `openLater`); nothing posted or shown in the key's handler. On the turn the
+/// answers come, the rest of the text read and the knobs' two grids in the last answer's handler,
+/// then the state, the error region, the focus and the show. The state carries
 /// what the picture shows under the tool's keys: the count of the dots, the names cleaned the
 /// project's way ("0SC 2" is OSC 2), the tab whose bottom strip is darkest, Mute and Solo by their
 /// red, Drums' and Trig's too; the selected oscillator's knobs from their pointers; the macro tabs
@@ -378,19 +383,28 @@ fn the_reads_of_one_picture_give_the_tools_state_keys() {
         T.pageKey()
         T.ok(S.snaps == snaps + 1, "one picture, in the key's handler")
         -- The picture's 26 (read/open.luau, the asks: among them DRUM SQ's patterns' rows, one
-        -- profile each, and FAV's two grids of the star column), a grid for the three macro knobs'
-        -- rings and one for the oscillator's three (read/drumsq.luau, read/expansion.luau,
-        -- read/knob.luau).
-        T.ok(#S.screenOut == 0 and S.cellsAsked + S.profilesAsked == asked + 28,
-          "every question waited for in the key's handler: " .. (S.cellsAsked + S.profilesAsked - asked))
+        -- profile each, and FAV's two grids of the star column), every one with a callback, and the
+        -- first text read beside them.
+        T.ok(#S.screenOut == 26 and S.cellsAsked + S.profilesAsked == asked + 26 and #S.pageReads == 1,
+          "every question asked at once: " .. #S.screenOut .. ", " .. (S.cellsAsked + S.profilesAsked - asked))
+        T.ok(T.pageSince(from) == "", "nothing posted or shown in the key's handler: " .. T.pageSince(from))
+        local early = {}
+        for _, e in ipairs(S.pageReads[1].what) do early[#early + 1] = e.name end
+        T.ok(table.concat(early, ",") == "preset,expansion view,expansion name,macro tabs,macro macro1,macro macro2,"
+          .. "macro macro3,macro btn1,macro btn2,central tabs", "the regions that need no answer: " .. table.concat(early, ","))
+        T.tick()
+        -- Then a grid for the three macro knobs' rings and one for the oscillator's three
+        -- (read/knob.luau), in the last answer's handler.
+        T.ok(S.cellsAsked + S.profilesAsked == asked + 28, "the knobs' grids after: " .. (S.cellsAsked + S.profilesAsked - asked))
         T.ok(T.pageSince(from) == "post state,post error,post focus,show,sound sounds/Open.wav", T.pageSince(from))
         asked = S.cellsAsked + S.profilesAsked
         T.tick()
         T.ok(S.snaps == snaps + 1 and S.cellsAsked + S.profilesAsked == asked, "nothing asked again")
         local texts = 0
         for _, r in ipairs(S.recognized) do if r.snapshot then texts += 1 end end
-        -- The browser's header's name among them (read/expansion.luau, E.entries).
-        T.ok(texts == 13, "one text read of the picture, a region per name: " .. texts)
+        -- The browser's header's name among them (read/expansion.luau, E.entries): ten in the first
+        -- read, the three OSC tabs' names in the second.
+        T.ok(texts == 13, "two text reads of the picture, a region per name: " .. texts)
         local st = T.lastPost("state").state
         -- FAV is read only while an expansion reads open (read/expansion.luau, E.favorite).
         T.ok(st.preset == "LD Lead 1" and st.zoom == 80 and st.expansion_view == "8 per Row"
@@ -680,10 +694,10 @@ fn an_open_expansion_is_read_from_its_header_or_else_the_browsers_area() {
     "##);
 }
 
-/// One press at a time: the reads are waited for in the key's handler, so a second press comes
-/// after the page is shown — and, the page then having the keyboard, goes back without reading
-/// anything; and a press whose reads end after the user moved on — another window came to the
-/// front while Avenger's words were read — shows no page.
+/// A press while another's reads are out reads afresh, and only the latest press's answer shows the
+/// page (the runtime's `openLater`); the page then having the keyboard, the key goes back without
+/// reading anything; and a press whose reads end after the user moved on — another window came to
+/// the front while Avenger's words were read — shows no page.
 #[test]
 fn one_press_at_a_time_and_a_page_is_not_shown_after_the_user_moved_on() {
     run_mac(r##"
@@ -692,11 +706,16 @@ fn one_press_at_a_time_and_a_page_is_not_shown_after_the_user_moved_on() {
         T.pageReady()
         local snaps = S.snaps
         T.pageKey()
-        T.ok(S.snaps == snaps + 1 and #T.page().shows == 1 and S.front == T.PAGE_WIN, "read once, and shown")
+        T.ok(S.snaps == snaps + 1 and #T.page().shows == 0 and #S.pageReads == 1, "read once, its answers out")
+        T.pageKey()
+        T.ok(S.snaps == snaps + 2 and #S.pageReads == 2, "the second press reads afresh")
+        T.tick()
+        T.ok(#T.page().shows == 1 and S.front == T.PAGE_WIN
+          and T.count("and the key was pressed again since — not shown") == 1, "shown once, by the latest: " .. T.dump())
         T.event()
         S.focusAtOnce, S.focusLands = true, function() S.front, S.chain = W, { W } end
         T.pageKey()
-        T.ok(S.snaps == snaps + 1 and T.page().hides == 1 and S.front == W, "the second press goes back, reading nothing")
+        T.ok(S.snaps == snaps + 2 and T.page().hides == 1 and S.front == W, "the press in the page goes back, reading nothing")
         T.event()
         -- The user leaves while the key's words are read.
         S.listed = { W, T.OTHER }
@@ -709,6 +728,7 @@ fn one_press_at_a_time_and_a_page_is_not_shown_after_the_user_moved_on() {
           return words(r, name)
         end
         T.pageKey()
+        T.tick()
         T.ok(#T.page().shows == 1, "not shown over another window")
         T.ok(T.count("[avenger] [page] not shown: the user moved on while Avenger was read — ") == 1, T.dump())
     "##);
@@ -866,17 +886,20 @@ fn the_open_reads_loop_over_no_pixels_in_luau() {
         counted()
         T.paintAvenger(248, 60, 4, @PAINT@)
         T.words({ ["macro tabs"] = "MACRO 1 MACRO 2 MACRO 3" })
-        -- The reads' own work, from the picture to the values (read/open.luau), which the page's open
-        -- waits for in the key's handler: without the runtime's own part of the key.
+        -- The reads' own work, from the picture to the values (read/open.luau), from the key to the
+        -- last answer's handler that hands them over (the page's open answers later): without the
+        -- runtime's own part of the key.
         local Open = S.included["modules/vps-avenger/src/read/open.luau"][1]
         local read, turns = Open.read, 0
-        Open.read = function(...)
+        Open.read = function(o, opts, done)
           local t0 = T.interrupts()
-          local out = table.pack(read(...))
-          turns += T.interrupts() - t0
-          return table.unpack(out, 1, out.n)
+          return read(o, opts, function(...)
+            turns += T.interrupts() - t0
+            return done(...)
+          end)
         end
         T.pageKey()
+        T.tick()
         Open.read = read
         local st = T.lastPost("state").state
         local o, m = st.osc_panel, st.macro_panel
@@ -1037,32 +1060,31 @@ fn a_page_the_key_builds_is_not_told_its_fresh_reads_are_old() {
         st = T.lastPost("state").state
         T.ok(#T.page().posts == n + 2 and st.preset == "LD Lead 1" and st.read_age_seconds == nil, "ready: no age")
         T.pageReady()
+        T.tick()
         st = T.lastPost("state").state
         T.ok(#T.page().shows == 2 and #T.page().posts > n + 2 and st.read_age_seconds == nil,
           "shown once loaded, read afresh, with no age")
     "##);
 }
 
-/// Nothing is left out once the key's handler is over: every question was waited for in it, so a
-/// disable has nothing of a press's to drop that could keep the next press from reading Avenger
-/// again — which it does.
+/// A press's questions and its first text read are out after the key's handler, answered on a later
+/// turn (the runtime's `openLater`). A disable drops them: that press shows nothing, and holds
+/// nothing back — the next press reads Avenger again and shows the page.
 #[test]
-fn nothing_of_a_press_is_out_after_its_handler_and_the_next_press_reads_again() {
+fn a_press_a_disable_dropped_shows_nothing_and_the_next_press_reads_again() {
     run_mac(r##"
         local S = T.S
-        local W = select(3, T.avengerAt80("Init Preset"))
+        T.avengerAt80("Init Preset")
         T.pageReady()
         local snaps = S.snaps
         T.pageKey()
-        T.ok(S.snaps == snaps + 1 and #S.screenOut == 0, "nothing out")
-        for k, n in pairs(S.out) do T.ok(n == 0, "a request still out: " .. k) end
+        T.ok(S.snaps == snaps + 1 and #S.screenOut > 0 and #S.pageReads == 1, "out after the handler")
         T.dropScreen()
-        T.event()
-        S.focusAtOnce, S.focusLands = true, function() S.front, S.chain = W, { W } end
+        T.tick()
+        T.ok(#T.page().shows == 0 and #S.pageReads == 0, "nothing shown of the press dropped")
         T.pageKey()
-        T.event()
-        T.pageKey()
-        T.ok(S.snaps == snaps + 2 and #T.page().shows == 2, "read again, and shown")
+        T.tick()
+        T.ok(S.snaps == snaps + 2 and #T.page().shows == 1, "read again, and shown")
     "##);
 }
 

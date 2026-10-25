@@ -103,13 +103,35 @@ rawset(T.host.ocr, "resolveLanguage", function(l)
   if l == "en" and S.english ~= false then return "en-US" end
   return nil
 end)
+-- The page key's first text read (read/open.luau, Open.read with `done`: key "vps-avenger page"),
+-- kept apart in S.pageReads and answered on the next turn, after the screen's answers of that turn,
+-- as the host answers a read with a callback — from the snapshot it names, as a waited read is
+-- (T.readWhat) — unless S.holdPageReads keeps it out until a scenario lets it go.
+S.pageReads = {}
 do
   local read = T.submit
   T.submit = function(what, opts, cb)
     local n = #S.reads
     read(what, opts, cb)
     -- Only a read that stayed in S.reads: the runtime's focus reads go to S.focusReads.
-    if #S.reads > n then S.reads[#S.reads].lang = opts and opts.lang end
+    if #S.reads > n then
+      S.reads[#S.reads].lang = opts and opts.lang
+      if opts and opts.key == "vps-avenger page" then
+        local r = table.remove(S.reads)
+        r.what = what
+        S.pageReads[#S.pageReads + 1] = r
+      end
+    end
+  end
+end
+function T.answerPageReads()
+  local due = S.pageReads
+  if #due == 0 or S.holdPageReads then return end
+  S.pageReads = {}
+  S.epoch += 1
+  for _, r in ipairs(due) do
+    r.answered = true
+    T.call("answer", r.cb, T.readWhat(r.what, r.snapshot))
   end
 end
 -- A shot with its marks: written at once where a handler waits for it, and with a callback
@@ -242,30 +264,33 @@ end
 
 -- The answers of the page's grids, profiles and pictures, on the next turn, the epoch turned over
 -- first, each as an event of the module — unless S.holdScreenOut, which keeps them out (pending)
--- until a scenario lets them go.
+-- until a scenario lets them go. Then the page key's first text read (T.answerPageReads).
 do
   local runDue = T.runDue
   T.runDue = function()
     runDue()
     local out = S.screenOut
-    if #out == 0 or S.holdScreenOut then return end
-    S.screenOut = {}
-    if S.turnsAtAnswers == false then S.turnsAtAnswers = T.interrupts() end
-    S.epoch += 1
-    for _, a in ipairs(out) do
-      if a.key then S.out[a.key] -= 1 end
-      T.call("answer", a.cb, a.value, a.why, {})
+    if #out > 0 and not S.holdScreenOut then
+      S.screenOut = {}
+      if S.turnsAtAnswers == false then S.turnsAtAnswers = T.interrupts() end
+      S.epoch += 1
+      for _, a in ipairs(out) do
+        if a.key then S.out[a.key] -= 1 end
+        T.call("answer", a.cb, a.value, a.why, {})
+      end
     end
+    T.answerPageReads()
   end
 end
 
 -- The module disabled and enabled again while requests are out: they are dropped, their callbacks
--- never run, and none of their keys is pending any more.
+-- never run, and none of their keys is pending any more — the page key's first text read too.
 function T.dropScreen()
   for _, a in ipairs(S.screenOut) do
     if a.key then S.out[a.key] -= 1 end
   end
   S.screenOut = {}
+  S.pageReads = {}
 end
 
 -- A snapshot of corners against the module's budget, as the host keeps it (docs/api/screen.md):
@@ -679,39 +704,47 @@ end
 -- byName), as the host answers one. An empty string is "blank" where the picture draws nothing in
 -- the region — the host's crop finds no content (docs/api/ocr.md) — and "none" where it does.
 -- Every region asked is noted in S.recognized, with its name.
+-- One region's reading, as the host answers it: region `r`, named `name`, of snapshot `snap`
+-- (nil: the screen). Noted in S.recognized.
+function T.readOne(r, name, snap)
+  S.recognized[#S.recognized + 1] = { r[1], r[2], r[3], r[4], name = name, snapshot = snap }
+  -- Cut to the snapshot, as the host reads one: a region it holds nothing of is "failed".
+  local g = snap and snap.region
+  if g and (r[3] <= g[1] or r[4] <= g[2] or r[1] >= g[3] or r[2] >= g[4]) then
+    return { text = "", words = {}, lines = {}, skipped = false, status = "failed",
+      error = T.E("outside", "the region does not overlap the snapshot"), name = name }
+  end
+  local said = S.ocr and S.ocr(r, name, snap) or ""
+  local reading
+  if type(said) == "table" then
+    reading = table.clone(said)
+  else
+    local words = said ~= "" and { { text = said, x = r[1], y = r[2], w = r[3] - r[1], h = r[4] - r[2] } } or {}
+    local status = said ~= "" and "text" or (T.drawnIn(snap and snap.picture or S.picture, r) and "none" or "blank")
+    reading = { text = said, words = words, lines = {}, skipped = status == "blank", status = status }
+  end
+  reading.name = name
+  return reading
+end
+
+-- What a read of `what` (a region, an entry or a list of them) of snapshot `snap` reads: one
+-- reading, or (list, byName) for a list, as the host answers one.
+function T.readWhat(what, snap)
+  if type(what[1]) == "table" then
+    local list, byName = {}, {}
+    for i, e in ipairs(what) do
+      local reading = T.readOne(e.region or e, e.name, snap)
+      list[i] = reading
+      if e.name then byName[e.name] = reading end
+    end
+    return list, byName
+  end
+  return T.readOne(what.region or what, what.name, snap)
+end
+
 function T.listReads()
   T.answerWaits(function(what, opts)
-    local function one(r, name)
-      local snap = opts and opts.snapshot
-      S.recognized[#S.recognized + 1] = { r[1], r[2], r[3], r[4], name = name, snapshot = snap }
-      -- Cut to the snapshot, as the host reads one: a region it holds nothing of is "failed".
-      local g = snap and snap.region
-      if g and (r[3] <= g[1] or r[4] <= g[2] or r[1] >= g[3] or r[2] >= g[4]) then
-        return { text = "", words = {}, lines = {}, skipped = false, status = "failed",
-          error = T.E("outside", "the region does not overlap the snapshot"), name = name }
-      end
-      local said = S.ocr and S.ocr(r, name, snap) or ""
-      local reading
-      if type(said) == "table" then
-        reading = table.clone(said)
-      else
-        local words = said ~= "" and { { text = said, x = r[1], y = r[2], w = r[3] - r[1], h = r[4] - r[2] } } or {}
-        local status = said ~= "" and "text" or (T.drawnIn(snap and snap.picture or S.picture, r) and "none" or "blank")
-        reading = { text = said, words = words, lines = {}, skipped = status == "blank", status = status }
-      end
-      reading.name = name
-      return reading
-    end
-    if type(what[1]) == "table" then
-      local list, byName = {}, {}
-      for i, e in ipairs(what) do
-        local reading = one(e.region or e, e.name)
-        list[i] = reading
-        if e.name then byName[e.name] = reading end
-      end
-      return list, byName
-    end
-    return one(what.region or what, what.name)
+    return T.readWhat(what, opts and opts.snapshot)
   end)
 end
 

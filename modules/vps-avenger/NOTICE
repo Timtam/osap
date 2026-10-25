@@ -12,7 +12,9 @@ been published and has no licence of its own.
   src/geometry.luau, src/tables/*.luau
       the coordinates of Avenger's header, its menu and its zoom list, and of its oscillator
       strip, drums, macros, central area and expansion browser, from the tool's tables (as
-      starting values; the files say what is known of each).
+      starting values; the files say what is known of each); and in src/tables/pages.luau the
+      tool's page tables for the expansion grid (its actions.py and clicker/header_map.py): each
+      view's page starts, the scrollbar's clicks for a page and a tile's point on it.
   src/read/*.luau
       the tool's classifiers, ported to shares of one picture: its colour tests and numbers for
       the oscillator tabs' dots, the selected tab's dark strip, a lit button, the drum lock, the

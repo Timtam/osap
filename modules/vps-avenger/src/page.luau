@@ -5,7 +5,8 @@
 --
 --   the key       the tool's chord, ⌃⇧⌘F1 on a Mac (Ctrl+Shift+Alt+F1 on Windows), or the
 --                 `pageKey` setting: pressed on an identified Avenger it reads Avenger off one
---                 picture (read/open.luau) and shows the page beside Avenger, with Open.wav;
+--                 picture (read/open.luau), its questions asked at once with callbacks, and shows
+--                 the page beside Avenger once they are in (the runtime's `openLater`), with Open.wav;
 --                 pressed in the page the runtime brings Avenger's window forward first and hides
 --                 the page after, with Close.wav; a press whose reads show no page says why,
 --                 unless the user moved on
@@ -377,12 +378,17 @@ local function cutWords(zoom, parts)
     .. " of VPS Avenger lies past the edge of the screen: what lies there was not read."
 end
 
--- The key on an identified Avenger — the runtime's `open`, in the key's handler, where the reads
--- wait: Avenger read off one picture (read/open.luau), taken while Avenger is unobscured; then,
--- once the overlay is still where the key was pressed, the state, the error region and the focus.
--- The runtime shows the page after. `false` where no page comes of it, with why said — except when
--- the user moved on, and is somewhere else by then.
-local function open(o)
+-- The key on an identified Avenger — the runtime's `open`, in the key's handler, answered later
+-- (O:addPage's `openLater`, overlay runtime 0.14): Avenger read off one picture (read/open.luau),
+-- taken while Avenger is unobscured, its questions and its first text read asked at once with
+-- callbacks (the second Mac test's A19: the page key took about a second); then, once the overlay
+-- is still where the key was pressed, the state, the error region and the focus, and `answer()` —
+-- the runtime shows the page then. `answer(false)` where no page comes of it, with why said —
+-- except when the user moved on, and is somewhere else by then. A press while another's read is out
+-- reads afresh: the runtime shows the latest press's answer alone, and the first text read of the
+-- earlier one, under the same key, is superseded (docs/api/ocr.md); nothing of a press is kept that
+-- a disable, which drops what is out, could leave waiting.
+local function open(o, answer)
   local t0 = host.now()
   local win = host.window.active()
   local origin = o:origin()
@@ -393,38 +399,45 @@ local function open(o)
   end
   local mark = o:here()
   local before = S.values(win.id)
-  local ok, values, why, words = pcall(Reads.read, o, { zoom = E.zoomOf(origin), mark = mark,
+  local told = false
+  local function finish(v)
+    if told then return end
+    told = true
+    answer(v)
+  end
+  local ok, err = pcall(Reads.read, o, { zoom = E.zoomOf(origin), mark = mark,
     expected = before and before.selectedExpansion or nil, expectedFromDatabase = before and before.selectedFromDatabase,
-    window = win.id })
+    window = win.id }, function(values, why, words)
+    if not values then
+      host.log.info("[avenger] [page] not shown: " .. tostring(why))
+      if words then say(words) end
+      return finish(false)
+    end
+    local fine, gone = o:stillHere(mark)
+    if not fine then
+      host.log.info("[avenger] [page] not shown: the user moved on while Avenger was read — " .. tostring(gone))
+      return finish(false)
+    end
+    S.read(win.id, values)
+    -- The latest name read, for the ring's ◀ and ▶ as well (main.luau, "◀ and ▶ on Init Preset").
+    if values.preset then E.ring.noteName(values.preset) end
+    host.log.info(string.format("[avenger] [page] read for the page: the preset %s, the zoom %s",
+      values.preset and ("'" .. values.preset .. "'") or "not read", values.zoom and (values.zoom .. " %") or "not read"))
+    plugin, keyAt = win, t0
+    postState(win.id)
+    post({ kind = "error", text = values.cut and cutWords(values.zoom, values.offScreen) or "" })
+    if shownOnce then
+      post({ kind = "restoreFocus" })
+    else
+      post({ kind = "focus", id = "preset-name" })
+    end
+    finish(nil)
+  end)
   if not ok then
-    host.log.info("[avenger] [page] not shown: the reads could not be made — " .. tostring(values))
+    host.log.info("[avenger] [page] not shown: the reads could not be made — " .. tostring(err))
     say(Reads.FAILED)
-    return false
+    finish(false)
   end
-  if not values then
-    host.log.info("[avenger] [page] not shown: " .. tostring(why))
-    if words then say(words) end
-    return false
-  end
-  local fine, gone = o:stillHere(mark)
-  if not fine then
-    host.log.info("[avenger] [page] not shown: the user moved on while Avenger was read — " .. tostring(gone))
-    return false
-  end
-  S.read(win.id, values)
-  -- The latest name read, for the ring's ◀ and ▶ as well (main.luau, "◀ and ▶ on Init Preset").
-  if values.preset then E.ring.noteName(values.preset) end
-  host.log.info(string.format("[avenger] [page] read for the page: the preset %s, the zoom %s",
-    values.preset and ("'" .. values.preset .. "'") or "not read", values.zoom and (values.zoom .. " %") or "not read"))
-  plugin, keyAt = win, t0
-  postState(win.id)
-  post({ kind = "error", text = values.cut and cutWords(values.zoom, values.offScreen) or "" })
-  if shownOnce then
-    post({ kind = "restoreFocus" })
-  else
-    post({ kind = "focus", id = "preset-name" })
-  end
-  return nil
 end
 
 -- Every show the runtime made at the key: Open.wav and the time from the key — and, beside a
@@ -778,6 +791,7 @@ function P.start(env)
     key = key,
     notHere = notHereWords(),
     open = open,
+    openLater = true,
     onMessage = onMessage,
     onReady = onReady,
     onClose = onClose,

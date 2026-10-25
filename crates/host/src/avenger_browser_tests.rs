@@ -118,7 +118,10 @@ end
 --         an `open` it opens }, caption = what the caption reads (default the view; false: nothing),
 --         cutTop = the first row's words on the area's top edge, hoverOnScroll = a notch paints a
 --         hover in the middle band and moves nothing, nudge = { [name] = table points its tile's
---         words lie lower than its row's } }
+--         words lie lower than its row's }, header = false: something drawn in the header that no
+--         name is read in, areaUnread: the area reads nothing, viewList: a click on the view field
+--         opens the view list — painted over the grid, its rows read as "view list" — and a second
+--         one closes it (S.browser.listOpen), but not with listStuck }
 --   open  T.openOf's: { name, categories, presets = { [category] = names }, category (the one whose
 --         presets show), firstCategory, firstRow (from 0), fav, stars = { [preset] = true }, blueStars
 --         = { [preset] = true } (lit the tool's blue, not bright), perNotch, reversed, wheelDead,
@@ -268,8 +271,13 @@ function T.browserReads(cx, cy, k)
     local caption = g.caption
     if caption == nil then caption = g.view end
     out["expansion view"] = caption and readingOf({ lineOf(wordsAt(caption, 48, 51, 70, cx, cy, k)) }) or readingOf({})
-    -- Nothing drawn in the header over the grid: the host's crop finds no content.
-    out["expansion name"] = { status = "blank", text = "", words = {}, lines = {}, skipped = true }
+    -- Nothing drawn in the header over the grid: the host's crop finds no content — or, `header =
+    -- false`, something no name is read in.
+    if g.header == false then
+      out["expansion name"] = readingOf({})
+    else
+      out["expansion name"] = { status = "blank", text = "", words = {}, lines = {}, skipped = true }
+    end
     local byRow = {}
     for _, t in ipairs(T.shownTiles()) do
       for n, line in ipairs(t.lines) do
@@ -284,7 +292,7 @@ function T.browserReads(cx, cy, k)
     table.sort(keys)
     local lines = {}
     for _, key in ipairs(keys) do lines[#lines + 1] = lineOf(byRow[key]) end
-    out["browser area"] = readingOf(lines)
+    out["browser area"] = g.areaUnread and readingOf({}) or readingOf(lines)
     out["categories"], out["presets"] = readingOf({}), readingOf({})
   else
     out["expansion view"] = readingOf({})
@@ -304,6 +312,15 @@ function T.browserReads(cx, cy, k)
     out["browser area"] = readingOf(all)
   end
   out["expansion area"] = out["browser area"]
+  -- The view list, while it is open over the grid: the tool's view names, a row each from List at y 60.
+  local rows = {}
+  if b.listOpen then
+    for i, v in ipairs(EX.VIEW_OPTIONS) do
+      rows[#rows + 1] = lineOf(wordsAt(v, 40, i == 1 and EX.VIEW_MENU_LIST_Y
+        or EX.VIEW_MENU_GRID_FIRST_Y + (i - 2) * EX.VIEW_MENU_Y_PITCH, 60, cx, cy, k))
+    end
+  end
+  out["view list"] = readingOf(rows)
   return out
 end
 
@@ -371,10 +388,19 @@ S.browserClick = function(x, y)
       T.browserMove("grid", (ty > 140 and 1 or -1) * math.max(1, shown - 1))
       return
     end
-    if near(15, 50, 6) then return note("view") end
+    if near(15, 50, 6) then
+      note("view")
+      -- The view list opened by the field, and closed by it again.
+      if g.viewList and not (b.listOpen and g.listStuck) then
+        b.listOpen = not b.listOpen
+        T.paintAvenger(cx, cy, k, b.listOpen and { popup = { 8, 52, 80, 166 } } or {})
+      end
+      return
+    end
     for _, t in ipairs(T.shownTiles()) do
       local half = #t.lines == 2 and 7 or 4
-      if math.abs(tx - t.tx) <= t.maxW / 2 and math.abs(ty - t.ty) <= half then
+      -- A tile takes a click on its words and on its icon above them (from 10 above the words).
+      if math.abs(tx - t.tx) <= t.maxW / 2 and ty >= t.ty - 10 and ty <= t.ty + half then
         note(t.name)
         if g.opens and g.opens[t.name] then
           b.mode, b.open = "open", g.opens[t.name]
@@ -658,7 +684,9 @@ fn the_view_list_is_opened_by_its_field_and_the_view_chosen_is_stored_as_set() {
 /// An open expansion — its name in the header, the columns its lists — refuses a view with nothing
 /// clicked: the same point would close it. The header blank refuses Close with nothing clicked: that
 /// click would open the view list. Where nothing tells — the header holds something it reads no name
-/// in, a name the recogniser missed, and the columns nothing — both refuse, and neither clicks.
+/// in, a name the recogniser missed, and the columns nothing — no view is chosen, and Close is
+/// clicked as the tool clicks it (the maintainer's decision of 2026-10-24): the expansion that was
+/// open closes, the grid is read after it, and no view list is read where it would be drawn.
 #[test]
 fn no_view_is_chosen_and_no_expansion_closed_where_the_header_says_otherwise() {
     run_mac(&scenario(r##"
@@ -681,17 +709,59 @@ fn no_view_is_chosen_and_no_expansion_closed_where_the_header_says_otherwise() {
         -- Nothing tells.
         T.event()
         S.browser = { mode = "open", open = { name = "?", header = false, categories = {}, presets = {}, firstCategory = 0,
-          firstRow = 0, fav = false, stars = {} } }
+          firstRow = 0, fav = false, stars = {} }, grid = { view = "8 per Row", names = T.BROWSER_NAMES, firstRow = 0,
+          caption = false } }
         T.repaint({})
         local UNREAD = "whether an expansion is open in VPS Avenger cannot be read now"
-        T.tripFrom({ action = "close_expansion", args = {}, focused = true }, W)
-        T.settle()
-        T.ok(#S.clicks == clicks and T.err() == "Close Expansion: " .. UNREAD, T.err())
-        T.ok(T.count("the header reads no name, and is not blank (none) — not taken as closed") >= 1, T.dump())
-        T.event()
         T.tripFrom({ action = "set_expansion_view", args = { view = "List" }, focused = true }, W)
         T.settle()
         T.ok(#S.clicks == clicks and T.err() == "Expansion View: " .. UNREAD, T.err())
+        T.ok(T.count("the header reads no name, and is not blank (none) — not taken as closed") >= 1, T.dump())
+        T.event()
+        T.tripFrom({ action = "close_expansion", args = {}, focused = true }, W)
+        T.ok(#S.clicks == clicks + 1 and T.clickAt() == "122,164" and S.browser.mode == "grid",
+          "clicked as the tool clicks it: " .. T.clickAt())
+        T.settle(4)
+        T.ok(#S.clicks == clicks + 1 and T.st().expansion_open == false and T.st().expansion_view == "8 per Row"
+          and T.lastPost().id == "expansion-search-results", "closed, the grid read: " .. tostring(T.st().expansion_open))
+        T.ok(T.count("'Close Expansion': nothing tells whether an expansion is open — clicked as the tool clicks it") == 1
+          and T.count("'Close Expansion': the view list's place reads none — 0 of its rows") == 1, T.dump())
+        T.ok(T.held() == 0, "every picture released: " .. T.held())
+    "##));
+}
+
+/// A10 part 3 (the maintainer's decision of 2026-10-24): where nothing tells whether an expansion is
+/// open and the grid is shown — the header holds something no name is read in, the area reads
+/// nothing — Close is clicked as the tool clicks it, and that click opens the view list: read where
+/// it is drawn, its rows the tool's view names, it is closed again by its field and read gone after a
+/// change wait. The page is told no expansion was open, and gets the grid in the view stored. A list
+/// that does not close is said so, still read there at the change wait's bound.
+#[test]
+fn close_where_nothing_tells_closes_the_view_list_its_click_opened() {
+    run_mac(&scenario(r##"
+        local _, _, W = T.browserPage(T.grid("8 per Row", nil, { caption = false, header = false, areaUnread = true,
+          viewList = true }))
+        T.ok(T.st().expansion_open == nil, "nothing tells at the key: " .. tostring(T.st().expansion_open))
+        local clicks = #S.clicks
+        T.tripFrom({ action = "close_expansion", args = {}, focused = true }, W)
+        T.settle(6)
+        T.ok(#S.clicks == clicks + 2 and T.clickAt(clicks + 1) == "122,164" and T.clickAt() == "122,164"
+          and not S.browser.listOpen and table.concat(S.browser.clicked, ",") == "view,view",
+          "Close, the list it opened, its field again: " .. (#S.clicks - clicks))
+        T.ok(T.count("'Close Expansion': the view list's place reads") == 1
+          and T.count("the click opened the view list — no expansion was open; its field clicked again to close it") == 1
+          and T.count("the view list has gone; the grid in the view 8 per Row (stored)") == 1, T.dump())
+        T.ok(T.err() == "Close Expansion: no expansion was open; the view list the click opened is closed again", T.err())
+        T.ok(T.st().expansion_open == false and T.st().expansion_view == "8 per Row" and T.st().expansion_view_from == "stored",
+          "the grid posted: " .. tostring(T.st().expansion_open))
+        -- A list its field does not close.
+        T.event()
+        S.browser.grid.listStuck = true
+        T.tripFrom({ action = "close_expansion", args = {}, focused = true }, W)
+        T.settle(3)
+        T.run(2400)
+        T.ok(#S.clicks == clicks + 4 and S.browser.listOpen, "the field clicked once more, the list still open")
+        T.ok(T.err() == "Close Expansion: the click opened the view list, and it is still open", T.err())
         T.ok(T.held() == 0, "every picture released: " .. T.held())
     "##));
 }
@@ -1120,18 +1190,130 @@ fn the_expansion_opened_is_said_by_what_it_lists() {
     "##));
 }
 
-/// A grid whose words name no expansion moves nothing and clicks nothing.
+/// A10 part 6: a grid whose words name no expansion — every tile misread, as the expansions' names
+/// five pixels tall at 80 % on a 1x display — opens the one asked by its place, as the tool opens
+/// it: its index in the list chosen, the view stored and the tool's page tables. All twenty on one
+/// page, which does not scroll: no click on the scrollbar, the tile clicked at the tool's point for
+/// its place, (23 + 3 x 27.5, 68), and the header's name after the click confirms it — open. Where
+/// the header names another, that one is closed again and said so, and the grid's page is not kept.
 #[test]
-fn a_grid_that_names_nothing_moves_nothing() {
+fn a_grid_whose_names_are_not_read_opens_by_place_confirmed_by_the_header() {
     run_mac(&scenario(r##"
         local misread = {}
         for _, n in ipairs(T.BROWSER_NAMES) do misread[n] = "qq" end
-        local _, _, W = T.browserPage(T.grid("8 per Row", nil, { misread = misread }))
-        T.tripFrom({ action = "open_expansion", args = { index = 3 }, focused = true }, W)
+        local opens = { ["Cinematic Pads"] = T.openOf("Cinematic Pads"), ["Dark Techno"] = T.openOf("Synthwave") }
+        local _, _, W = T.browserPage(T.grid("8 per Row", nil, { misread = misread, opens = opens }))
+        local i = T.indexIn("Cinematic Pads")
+        T.tripFrom({ action = "open_expansion", args = { index = i }, focused = true }, W)
         T.settle(4)
-        T.ok(#S.scrolls == 0 and #S.clicks == 0, "nothing moved or clicked")
-        T.ok(T.err() == "Opening an expansion: the names in VPS Avenger's browser cannot be read now", T.err())
+        T.ok(#S.scrolls == 0 and #S.clicks == 1 and T.clickAt() == T.at80(105.5, 68), "the tool's point: " .. T.clickAt())
+        T.ok(T.count("the names are not read — Cinematic Pads placed by its place 4 of 20 in the list chosen: page 1 of 1, "
+          .. "tile 4, in the view 8 per Row; 0 click(s) on the scrollbar first") == 1, T.dump())
+        T.ok(T.st().expansion_open == true and T.st().selected_expansion == "Cinematic Pads"
+          and T.st().selected_expansion_from_database == nil and T.lastPost().id == "open-expansion-name",
+          "open, by its header: " .. tostring(T.st().selected_expansion))
+        -- The place of another: the header names Synthwave, closed again.
+        T.event()
+        S.browser.mode = "grid"
+        T.repaint({})
+        T.back(W)
+        T.openPage()
+        T.event()
+        T.tripFrom({ action = "open_expansion", args = { index = T.indexIn("Dark Techno") }, focused = true }, W)
+        T.settle(6)
+        T.ok(#S.clicks == 3 and T.clickAt(2) == T.at80(133, 68) and T.clickAt() == "122,164", "Close after it: " .. T.clickAt())
+        T.ok(S.browser.mode == "grid" and T.err() == "Opening an expansion: VPS Avenger opened Synthwave where Dark Techno lies "
+          .. "by its place in the list chosen; it was closed again", T.err())
+        T.ok(T.st().expansion_open == false, "the grid posted")
         T.ok(T.held() == 0, "every picture released: " .. T.held())
+    "##));
+    // A grid of five pages, the List view, whose every tile opens Synthwave: Dark Techno by its place,
+    // the header names Synthwave, closed again — and the grid's page this session placed it at is
+    // forgotten, so the next Open takes the grid to its top first again rather than click the same
+    // tile where the grid may not be what was placed.
+    run_mac(&scenario(r##"
+        local misread, opens = {}, {}
+        for _, n in ipairs(T.BROWSER_NAMES) do
+          misread[n] = "qq"
+          opens[n] = T.openOf("Synthwave")
+        end
+        local _, _, W = T.browserPage(T.grid("List", nil, { misread = misread, opens = opens }))
+        for round = 1, 2 do
+          T.tripFrom({ action = "open_expansion", args = { index = T.indexIn("Dark Techno") }, focused = true }, W)
+          T.settle(40)
+          T.ok(T.err() == "Opening an expansion: VPS Avenger opened Synthwave where Dark Techno lies by its place in the "
+            .. "list chosen; it was closed again", round .. ": " .. T.err())
+          T.ok(T.count("(the grid's page not known: its top first)") == round, round .. ", its top first: " .. T.dump())
+          T.ok(T.count("the place is not confirmed — the grid's page is forgotten") == round, T.dump())
+          T.event()
+          T.repaint({})
+          T.back(W)
+          T.openPage()
+          T.event()
+        end
+        T.ok(T.held() == 0, "every picture released: " .. T.held())
+    "##));
+}
+
+/// The tool's page tables (src/tables/pages.luau), pinned by its numbers: an expansion's page, its
+/// place on the page and the tile's point in each view the tool measured, and the clicks on the
+/// scrollbar that take the grid there.
+#[test]
+fn the_tools_page_tables_place_an_expansion_and_the_scrollbars_clicks() {
+    run_mac(&scenario(r##"
+        T.avengerAt80("Init Preset")
+        local Pg = S.included["modules/vps-avenger/src/tables/pages.luau"][1]
+        local function placed(view, index, total)
+          local p = Pg.place(view, index, total)
+          local at = p and Pg.cell(view, p)
+          return p, at and string.format("%.3f,%.3f", at[1], at[2]) or "none"
+        end
+        local function ys(list)
+          local out = {}
+          for _, c in ipairs(list) do out[#out + 1] = string.format("%g", c[2]) end
+          return table.concat(out, " ")
+        end
+        -- 8 per Row, 129 and more: three pages from 0, 64 and 96, shown from 0, 32 and 72.
+        local p, at = placed("8 per Row", 70, 129)
+        T.ok(p.page == 1 and p.start == 64 and p.visible == 38 and p.count == 3 and at == "188.000,148.000",
+          "8 per Row 129, 70: " .. at)
+        T.ok(ys(Pg.scroll("8 per Row", 0, 1, 3)) == "158" and ys(Pg.scroll("8 per Row", 2, 1, 3)) == "57 57 57 158"
+          and ys(Pg.scroll("8 per Row", 2, 0, 3)) == "57 57 57" and ys(Pg.scroll("8 per Row", 0, 2, 3)) == "222 222 222",
+          "8 per Row 129's clicks")
+        -- 8 per Row, the tool's 124: two pages of 64, the second short of four; two clicks at the bottom.
+        p, at = placed("8 per Row", 100, 124)
+        T.ok(p.page == 1 and p.visible == 36 and p.shown == 60 and at == "133.000,148.000", "8 per Row 124, 100: " .. at)
+        T.ok(ys(Pg.scroll("8 per Row", 0, 1, 2)) == "204 204" and ys(Pg.scroll("8 per Row", 1, 0, 2)) == "76 76",
+          "8 per Row 124's clicks")
+        -- List: overlapping pages of 5, 4, 5, 4, 5, 5, 4; the last page at 170 and 206.
+        p, at = placed("List", 7, 20)
+        T.ok(p.page == 1 and p.visible == 2 and p.count == 5 and at == "117.500,161.000", "List 20, 7: " .. at)
+        p, at = placed("List", 19, 20)
+        T.ok(p.page == 4 and p.visible == 1 and at == "117.500,206.000", "List 20, 19: " .. at)
+        T.ok(ys(Pg.scroll("List", 0, 1, 5)) == "99.75" and ys(Pg.scroll("List", 1, 0, 5)) == "58", "List's clicks")
+        -- 4 per Row over nine pages, 5 over six, 6 over five: their rows by page.
+        p, at = placed("4 per Row", 50, 124)
+        T.ok(p.page == 3 and p.visible == 6 and at == "144.375,127.000", "4 per Row 124, 50: " .. at)
+        T.ok(ys(Pg.scroll("4 per Row", 0, 3, 9)) == "122", "4 per Row's click")
+        p, at = placed("5 per Row", 112, 124)
+        T.ok(p.page == 5 and p.visible == 2 and at == "117.500,113.000", "5 per Row 124, 112: " .. at)
+        p, at = placed("6 per Row", 60, 124)
+        T.ok(p.page == 2 and p.visible == 6 and at == "27.917,103.000", "6 per Row 124, 60: " .. at)
+        T.ok(ys(Pg.scroll("6 per Row", 1, 2, 5)) == "162" and ys(Pg.scroll("6 per Row", 3, 2, 5)) == "143",
+          "6 per Row's page 3, from before and after")
+        -- 3 per Row: pages of nine, the sixth of every eight of six; its rows moved 7 a page.
+        p, at = placed("3 per Row", 50, 124)
+        T.ok(p.page == 5 and p.start == 45 and p.visible == 5 and at == "189.167,175.000", "3 per Row 124, 50: " .. at)
+        T.ok(ys(Pg.scroll("3 per Row", 0, 5, 14)) == "122", "3 per Row's click")
+        -- 7 per Row: pages of 49, three for 124.
+        p, at = placed("7 per Row", 60, 124)
+        T.ok(p.page == 1 and p.visible == 11 and p.count == 3, "7 per Row 124, 60")
+        T.ok(ys(Pg.scroll("7 per Row", 0, 1, 3)) == "214 214 214 137" and ys(Pg.scroll("7 per Row", 2, 1, 3)) == "137",
+          "7 per Row's middle page")
+        -- One page, too short to fill it: at the area's top. Outside the list, or no view: none.
+        p, at = placed("8 per Row", 3, 20)
+        T.ok(p.count == 1 and at == "105.500,68.000", "one page: " .. at)
+        T.ok(Pg.place("8 per Row", 20, 20) == nil and Pg.place("9 per Row", 1, 20) == nil, "outside the list, or no view")
     "##));
 }
 

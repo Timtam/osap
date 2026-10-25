@@ -5,17 +5,21 @@
 --      in a trip's continuation after Initialize: one snapshot of the plug-in's panel
 --      (host.screen.snapshot, waited for).
 --   2. Every question of the avenger_control project's classifiers (read/strip, centre, drumsq,
---      drums, sample, macros, expansion) asked of that picture, each waited for in turn: the runtime
---      shows the page once `open` has returned, so the answers have to be in by then. Each is the
---      image worker's work on the picture already taken, and one event-loop turn to hand it over.
---   3. Then ONE text read of the same picture, with a named region for each thing to read — the
---      preset's name, the browser's view, the OSC tabs' names (one region per tab, the count from
---      the dots), the macro tabs' captions and the five names of the tab shown, the central tabs'
---      captions, and with the Drums tab selected the twelve drum slots' names, DRUM SQ's LENGTH where
---      it is the central tab and the sample browser's rows where EDITOR shows no tab of the editor's
---      (the strip, the central tab and the editor's pixels decided before the text read when the
---      dots gave the count) — and the knob reader over a few hundred points of the picture
---      (read/knob.luau).
+--      drums, sample, macros, expansion) asked of that picture. For the page's key (Open.read with
+--      `done`, the runtime's page answered later: O:addPage's `openLater`, overlay runtime 0.14) all
+--      at once with callbacks, and beside them the text read of what needs none of their answers —
+--      the preset's name, the browser's view and header, the macro tabs' captions and names, the
+--      central tabs' captions — so that neither waits for the other (the second Mac test's 26
+--      questions one after another took about 390 ms before the text read began: A19). Without
+--      `done` — Initialize's read in a trip's continuation — each waited for in turn, and that text
+--      read with the rest. Each question is the image worker's work on the picture already taken.
+--   3. Then the text read of what the answers place, of the same picture, with a named region for
+--      each thing to read — the OSC tabs' names (one region per tab, the count from the dots), and
+--      with the Drums tab selected the twelve drum slots' names, DRUM SQ's LENGTH where it is the
+--      central tab and the sample browser's rows where EDITOR shows no tab of the editor's (the
+--      strip, the central tab and the editor's pixels decided before it when the dots gave the
+--      count) — waited for in the handler of the last answer, and the knob reader over a few hundred
+--      points of the picture (read/knob.luau).
 --      Only when neither the browser's caption nor its header's name settles whether an expansion
 --      is open, a second text read of the browser's area — the one region the project read only
 --      then, and the largest by far, too slow on an Intel Mac to read every time — and with an
@@ -32,9 +36,10 @@
 -- not read. Every question is asked of the part of its region the picture holds, and a box that
 -- lies partly past the edge is not read (read/picture.luau, `Grid:share`).
 --
--- One press at a time, without a flag: everything is waited for in the one handler, and the
--- module's next key waits in its mailbox meanwhile (docs/module-runtime-and-lifecycle.md,
--- handlers).
+-- One press at a time: without `done` everything is waited for in the one handler, and the module's
+-- next key waits in its mailbox meanwhile (docs/module-runtime-and-lifecycle.md, handlers); with
+-- it, a second press reads afresh, its first text read superseding the earlier one's under their
+-- one key (docs/api/ocr.md), and the runtime shows the latest press's answer alone (page.luau).
 
 local O = host.require("com.platform.overlay")
 local G = host.include("src/geometry.luau")
@@ -194,8 +199,22 @@ local function oscNames(texts, count, vocab, v)
   log("strip: the tabs' names " .. table.concat(words, "; "))
 end
 
+-- The text regions that need no question's answer — the preset's name, the browser's view and its
+-- header's name, the macro tabs' captions and the five names of the tab shown, the central tabs'
+-- captions — appended to `entries`.
+local function firstEntries(pl, entries)
+  local nameRect = pl:rect(G.NAME_REGION)
+  if nameRect then entries[#entries + 1] = { name = "preset", region = nameRect } end
+  Expansion.entries(pl, entries)
+  Macros.entries(pl, entries)
+  local centralRect = pl:rect(Centre.ROW)
+  if centralRect then entries[#entries + 1] = { name = "central tabs", region = centralRect } end
+  return entries
+end
+
 -- The work once every question has answered: the text read, the decisions, the pictures. Runs in
--- the handler the questions were waited for in, where the text read waits too.
+-- the handler the questions were waited for in — or, with Open.read's `done`, the handler of the
+-- last answer — where the text read waits too; what `ctx.early` read already is not read again.
 local function decide(ctx)
   local pl, snap, got, opts = ctx.pl, ctx.snap, ctx.got, ctx.opts
   local v = { zoom = opts.zoom }
@@ -219,14 +238,8 @@ local function decide(ctx)
   local centreEarly = early and v.selectedType == "drums"
   if centreEarly then centre() end
 
-  -- The one text read, of the picture.
-  local entries = {}
-  local nameRect = pl:rect(G.NAME_REGION)
-  if nameRect then entries[#entries + 1] = { name = "preset", region = nameRect } end
-  Expansion.entries(pl, entries)
-  Macros.entries(pl, entries)
-  local centralRect = pl:rect(Centre.ROW)
-  if centralRect then entries[#entries + 1] = { name = "central tabs", region = centralRect } end
+  -- The text read of the picture: what the early read (ctx.early) did not read already.
+  local entries = firstEntries(pl, {})
   if count then
     for i = 1, count do
       local r = pl:rect(T.tabSpan(i, count, T.NAME_TOP, T.NAME_BOTTOM))
@@ -243,9 +256,17 @@ local function decide(ctx)
     if r then entries[#entries + 1] = { name = "browser", region = r } end
   end
   local byName = {}
-  if #entries > 0 then
-    local _, names = host.ocr.recognize(entries, { snapshot = snap, lang = H.lang() })
-    byName = names or {}
+  local rest = entries
+  if ctx.early then
+    rest = {}
+    for k, r in pairs(ctx.early) do byName[k] = r end
+    for _, e in ipairs(entries) do
+      if ctx.early[e.name] == nil then rest[#rest + 1] = e end
+    end
+  end
+  if #rest > 0 then
+    local _, names = host.ocr.recognize(rest, { snapshot = snap, lang = H.lang() })
+    for k, r in pairs(names or {}) do byName[k] = r end
   end
   ctx.tText = host.now()
   local function textOf(name)
@@ -440,24 +461,35 @@ end
 -- read failed — or nil, why nothing was read for the log, and the sentence to say (Open.NO_FACTOR,
 -- NO_PICTURE, FAILED; nil when the user moved on). `values.zoom` is always there, and `values.cut`
 -- is the screen's size when the picture was cut at its edge.
-function Open.read(o, opts)
+--
+-- With `done`, the questions and the first text read asked at once with callbacks (above, 2), and
+-- `done(values)` — or `done(nil, why, sentence)` — once, on a later turn as the handler of the last
+-- answer, or at once where nothing could be asked (no factor, no picture, the user moved on); it
+-- returns nothing then. The picture is let go once every answer is in; a module disabled meanwhile
+-- hears nothing more.
+function Open.read(o, opts, done)
   local t0 = host.now()
+  -- Nothing read: answered, or handed to `done` at once.
+  local function none(why, words)
+    if done then return done(nil, why, words) end
+    return nil, why, words
+  end
   local origin = o:origin()
   local k = origin and H.factor(origin)
   if not (origin and k) then
-    return nil, "the plug-in cannot be placed now (no factor)", Open.NO_FACTOR
+    return none("the plug-in cannot be placed now (no factor)", Open.NO_FACTOR)
   end
   local region, cut = pictureRegion(origin.client)
   -- Corners past what this module's snapshots may hold are answered nil and why; guarded all the
   -- same, for a call the host refuses as a mistake (docs/api/screen.md).
   local taken, snap, why = pcall(host.screen.snapshot, { region = region })
   if not (taken and snap) then
-    return nil, "no picture of " .. corners(region) .. ": " .. tostring(taken and why or snap), Open.NO_PICTURE
+    return none("no picture of " .. corners(region) .. ": " .. tostring(taken and why or snap), Open.NO_PICTURE)
   end
   local fine, gone = o:stillHere(opts.mark)
   if not fine then
     snap:release()
-    return nil, "the user moved on while the picture was taken — " .. tostring(gone)
+    return none("the user moved on while the picture was taken — " .. tostring(gone))
   end
   if cut then
     log(string.format("the picture: %s, cut at the edge of the %dx%d screen — the panel ends at %d,%d; what lies "
@@ -474,42 +506,103 @@ function Open.read(o, opts)
   Sm.ask(ctx.pl, all)
   Macros.ask(ctx.pl, all)
   Expansion.ask(ctx.pl, all)
-  -- Each asked of what the picture holds of it, and waited for; guarded, so that every answer is
-  -- counted whatever it holds.
+  -- An answer `value` (or nil and `reason`) of request `req`, as the classifiers take it.
+  local function took(req, ok, value, reason)
+    if not ok then
+      ctx.got.why[req.name] = tostring(value)
+    elseif value ~= nil then
+      local made, got = pcall(function() return req.kind == "cells" and P.grid(req, value) or value end)
+      if made then ctx.got[req.name] = got else ctx.got.why[req.name] = tostring(got) end
+    else
+      ctx.got.why[req.name] = reason
+    end
+  end
+  -- Request `req` asked of the snapshot, with callback `cb` (nil: waited for).
+  local function ask(req, cb)
+    if req.kind == "cells" then
+      return host.screen.cells({ region = req.rect, cols = req.cols, rows = req.rows, predicate = req.pred,
+        snapshot = snap }, cb)
+    end
+    return host.screen.profile({ region = req.rect, axes = req.axes or "columns", snapshot = snap }, cb)
+  end
   local asked = 0
+  -- The decisions, once every answer is in; the picture let go; the times in the log.
+  local function finish()
+    ctx.tPixels = ctx.tPixels or host.now()
+    local ok, v = pcall(decide, ctx)
+    snap:release()
+    if not ok then
+      log("the reads failed: " .. tostring(v))
+      return nil, "the reads failed", Open.FAILED
+    end
+    if ctx.early then
+      log(string.format("%d questions of one picture; the picture %d ms after the key, the questions %d ms and the "
+        .. "first text read %d ms beside them, the rest of the text %d ms, the rest %d ms", asked, ctx.tSnap - t0,
+        ctx.tAnswers - ctx.tSnap, (ctx.tEarly or ctx.tSnap) - ctx.tSnap, (ctx.tText or ctx.tPixels) - ctx.tPixels,
+        host.now() - (ctx.tText or ctx.tPixels)))
+    else
+      log(string.format("%d questions of one picture; the picture %d ms after the key, the questions %d ms, the "
+        .. "text %d ms, the rest %d ms", asked, ctx.tSnap - t0, ctx.tPixels - ctx.tSnap, (ctx.tText or ctx.tPixels)
+          - ctx.tPixels, host.now() - (ctx.tText or ctx.tPixels)))
+    end
+    return v
+  end
+  if not done then
+    -- Each asked of what the picture holds of it, and waited for; guarded, so that every answer is
+    -- counted whatever it holds.
+    for _, req in ipairs(all) do
+      if not cut or cutTo(req, region) then
+        asked += 1
+        took(req, pcall(ask, req, nil))
+      else
+        ctx.got.why[req.name] = "past the edge of the screen"
+      end
+    end
+    return finish()
+  end
+  -- With `done`: every question and the first text read asked at once, each counted out until its
+  -- answer comes; the rest in the handler of the last.
+  local out, over = 0, false
+  local function settle()
+    if out > 0 or over then return end
+    over = true
+    ctx.tAnswers = host.now()
+    done(finish())
+  end
   for _, req in ipairs(all) do
     if not cut or cutTo(req, region) then
       asked += 1
-      local ok, value, reason
-      if req.kind == "cells" then
-        ok, value, reason = pcall(host.screen.cells, { region = req.rect, cols = req.cols, rows = req.rows,
-          predicate = req.pred, snapshot = snap })
-      else
-        ok, value, reason = pcall(host.screen.profile, { region = req.rect, axes = req.axes or "columns", snapshot = snap })
-      end
-      if not ok then
-        ctx.got.why[req.name] = tostring(value)
-      elseif value ~= nil then
-        local made, got = pcall(function() return req.kind == "cells" and P.grid(req, value) or value end)
-        if made then ctx.got[req.name] = got else ctx.got.why[req.name] = tostring(got) end
-      else
-        ctx.got.why[req.name] = reason
+      out += 1
+      local okA, err = pcall(ask, req, function(value, reason)
+        took(req, true, value, reason)
+        out -= 1
+        settle()
+      end)
+      if not okA then
+        took(req, false, err)
+        out -= 1
       end
     else
       ctx.got.why[req.name] = "past the edge of the screen"
     end
   end
-  ctx.tPixels = host.now()
-  local ok, v = pcall(decide, ctx)
-  snap:release()
-  if not ok then
-    log("the reads failed: " .. tostring(v))
-    return nil, "the reads failed", Open.FAILED
+  local early = firstEntries(ctx.pl, {})
+  ctx.early = {}
+  if #early > 0 then
+    out += 1
+    local okT, errT = pcall(host.ocr.recognize, early, { snapshot = snap, lang = H.lang(), key = "vps-avenger page" },
+      function(_, byName)
+        ctx.early = byName or {}
+        ctx.tEarly = host.now()
+        out -= 1
+        settle()
+      end)
+    if not okT then
+      log("the first text read was not asked: " .. tostring(errT))
+      out -= 1
+    end
   end
-  log(string.format("%d questions of one picture; the picture %d ms after the key, the questions %d ms, the "
-    .. "text %d ms, the rest %d ms", asked, ctx.tSnap - t0, ctx.tPixels - ctx.tSnap, (ctx.tText or ctx.tPixels)
-      - ctx.tPixels, host.now() - (ctx.tText or ctx.tPixels)))
-  return v
+  settle()
 end
 
 -- ── A part of Avenger, read again ────────────────────────────────────────────

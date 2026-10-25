@@ -22,21 +22,23 @@
 --       Pattern chain, Auto follow   on or off as read; Return clicks it
 --       Pattern           a stepper over A and the patterns read on: the pattern read as selected
 --       Pattern B, Pattern C, Pattern D   on or off as read; Return turns it on or off
---   Level, Pan, Transpose, Fine tune, Random pitch   the selected oscillator's knobs as read, each
---                         followed by its own reset — Reset level, Reset pan, Reset transpose, Reset
---                         fine tune, Reset random pitch — as the tool's panel has them, separate
---                         buttons: a double-click on the knob (the right button for Pan and Random
---                         Pitch), then the knob read. The tool's knob button holds the knob and
---                         turns it with Page Up and Page Down, Return letting go; the ring can hold
---                         those keys only with the overlay's hold of keys outside a trip
---                         (O:holdKeys, overlay runtime 0.13), which it does not use yet, so until
---                         then Return on the knob resets it too, and turning it is the page's
---                         (src/amount.luau)
+--   Level, Pan, Transpose, Fine tune, Random pitch   the selected oscillator's knobs as read; Return
+--                         turns the knob as the tool's knob button does and as the page's knobs are
+--                         turned (src/amount.luau, Am.hold): the knob pressed and held (the right
+--                         button for Pan and Random Pitch), the tool's sentence ("Please press Page Up
+--                         or Down to set the volume of OSC 1. To Confirm, press Return."), Page Up and
+--                         Page Down one move each, held for the ring with the overlay's O:holdKeys
+--                         (overlay runtime 0.13), Return letting go and the knob read and said,
+--                         Escape letting go. Each followed by its own reset — Reset level, Reset pan,
+--                         Reset transpose, Reset fine tune, Reset random pitch — as the tool's panel
+--                         has them, separate buttons: a double-click on the knob (the right button for
+--                         Pan and Random Pitch), then the knob read
 --   Macro tab             a stepper over the macro tabs: the tab read as shown, of how many
 --   Add macro tab, Delete last macro tab
---   Macro 1 to 3          a knob's name and amount as read, each followed by Reset macro 1 to 3, the
---                         tool's separate reset: a double-click, then the amount read; Return on the
---                         knob resets it too, until the ring can hold keys (above)
+--   Macro 1 to 3          a knob's name and amount as read; Return turns it as the oscillator's knobs
+--                         are turned (above; the tool's sentence for a macro: "… set the amount of
+--                         the Cutoff Slider …"); each followed by Reset macro 1 to 3, the tool's
+--                         separate reset: a double-click, then the amount read
 --   Macro button 1, 2     a button's name, on or off as read; Return clicks it
 --
 -- A part is read when one of its controls is first announced or pressed in a stay — the overlay's
@@ -47,7 +49,11 @@
 -- while the ring is away. One action at a time: a press while one is out sends nothing and says so
 -- once, "<control>: still working on the last press", without cutting into speech — the second Mac
 -- test's three Oscillator presses dropped in silence; the one out says what it read. Everything the
--- ring says is in the log too ("[avenger] [ring] said: …"), its refusals among it.
+-- ring says is in the log too ("[avenger] [ring] said: …"), its refusals among it. A knob turned
+-- is one action from its press to the read after Return: Tab moves on meanwhile, and the press of
+-- another control that would click Avenger — the ring's, and the header's ◀, ▶, MENU's items,
+-- Zoom, Undo and the redo list (Ring.stillWorking) — says it is still working on the last one; the
+-- name and Preset info, which only read, are read.
 --
 -- The tabs' menus, the macro knobs' reset modes and the macro buttons' menus are the page's only
 -- (the plan's question Q5-2): a stepper over their items would have no value read to say. So are a
@@ -72,6 +78,7 @@ local Sq = host.include("src/actions/drumsq.luau")
 local D = host.include("src/tables/drums.luau")
 local C = host.include("src/tables/centre.luau")
 local Strip = host.include("src/read/strip.luau")
+local Am = host.include("src/amount.luau")
 
 local Ring = {}
 
@@ -222,6 +229,12 @@ local function busy(label)
   return false
 end
 
+-- The same for a control of the header's (main.luau) that clicks Avenger or chooses in its menus:
+-- true, and said, while an action of the ring's is out. A knob the ring holds would otherwise be
+-- dragged to that click's point (docs/api/input.md, move: a move while a button is held is a drag),
+-- and a preset step forgets what the ring read, the action out with it.
+Ring.stillWorking = busy
+
 -- ── The oscillator strip ─────────────────────────────────────────────────────
 
 local function oscillatorStepper(ov)
@@ -319,8 +332,37 @@ local function addOscillator(ov)
   })
 end
 
--- A knob's reset, `label` ("Reset level"), after the knob: the tool's separate button, the same
--- spec as the knob's Return (Osc.reset_osc_control, Macros.reset_macro_amount).
+-- A knob turned from the ring, `label` its control's ("Level"), `build` its spec's builder (Am.osc,
+-- Am.macro): the page's gesture with the ring's hold of the keys (src/amount.luau, Am.hold), one
+-- action of the ring's from the press to its end. What it read is merged as another read of the
+-- module's is (Ring.seen: no part marked read) and said as the ring's actions say theirs; a gesture
+-- that moved on, or whose overlay left the front, says nothing.
+local function turn(o, label, build, args)
+  if busy(label) then return end
+  local spec = built(label, build, args)
+  if not spec then return end
+  cache.gen += 1
+  local gen = cache.gen
+  pending = gen
+  Am.hold(o, spec, {
+    known = function() return cache.values end,
+    seen = function(p)
+      if gen == cache.gen then Ring.seen(p.keys, p.values) end
+    end,
+    say = function(words) say(words, true) end,
+    done = function(result)
+      if pending == gen then pending = nil end
+      if not result or gen ~= cache.gen then return end
+      if result.part then Ring.seen(result.part.keys, result.part.values) end
+      local words = result.sentence or (result.error and (label .. ": " .. result.error)) or result.said
+        or (result.note and (label .. ": " .. result.note))
+      if words then say(words) end
+    end,
+  })
+end
+
+-- A knob's reset, `label` ("Reset level"), after the knob: the tool's separate button
+-- (Osc.reset_osc_control, Macros.reset_macro_amount).
 local function resetButton(ov, label, build, args)
   ov:addCustomButton({
     label = label,
@@ -332,8 +374,8 @@ local function resetButton(ov, label, build, args)
   })
 end
 
--- A knob of the selected oscillator, its value as read; Return resets it (above), and so does the
--- reset after it.
+-- A knob of the selected oscillator, its value as read; Return turns it (turn), and the reset after
+-- it resets it.
 local function oscKnob(ov, label, key)
   local field = Osc.CONTROLS[key].field
   ov:addCustomButton({
@@ -349,11 +391,7 @@ local function oscKnob(ov, label, key)
       if a == nil then return "not read" end
       return string.sub(Osc.CONTROLS[key].words(a), #Osc.CONTROL_NAMES[key] + 2)
     end,
-    onActivate = function(o)
-      if busy(label) then return end
-      local spec = built(label, Osc.reset_osc_control, { control = key })
-      if spec then run(o, label, spec) end
-    end,
+    onActivate = function(o) turn(o, label, Am.osc, { control = key }) end,
   })
   resetButton(ov, "Reset " .. string.lower(label), Osc.reset_osc_control, { control = key })
 end
@@ -595,7 +633,8 @@ local function macroButtonOf(ov, label, build, args)
   })
 end
 
--- Macro knob `i`: its name and amount as read; Return resets it, and so does the reset after it.
+-- Macro knob `i`: its name and amount as read; Return turns it (turn), and the reset after it
+-- resets it.
 local function macroKnob(ov, i)
   local label = "Macro " .. i
   ov:addCustomButton({
@@ -608,11 +647,7 @@ local function macroKnob(ov, i)
       local a = v.macroAmounts and v.macroAmounts[i]
       return (name and (name .. ", ") or "") .. (a and (a .. " percent") or "amount not read")
     end,
-    onActivate = function(o)
-      if busy(label) then return end
-      local spec = built(label, Macros.reset_macro_amount, { index = i })
-      if spec then run(o, label, spec) end
-    end,
+    onActivate = function(o) turn(o, label, Am.macro, { index = i }) end,
   })
   resetButton(ov, "Reset macro " .. i, Macros.reset_macro_amount, { index = i })
 end

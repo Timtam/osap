@@ -123,6 +123,76 @@ fn menus_file_items_are_clicked_once_in_a_popup_found_from_240() {
     "##));
 }
 
+/// A16 (the second Mac test's finding 18): the ring's Load preset says the preset loaded. Its item
+/// clicked, the runtime's O:afterDialog waits for the dialog — REAPER's open panel coming forward
+/// over Avenger — and once Avenger is in front again, the name is watched as the page's Load watches
+/// it, read until it differs from the name before and has settled, and said in the page's words,
+/// "Load preset: <name>". A name that never settles is said as not read. With no dialog within the
+/// runtime's bound, the name all the same, and that none was seen.
+#[test]
+fn the_rings_load_preset_says_the_preset_loaded_after_its_dialog() {
+    run_mac(&scenario(r##"
+        local header, _, W = T.avengerAt80("LD Lead 1")
+        local base = { osc = 1, selected = "osc", index = 1 }
+        T.paintAvenger(98, 84, 1.6, base)
+        local dialog = { id = 951, title = "Open", class = "AXWindow/AXDialog/", app = T.MAC_REAPER,
+          bounds = { x = 300, y = 200, w = 700, h = 450 }, client = { x = 300, y = 228, w = 700, h = 422 } }
+        local function load()
+          T.pressAt(header, T.indexOf(header, "Load preset"))
+          T.paintAvenger(98, 84, 1.6, { osc = 1, selected = "osc", index = 1, popup = { 242, 20, 322, 70 } })
+          T.tick(3)
+          T.ok(T.clickAt() == "549,135", "Load's row: " .. T.clickAt())
+          T.repaint(base)
+        end
+        -- Back in Avenger, its header read again.
+        local function back()
+          S.listed = { W }
+          T.show(W)
+          local r = T.lastRead("vps-avenger header")
+          if r and not r.answered then T.answer(r, T.header(98, 84, 1.6, 80)) end
+          T.event()
+          T.run(400)
+          T.ok(header.active, "back in front: " .. T.dump())
+        end
+        load()
+        T.ok(T.count("[menu] 'VPS Avenger': waits for the dialog that comes next") == 1, T.dump())
+        S.listed = { W, dialog }
+        T.show(dialog)
+        T.tick(2)
+        T.ok(T.count("[menu] 'VPS Avenger': a dialog came forward — 'Open'") == 1, T.dump())
+        T.run(9000)
+        local said = #S.speech
+        T.nameIs("Resurrection")
+        back()
+        T.nameReads("Resurrection")
+        T.ok(T.lastSaid() == "Load preset: Resurrection", T.said(said + 1))
+        T.ok(T.count("[avenger] 'Load preset': the name after the dialog — Load preset: Resurrection") == 1, T.dump())
+        -- A name that never settles: not read.
+        load()
+        S.listed = { W, dialog }
+        T.show(dialog)
+        T.tick(2)
+        back()
+        local i = 0
+        for _ = 1, 25 do
+          T.run(150)
+          local r = T.lastRead("vps-avenger name")
+          if r and not r.answered then
+            i += 1
+            T.answer(r, T.nameRead("Loading " .. i))
+          end
+        end
+        T.ok(T.lastSaid() == "Load preset: the preset name cannot be read now", T.said())
+        -- No dialog within the bound: the name all the same.
+        load()
+        T.nameIs("Resurrection")
+        T.run(8200)
+        T.nameReads("Resurrection")
+        T.ok(T.lastSaid() == "Load preset: Resurrection — no file dialog was seen", T.said())
+        T.ok(T.count("[menu] 'VPS Avenger': no dialog came within 8000 ms") == 1, T.dump())
+    "##));
+}
+
 /// MENU's Load from the ring, its popup painted below MENU: chosen at Load's row in the middle of
 /// the area seen; and the redo list from the page, which holds the trip for as long as it is seen
 /// and lets it go on once it has gone — then the name.
@@ -653,10 +723,10 @@ fn on_windows_at_150_percent_a_led_is_clicked_through_the_factor_and_read() {
 
 /// Some of the ring's controls after Zoom: the Oscillator stepper reads the strip as it is first
 /// announced, steps to the next tab with the same click as the page's, and says the tab read after
-/// it; Mute says the selected tab's switch and clicks it; Level resets the knob and says the value
-/// read, and so does Reset level after it, the tool's separate reset button, with the same
-/// double-click; Reset pan with the right button; Macro button 1 says its name and state and clicks
-/// it. A part is read once in a stay.
+/// it; Mute says the selected tab's switch and clicks it; Reset level after Level, the tool's
+/// separate reset button, double-clicks the knob and says the value read; Reset pan with the right
+/// button; Macro button 1 says its name and state and clicks it. A part is read once in a stay.
+/// (Level itself turns the knob: the next test.)
 #[test]
 fn the_rings_strip_and_macro_controls_say_what_was_read_and_click_as_the_page_does() {
     run_mac(&scenario(r##"
@@ -683,18 +753,7 @@ fn the_rings_strip_and_macro_controls_say_what_was_read_and_click_as_the_page_do
           macroShown = 1, buttons = { false, false } })
         T.tick(3)
         T.ok(T.lastSaid() == "OSC 2 Mute ON", T.said())
-        -- Level: the knob reset.
-        i = T.indexOf(header, "Level")
-        T.pressAt(header, i)
-        T.tick(1)
-        local level = T.clickAt()
-        T.repaint({ osc = 3, selected = "osc", index = 2, mute = { [2] = true }, volume = 100, transpose = 0, fine = 0,
-          macroShown = 1, buttons = { false, false } })
-        T.tick(3)
-        T.ok(T.lastSaid() == "Volume 100 percent", T.said())
-        -- Reset level, after the knob: the same double-click, said as the knob's.
-        T.repaint({ osc = 3, selected = "osc", index = 2, mute = { [2] = true }, volume = 150, transpose = 0, fine = 0,
-          macroShown = 1, buttons = { false, false } })
+        -- Reset level, after the knob: a double-click on the knob, at (346, 68) at 1.6 from (98, 84).
         i = T.indexOf(header, "Reset level")
         T.ok(header.controls[i - 1].label == "Level", "after the knob")
         header.focus = i - 1
@@ -703,7 +762,7 @@ fn the_rings_strip_and_macro_controls_say_what_was_read_and_click_as_the_page_do
         local clicks = #S.clicks
         T.pressAt(header, i)
         T.tick(1)
-        T.ok(#S.clicks == clicks + 2 and T.clickAt() == level and S.clicks[#S.clicks].button == nil
+        T.ok(#S.clicks == clicks + 2 and T.clickAt() == "652,193" and S.clicks[#S.clicks].button == nil
           and S.clicks[#S.clicks - 1].button == nil, "a double-click on the knob, the left button: " .. T.clickAt())
         T.repaint({ osc = 3, selected = "osc", index = 2, mute = { [2] = true }, volume = 100, transpose = 0, fine = 0,
           macroShown = 1, buttons = { false, false } })
@@ -727,6 +786,159 @@ fn the_rings_strip_and_macro_controls_say_what_was_read_and_click_as_the_page_do
           macroShown = 1, buttons = { true, false } })
         T.tick(3)
         T.ok(T.lastSaid() == "Hold ON", T.said())
+    "##));
+}
+
+/// A12, the maintainer's decision of 2026-10-24: the ring's knobs turn as the tool's knob buttons
+/// do, through the page's own gesture (src/amount.luau). Return on Level reads the strip and the
+/// knob, holds PageUp, PageDown, Return and Escape with the runtime's O:holdKeys while the overlay
+/// stays in front, presses the knob and holds it, and says the tool's sentence behind the screen
+/// reader, logged as everything the ring says. Each PageDown is one point times the factor; Tab
+/// still moves the focus, and a stepper's press says the ring is still working on the last press, as
+/// do ◀, ▶, MENU's items, Zoom, Undo and the redo list, which click nothing meanwhile;
+/// Return — the hold's on whichever control the focus is — lets go where the keys left the pointer,
+/// and the knob is read after a change wait and said; then the keys are the overlay's again. Pan
+/// presses and lets go with the right button, and Return with nothing moved reads it at once.
+/// Macro 1, its name read, says the tool's macro sentence; Escape with nothing moved says the
+/// amount unchanged and reads nothing after, and after moves that it was let go and not read, which
+/// the knob then says. Leaving the front lets go once and says nothing; back in front a press
+/// works again. On the Drums tab nothing is pressed, and keys the host cannot capture press
+/// nothing. A key of the hold where the overlay has moved on ends the gesture, let go and silent.
+#[test]
+fn the_rings_knobs_turn_with_page_up_and_page_down_and_return_confirms() {
+    run_mac(&scenario(r##"
+        local header, _, W = T.avengerAt80("LD Lead 1")
+        local function paint(extra)
+          local spec = { osc = 1, selected = "osc", index = 1, volume = 150, transpose = 0, fine = 0, macroShown = 1,
+            amounts = { 40, 0, 0 } }
+          for k, v in pairs(extra or {}) do spec[k] = v end
+          T.paintAvenger(98, 84, 1.6, spec)
+        end
+        paint()
+        T.words({ ["macro tabs"] = "MACRO 1", ["macro macro1"] = "Cutoff" })
+        local level = T.indexOf(header, "Level")
+        local said = #S.speech
+        T.pressAt(header, level)
+        -- The press at (346, 68) at 1.6 from (98, 84), with the left button.
+        local d = T.inputs("down")
+        T.ok(#d == 1 and T.xy(d[1]) == "652,193" and d[1].button == "left", T.xy(d[1]))
+        for _, k in ipairs({ "PageUp", "PageDown", "Return", "Escape" }) do T.ok(S.holding[k], k .. " held") end
+        T.ok(T.count("[keys] 'VPS Avenger' holds PageUp, PageDown, Return, Escape for its module") == 1, T.dump())
+        T.ok(#S.speech == said + 1 and T.lastSaid()
+          == "Please press Page Up or Down to set the volume of OSC 1. To Confirm, press Return."
+          and S.speech[#S.speech].interrupt == false, T.said(said + 1))
+        T.ok(T.count("[avenger] [ring] said: Please press Page Up or Down to set the volume of OSC 1.") == 1, T.dump())
+        -- 69, 70 at 1.6: 194.9 -> 194, 196.5 -> 196.
+        T.ok(T.typed("PageDown") == "taken" and T.typed("PageDown") == "taken", "the hold's keys")
+        local m = T.inputs("move")
+        T.ok(#m == 2 and T.xy(m[1]) == "652,194" and T.xy(m[2]) == "652,196", T.xy(m[1]) .. " " .. T.xy(m[2]))
+        -- The overlay's other keys work on.
+        T.tab()
+        T.ok(header.focus == level + 1 and T.lastSaid() == "Reset level, button", "Tab moves on: " .. T.said())
+        local clicks = #S.clicks
+        T.stepAt(header, T.indexOf(header, "Oscillator"), 1)
+        T.ok(#S.clicks == clicks and T.lastSaid() == "Oscillator: still working on the last press", T.said())
+        -- The header's own controls that click Avenger click nothing either, pressed with Space (Return
+        -- is the hold's): a click with the knob's button held would drag the knob to its point.
+        for _, label in ipairs({ "Next preset", "Previous preset", "Load preset", "Initialize preset", "Undo", "Redo list" }) do
+          header.focus = T.indexOf(header, label)
+          header:_syncNativeKeys()
+          T.ok(S.holding["Space"] ~= nil, "Space activates " .. label)
+          S.epoch += 1
+          T.call("key", S.captured["Space"])
+          T.ok(#S.clicks == clicks and T.lastSaid() == label .. ": still working on the last press", label .. ": " .. T.said())
+        end
+        T.stepAt(header, T.indexOf(header, "Zoom"), 1)
+        T.ok(#S.clicks == clicks and T.lastSaid() == "Zoom: still working on the last press", T.said())
+        T.ok(#T.inputs("down") == 1 and #T.inputs("up") == 0, "only the knob pressed, and still held")
+        -- Return, the hold's on the stepper too: let go at once where the keys left it, then read.
+        paint({ volume = 100 })
+        local n = #S.input
+        T.ok(T.typed("Return") == "taken", "Return is the hold's")
+        T.ok(#S.input == n + 1 and S.input[n + 1][1] == "up" and T.xy(S.input[n + 1]) == "652,196"
+          and S.input[n + 1].button == "left", "let go at once: " .. T.xy(S.input[n + 1]))
+        T.tick(3)
+        T.ok(T.lastSaid() == "Volume 100 percent", T.said())
+        T.ok(T.count("[avenger] [amount] 'volume': read Volume 100 percent (Volume 150 percent before) — changed true") == 1,
+          T.dump())
+        T.ok(not S.holding["PageUp"] and not S.holding["Escape"] and T.typed("PageUp") == "application", "the keys back")
+        T.ok(T.count("[keys] 'VPS Avenger': its hold of PageUp, PageDown, Return, Escape ends (ended)") == 1, T.dump())
+        -- Pan: the right button, read at once with nothing moved.
+        local pan = T.indexOf(header, "Pan")
+        T.pressAt(header, pan)
+        d = T.inputs("down")
+        T.ok(#d == 2 and d[2].button == "right" and S.heldButtons[1] == "right", "Pan with the right button")
+        T.ok(T.lastSaid() == "Please press Page Up or Down to set the pan of OSC 1. To Confirm, press Return.", T.said())
+        T.ok(T.typed("Return") == "taken", "Return")
+        T.tick(3)
+        local u = T.inputs("up")
+        T.ok(#u == 2 and u[2].button == "right" and T.xy(u[2]) == T.xy(d[2]) and #S.heldButtons == 0, "let go of the right")
+        T.ok(T.lastSaid() == "Pan 0", T.said())
+        -- Macro 1, its name read as it is announced.
+        local macro = T.indexOf(header, "Macro 1")
+        header.focus = macro - 1
+        T.tab()
+        T.ok(T.lastSaid() == "Macro 1, Cutoff, 40 percent, button", T.said())
+        local snaps = S.snaps
+        T.pressAt(header, macro)
+        T.ok(T.lastSaid() == "Please press Page Up or Down to set the amount of the Cutoff Slider. To Confirm, press Return.",
+          T.said())
+        T.ok(T.typed("Escape") == "taken", "Escape")
+        T.tick(3)
+        T.ok(T.lastSaid() == "Cutoff 40 percent, unchanged" and S.snaps == snaps + 1, "nothing read after: " .. T.said())
+        T.pressAt(header, macro)
+        T.typed("PageUp")
+        T.typed("PageUp")
+        paint({ amounts = { 60, 0, 0 } })
+        T.ok(T.typed("Escape") == "taken", "Escape")
+        T.tick(3)
+        T.ok(T.lastSaid() == "Cutoff let go, not read", T.said())
+        header.focus = macro - 1
+        T.tab()
+        T.ok(T.lastSaid() == "Macro 1, Cutoff, amount not read, button", T.said())
+        T.ok(T.ups() == 4 and T.held() == 0, "let go four times, no picture held: " .. T.ups())
+        -- Leaving the front while the knob is held: let go once, nothing said.
+        T.pressAt(header, level)
+        T.typed("PageUp")
+        said = #S.speech
+        S.listed = { W, T.OTHER }
+        T.show(T.OTHER)
+        T.tick(3)
+        T.ok(T.ups() == 5 and #S.heldButtons == 0 and #S.speech == said, "let go once, nothing said: " .. T.said(said + 1))
+        T.ok(T.count("[keys] 'VPS Avenger': its hold of PageUp, PageDown, Return, Escape ends (left)") == 1, T.dump())
+        T.ok(not S.holding["PageUp"], "the keys back")
+        -- Back in front: a press works again; on the Drums tab nothing is pressed.
+        S.listed = { W }
+        T.show(W)
+        T.answer(T.lastRead("vps-avenger header"), T.header(98, 84, 1.6, 80))
+        T.event()
+        T.run(400)
+        T.ok(header.active, "back in front: " .. T.dump())
+        paint({ selected = "drums" })
+        local downs = #T.inputs("down")
+        T.pressAt(header, level)
+        T.ok(#T.inputs("down") == downs and not S.holding["PageUp"], "nothing pressed or held")
+        T.ok(T.lastSaid() == "Level: the Drums tab is selected; it has no oscillator controls", T.said())
+        -- Keys the host cannot capture: nothing pressed.
+        paint()
+        S.captureRaises = { PageUp = "the event tap could not be created (Accessibility)" }
+        T.pressAt(header, level)
+        S.captureRaises = nil
+        T.ok(#T.inputs("down") == downs, "nothing pressed")
+        T.ok(T.lastSaid() == "Level: the keyboard cannot be handed to VPS Avenger now", T.said())
+        -- A key of the hold where the overlay is no longer where the press began — its stay moved on
+        -- under the hold, which no recheck of the runtime's leaves standing: the gesture ends at that
+        -- key, let go once and nothing said, and the keys are the overlay's again.
+        T.pressAt(header, level)
+        local ups, moves = T.ups(), #T.inputs("move")
+        said = #S.speech
+        header._stay += 1
+        T.ok(T.typed("PageDown") == "taken", "the hold's key")
+        header._stay -= 1
+        T.ok(T.ups() == ups + 1 and #S.heldButtons == 0 and #S.speech == said, "let go once, nothing said: "
+          .. T.said(said + 1))
+        T.ok(#T.inputs("move") == moves and not S.holding["PageUp"], "no move, the keys back")
+        T.ok(T.held() == 0 and #S.heldButtons == 0, "nothing held: " .. T.held())
     "##));
 }
 

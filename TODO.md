@@ -671,7 +671,9 @@ report's reference pictures were measured locally and are never put in the repos
 synthetic numbers; comments name a picture by its file name only). The fix pass has two parts, by
 the plan's numbering: the core's (C1 to C16), with which the overlay runtime goes to 0.13.0 and
 daw-hosts to 0.3.0, and the avenger module's (A1 to A19), with which vps-avenger goes to 0.10.0 and
-vps-avenger-presets to 1.3.0. The core part, in the plan's order:
+vps-avenger-presets to 1.3.0. The avenger part's rest — A10's parts 3 and 6, A12's second half, A16
+and A19 — takes the overlay runtime to 0.14.0 (O:afterDialog, a page's `openLater`) and vps-avenger
+to 0.11.0. The core part, in the plan's order:
 
 - [ ] **DirectML.dll ships with its terms (the maintainer's decision of 2026-10-24).** The Windows
       package keeps `DirectML.dll` (1.15.4, from `ort`'s download of ONNX Runtime ms@1.22.0) and
@@ -777,11 +779,14 @@ vps-avenger-presets to 1.3.0. The core part, in the plan's order:
       over every claim of the overlay's own — Return does not activate the focused control, a
       control's hotkey of the same key is the hold's — the overlay's other keys work on; `true` from
       `onKey` ends it, and `onEnd` is told once, "ended", "left" (the front left: another window,
-      the page, a disable) or "replaced"; the keys go after it, and the overlay takes its own
+      the page, a disable; or, since 0.14, the overlay in front on another window it also matches,
+      a second Avenger, which the hold's keys scoped to the first would never reach) or
+      "replaced"; the keys go after it, and the overlay, still in front, takes its own
       captures of them again, since the host keeps one capture of a key per module (a key the overlay
       captures again while the hold stands is taken back for the hold at once). `true`, or `false` and
       `not_in_front`, the host's capture error or `failed`. Docs: overlay.md, O:holdKeys. Test:
-      `overlay_mac_test2_tests.rs`, `hold_keys_takes_the_keys_over_the_overlays_own_and_gives_them_back`.
+      `overlay_mac_test2_tests.rs`, `hold_keys_takes_the_keys_over_the_overlays_own_and_gives_them_back`,
+      `a_hold_of_keys_ends_when_the_overlay_is_in_front_on_another_window`.
 - [x] **Large regions at 1x enlarged, and the small ladder by line (finding 4, the host part).**
       **Built.** A region larger than 400x200 handed on as captured is enlarged three times, or
       twice within 4 million pixels, without a crop, when the capture is at one pixel a point (a
@@ -902,27 +907,55 @@ The avenger part, in the plan's order:
       selected, lit row does not reach (with the corner 1.5 units off it reaches 0.06 to 0.14 into
       the next row's whole box, and read FAV on). A category's faded initials ("AR" behind "Arp")
       are dropped before it is placed. The page key's calibration pictures gain
-      `browser-<zoom>pct.png`, and `browser-unsettled-…` where nothing settled it. Close clicks only
-      where an expansion reads open: where nothing tells, it refuses (below, A10 part 3's last
-      case). A view stored as set or confirmed and then changed in the settings dialog or reset is
-      "as stored" from then on. **The Mac tester confirms:** the log's "the header reads '…' — …
-      open" and "the header reads no name"; opening an expansion, loading an expansion preset,
-      Close, FAV and a star; Set and Confirm Expansion View.
-- [ ] **A10, part 3's last case: Close where nothing tells whether an expansion is open — the
-      maintainer's decision.** The plan clicks there all the same, and closes the view list the
-      click opens on the grid "with the drawn test"; built, it refuses (Correct open Expansion
-      first). The drawn test is armed only by a press of O:chooseMenuItem's (popups.luau,
-      Pp.region), never by a plain click, so the list would be seen by nothing; and no picture of
-      the view list is in the report to read it by. With the area read where the header settles
-      nothing, the case needs the header and the area both unread.
+      `browser-<zoom>pct.png`, and `browser-unsettled-…` where nothing settled it. Close clicks
+      where an expansion reads open, and where nothing tells (below, A10 part 3's last case); never
+      where the browser reads closed. A view stored as set or confirmed and then changed in the
+      settings dialog or reset is "as stored" from then on. **The Mac tester confirms:** the log's
+      "the header reads '…' — … open" and "the header reads no name"; opening an expansion, loading
+      an expansion preset, Close, FAV and a star; Set and Confirm Expansion View.
+- [x] **A10, part 3's last case: Close where nothing tells whether an expansion is open — the
+      maintainer's decision.** **Built.** Where neither the header nor the area tells, Close is
+      clicked as the tool clicks it (src/actions/browser.luau, `B.close_expansion`'s `unsure`), the
+      browser read again after the change, and then the view list the click may have opened on the
+      grid is looked for where it is drawn (`Pp.VIEW_LIST`): read as text off one picture, seen
+      where two of its rows or more read as the tool's view names ("<n> per Row", List)
+      (`B.listAfterClose`). Seen, it is closed by a click on its field, as a left opener's popup is,
+      and read gone after a change wait: "no expansion was open; the view list the click opened is
+      closed again", the grid posted in the view stored; still read there, "…, and it is still
+      open". Not the drawn test armed on that click: where the click closes an expansion, the grid
+      redrawn under the list's region would most likely read to it as a popup that never goes.
+      Readings only, each bounded by a change wait; nothing clicked where the browser reads closed.
+      Tests: `avenger_browser_tests.rs` (`close_where_nothing_tells_closes_the_view_list_its_click_opened`,
+      and the nothing-tells case of `no_view_is_chosen_and_no_expansion_closed_where_the_header_says_otherwise`:
+      the open expansion closed). **The Mac tester confirms:** with the header unreadable, Close on
+      the grid says no expansion was open and leaves no list open (the log's `the view list's place
+      reads …`).
 - [ ] **A10, part 4: one text region per row.** The grid's tile rows, the categories and the
       presets each read as a region per row, so the host crops and enlarges them. Not done: 23 more
       Vision requests a read on an Intel Mac, measured nowhere yet; the header now spares the area
       read in most cases, and the core part's enlargement of large regions (above) does not read
       the grid alone. Decide after the next Mac test's log.
-- [ ] **A10, part 6: opening by position where the names are not read.** The tile's index in the
-      chosen list, the stored view and the tool's page tables (its `_expansion_8_page_starts` and
-      siblings), confirmed after the click by the header's name. Not done (L).
+- [x] **A10, part 6: opening by position where the names are not read.** **Built.** Where the
+      grid's words name no expansion, Open goes by place, as the tool does (`B.byPlace`): the page's
+      index into the list it was posted (the roster, or Avenger's own list), the view read or
+      stored, and the tool's page tables, ported into src/tables/pages.luau (its
+      `_expansion_list/8/6/5/4/3_page_starts`, `_expansion_8_visible_start`,
+      `_expansion_page_for_index`, `_click_expansion_page_scroll`, `expansion_cell_pos`,
+      `expansion_list_cell_pos`, `expansion_scroll_pos` and `expansion_list_scroll_pos`). The grid
+      is taken to the page by the tool's clicks on its scrollbar, each followed by a change wait — a
+      click at a point that moved nothing is not made again there; where its page is not known this
+      session, its top first; the page placed is kept by window, and forgotten where the grid is
+      moved by its words and where the header does not confirm the one asked (another, none, the
+      grid unchanged), so the next Open takes the grid to its top first again rather than click the
+      same wrong tile. Then the tile is clicked at the tool's point, and **the header's name
+      confirms it**: another name, that expansion is closed again and said so; none, said as the
+      names path says it. Two deviations, each said in the file: a grid of one page is not scrolled,
+      and a short last page is moved to the area's bottom only where the grid scrolls at all.
+      Tests: `avenger_browser_tests.rs` (`a_grid_whose_names_are_not_read_opens_by_place_confirmed_by_the_header`,
+      `the_tools_page_tables_place_an_expansion_and_the_scrollbars_clicks`). **The Mac tester
+      confirms:** with the grid's names unreadable (80 % at 1x), Open Expansion opens the one chosen
+      on a later page of Complete; the log's `placed by its place …` and `the scrollbar clicked at
+      …`. Left: a category and a preset row by position (the plan's last bullet of part 6).
 - [x] **A11. The lists exactly as the tool offers them (finding 3).** Factory Standard, Complete
       (the tool's 124), and the tool's two personal rosters by their names, Nyhdroe and Joyman — the
       maintainer's decision of 2026-10-24, the one exception to naming a person; every other roster
@@ -934,9 +967,26 @@ The avenger part, in the plan's order:
       Reset fine tune, Reset random pitch and Reset macro 1 to 3, the tool's separate buttons: a
       double-click (the right button for Pan and Random Pitch), then the read. **The Mac tester
       confirms:** each resets its knob and says the value read.
-- [ ] **A12, its second half: the knob held with Page Up and Page Down, Return confirming.** Not
-      built. The hold it needs is the core part's `O:holdKeys` (above, runtime 0.13.0); the ring
-      does not use it yet, so Return on a knob resets it, as before.
+- [x] **A12, its second half: the knob held with Page Up and Page Down, Return confirming.**
+      **Built (the maintainer's decision: exactly as avenger_control).** Return on Level, Pan,
+      Transpose, Fine tune, Random pitch and Macro 1 to 3 runs the page's own gesture
+      (src/amount.luau, one implementation: `Am.run` for a trip, `Am.hold` for the ring) with the
+      runtime's `O:holdKeys` for Page Up, Page Down, Return and Escape: the strip and the knob
+      pictured, the knob pressed and held (the right button for Pan and Random Pitch), the tool's
+      sentence behind the screen reader ("Please press Page Up or Down to set the volume of OSC 1.
+      To Confirm, press Return.", "… the amount of the Cutoff Slider …"), each key one move of a
+      point times the factor within the tool's travel, Slider.wav at the limit; Return lets go and
+      the knob is read after a change wait and said ("Volume 100 percent", "…, unchanged", "Volume
+      cannot be read now"), Escape lets go ("Cutoff 40 percent, unchanged", or "Cutoff let go, not
+      read" after moves). The overlay's other keys work on: Tab moves, and the press of another
+      control that would click Avenger — the ring's, and the header's ◀, ▶, MENU's items, Zoom,
+      Undo and the redo list (`Ring.stillWorking`) — says it is still working on the last press and
+      clicks nothing, since a click with the knob's button held would drag the knob; the overlay
+      leaving the front, or coming up on a second Avenger window, lets go once and says nothing. The
+      tool's Reset buttons are the first half. Test: `avenger_osc_macros_tests.rs`,
+      `the_rings_knobs_turn_with_page_up_and_page_down_and_return_confirms`. **The Mac tester
+      confirms:** Return on Level, Page Down twice, Return: the knob moves and its value is said;
+      Return on a ring button activates it again after (the core part's step 10).
 - [x] **A13. The ring says a busy press.** "<control>: still working on the last press", once a
       press, without cutting into speech; everything the ring says is in the log ("[avenger] [ring]
       said: …"). **The Mac tester confirms:** fast presses of Oscillator are said, never dropped
@@ -951,9 +1001,27 @@ The avenger part, in the plan's order:
       by a click on MENU, which would land in the dialog. MENU's popup is looked for from 240.
       **The Mac tester confirms:** one click of Load's row (one `choosing item` line, no `clicked
       N time(s)`), and the popup found whole.
-- [ ] **A16. The ring's Load says the loaded preset.** Not built. The plug-in window brought back
-      after the dialog is the core part's (above); the ring's Load does not watch the name after it
-      yet.
+- [x] **A16. The ring's Load says the loaded preset.** **Built (runtime 0.14.0, `O:afterDialog`).**
+      The runtime's new general wait for a press of the overlay's own outside a trip: the dialog
+      that comes next — a window of the application of the overlay's own window (the one in front,
+      or the window the press was made in where a choice's onDone comes while the overlay holds its
+      place over the press's menu or the dialog, or as it leaves the front for the dialog: retries
+      at their default), other than that window, in front at the call or after, whether the overlay
+      holds its place over it or leaves the front for it; not the press's menu held before its
+      item's click, nor the window its item was clicked in — then the overlay in front again on
+      that window, then
+      `fn(o, true)`; `fn(o, false)` when no dialog came within 8 s; dropped where the overlay comes
+      up on another window after it, or another wait begins. Docs: overlay.md, O:afterDialog. The
+      ring's Load preset and Save preset as call it in their item's onDone, then watch the name as
+      the page's Load does (watchName, settled as there) and say "Load preset: <name>", "…: the
+      preset name cannot be read now", or with no dialog seen "… — no file dialog was seen". Tests:
+      `overlay_mac_test2_tests.rs` (`after_dialog_waits_for_the_dialog_an_item_opened_and_the_plugin_again`,
+      `after_dialog_in_a_choices_on_done_notes_the_window_of_the_press`,
+      `after_dialog_does_not_take_the_presss_own_menu_window_for_the_dialog`),
+      `avenger_osc_macros_tests.rs` (`the_rings_load_preset_says_the_preset_loaded_after_its_dialog`).
+      **The Mac tester confirms:** the ring's Load preset, a preset loaded in Logic's panel: "Load
+      preset: <name>" once Avenger is back (the log's `[menu] 'VPS Avenger': a dialog came forward —
+      'Load Preset...'` and `… is in front again after the dialog`).
 - [x] **A17. A part off the screen is said as that.** "the macros are below the screen; move the
       plug-in's window up" — by the page's error region, the ring's controls and every action's
       refusal; past the right edge alike. **The Mac tester confirms:** with the window low on the
@@ -961,10 +1029,27 @@ The avenger part, in the plan's order:
 - [x] **A18. A Mute under a Solo.** Avenger lights every other tab's Mute while a Solo is on, as
       a Mute pressed: those are said "silenced by OSC 1's Solo", never on, on the page and by the
       ring. **The Mac tester confirms:** Solo on OSC 1, OSC 2's Mute is said silenced.
-- [ ] **A19. The page key's second.** Partly: the area's read is gone where the header settles the
-      browser. Asking the questions with callbacks in parallel is not done: the page's `open`
-      answers in its handler, where they are waited for — it needs the runtime's page to take a
-      later answer.
+- [x] **A19. The page key's second.** **Built (runtime 0.14.0, a page's `openLater`).** The
+      runtime's page takes a later answer from `open`: with `openLater = true` in O:addPage's spec,
+      `open(o, answer)` may return at once and the show waits for `answer()` — `answer(false)`, or
+      `false` returned, shows nothing — the place checked again then; a key pressed again before it
+      makes the earlier answer too late; nothing bounds the wait. Docs: overlay.md (O:addPage, "A
+      later answer"; Where a hook runs), building-a-page.md. The page's key asks the picture's 26
+      questions at once with callbacks and, beside them, the text read of the regions that need
+      none of their answers — the preset's name, the browser's view and header, the macro tabs'
+      captions and names, the central tabs' captions (key `vps-avenger page`); the rest — the OSC
+      tabs', the drum slots' and the sample browser's names — and the knobs' two grids in the last
+      answer's handler, then the state and the show (read/open.luau, page.luau). A press while
+      another's read is out reads afresh, and only the latest answer shows. Initialize's read in a
+      trip is waited for as before. The area's read was already gone where the header settles the
+      browser. Tests: `overlay_page_tests.rs` (`open_later_shows_the_page_when_its_answer_comes`),
+      `avenger_page_tests.rs` (`the_reads_of_one_picture_give_the_tools_state_keys`: 26 asked at
+      once, the first text read beside them, nothing posted in the key's handler;
+      `one_press_at_a_time_and_a_page_is_not_shown_after_the_user_moved_on`;
+      `a_press_a_disable_dropped_shows_nothing_and_the_next_press_reads_again`). Not measured: what
+      it saves on a Mac. **The Mac tester confirms:** the page key's `[page] … open answered N ms
+      after the key` and the `[read] … the questions N ms and the first text read M ms beside them`
+      line, against the second test's 0.91 to 1.06 s.
 
 ## The first Mac test of the Avenger page (2026-10-14)
 

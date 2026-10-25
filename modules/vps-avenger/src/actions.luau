@@ -599,8 +599,24 @@ end
 -- The view, Close and FAV through src/act.luau; the others trips of src/actions/browser.luau's own,
 -- each given what was last read in Avenger's window — the expansion open and its lists — and refused
 -- with no trip where the page cannot have meant what it sent; Go to Category no trip at all.
-for _, name in ipairs({ "set_expansion_view", "close_expansion", "toggle_expansion_favorite_view" }) do
+for _, name in ipairs({ "set_expansion_view", "toggle_expansion_favorite_view" }) do
   A.HANDLERS[name] = viaAct(name, Bw[name])
+end
+
+-- Close Expansion through src/act.luau as the others, and where nothing told whether an expansion
+-- was open, the view list its click may have opened looked for after it (Bw.listAfterClose).
+A.HANDLERS.close_expansion = function(o, args)
+  local label = E.LABELS.close_expansion
+  local w = E.plugin()
+  local spec = Bw.close_expansion(args, label, S.values(w and w.id))
+  go(o, "close_expansion", function(m, trip)
+    Act.run(m, spec, function(result)
+      -- nil: the trip's own check ended it, and its give-up says the rest.
+      if not result then return end
+      if spec.unsure() then return Bw.listAfterClose(m, trip, result, label) end
+      trip:done(result)
+    end, trip)
+  end)
 end
 
 -- What was last read in the window the page was shown beside: its values, or none.

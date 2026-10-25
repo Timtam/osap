@@ -300,6 +300,7 @@ fn the_mac_page_mode_from_the_page_describes_the_page_again_and_says_so() {
           T.openPage()
           T.ok(T.lastSaid() == "Building the page." and #T.page().shows == 1, T.said())
           T.pageReady()
+          T.tick()
           T.ok(#T.page().shows == 2 and S.front == T.PAGE_WIN, "shown once it has loaded")
           local n = #T.page().posts
           T.pageMsg({ action = "ready" })
@@ -405,6 +406,7 @@ fn reset_sets_every_setting_to_its_default_the_mac_mode_last() {
         T.event()
         T.openPage("Ctrl+Shift+F2")
         T.pageReady()
+        T.tick()
         T.ok(S.front == T.PAGE_WIN and #S.pages == 2, "the new page in front")
         local old, sounds = T.page(), #S.sounds
         local logs = #S.logs
@@ -434,6 +436,7 @@ fn reset_sets_every_setting_to_its_default_the_mac_mode_last() {
         T.event()
         T.openPage()
         T.pageReady()
+        T.tick()
         T.setting("sounds", false)
         local pages = #S.pages
         T.reset()

@@ -1,6 +1,6 @@
 id = "com.platform.vps-avenger"
 name = "VPS Avenger"
-version = "0.10.0"
+version = "0.11.0"
 license = "GPL-3.0-or-later"
 # The runtime's page support (O:addPage, O:inPlugin) came with version 0.6; `identify`'s `again`
 # and O:watch's count of readings, which the header's read and the name after ◀ and ▶ use, with 0.7;
@@ -9,8 +9,12 @@ license = "GPL-3.0-or-later"
 # keyboard, which the renames and Browse Presets use (src/handover.luau), with 0.9 — its `keys`
 # kind the knobs turned from the page too (src/amount.luau); O:chooseMenuItem's `submenu`, which a drum
 # slot's Copy and Swap choose their target slot in (src/actions/drums.luau), with 0.10; the runtime's
-# error values and O.errors, whose codes every answer of the runtime's is compared by, with 0.11.
-dependencies = ["com.platform.overlay >= 0.11", "com.platform.daw-hosts"]
+# error values and O.errors, whose codes every answer of the runtime's is compared by, with 0.11;
+# O:holdKeys, which holds Page Up, Page Down, Return and Escape for a knob turned from the ring
+# (src/ring.luau, src/amount.luau), with 0.13; O:afterDialog, after which the ring's Load preset and
+# Save preset as say the name (src/main.luau), and the page's `openLater`, which lets the page key's
+# reads be asked at once with callbacks (src/page.luau, src/read/open.luau), with 0.14.
+dependencies = ["com.platform.overlay >= 0.14", "com.platform.daw-hosts"]
 # The catalog of Avenger's expansions (modules/vps-avenger-presets), when it is installed:
 # the preset's expansion, category, oscillators and macros, and the neighbour ◀ and ▶ lead to,
 # said marked as the database's (src/presets.luau). Without it the module is what it was.
@@ -38,7 +42,7 @@ optional_dependencies = ["com.platform.vps-avenger-presets"]
 #           box's YES the page answers; the oscillator strip's and the macros' clicks, right clicks
 #           and double-clicks (src/act.luau); for a rename, the double-click that opens Avenger's
 #           editor on a name field, and the click that selects an OSC tab before it (src/handover.luau);
-#           for a knob turned from the page, its press held, one move per key and the release
+#           for a knob turned from the page or the ring, its press held, one move per key and the release
 #           (src/amount.luau); the Drums tab's clicks, double-clicks and a drum slot's menu with its
 #           submenu (src/actions/drums.luau), a drum slot's Browse (src/handover.luau) and a drum
 #           knob pressed and held (src/amount.luau); the sample editor's clicks, its menus opened

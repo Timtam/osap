@@ -14,7 +14,8 @@
 --                      oscillator tabs and macro names, each marked as the database's
 --   Load, Save,        MENU's four items, each chosen in Avenger's own menu once a menu test sees
 --   Save as,           it (O:chooseMenuItem); Save's and Initialize's warning box is an overlay of
---   Initialize         its own (dialog.luau)
+--   Initialize         its own (dialog.luau); after Load's and Save as's file dialog, the name
+--                      read and said once Avenger is in front again (O:afterDialog)
 --   Undo, Redo list    UNDO clicked, or right-clicked for its redo list, whose keys are the list's
 --                      while a menu test sees it
 --   Zoom               a stepper over Avenger's zoom list: the entry beside the current one is
@@ -443,6 +444,8 @@ local function presetStep(ov, label, at, dir)
     -- What the latest read says, at once: announcing reads nothing.
     text = function() return names.init and "unavailable on Init Preset" or nil end,
     onActivate = function(o)
+      -- A knob the ring holds (ring.luau, Ring.stillWorking): nothing clicked.
+      if Ring.stillWorking(label) then return end
       local here, read = nameBefore(o, label)
       if not here then return end
       if names.init then
@@ -631,12 +634,44 @@ local OWN_NAME = { ["Load preset"] = true, ["Save preset as"] = true, ["Initiali
 -- the dialog too; so these are chosen at their click, as the project's tool clicks them once.
 local ONE_CLICK = { ["Load preset"] = true, ["Save preset as"] = true }
 
+-- After Load and Save as, the name (the second Mac test's finding 18: the ring said nothing of the
+-- preset loaded): the file dialog the item opens is the user's, and once the plug-in is in front
+-- again after it — the overlay runtime's O:afterDialog (0.14), the overlay holding its place over
+-- the dialog or coming back to the window it was chosen in — the name is watched as the page's Load
+-- watches it (watchName: read until it differs from `was` and has settled, up to NAME_WITHIN) and
+-- said in the page's words, "Load preset: <name>", or that it cannot be read. No dialog within the
+-- runtime's bound: the name all the same, with that said. A wait the runtime refuses says nothing
+-- more than the press did.
+local function nameAfterDialog(w, label, was)
+  local ok, err = w:afterDialog(function(o, seen)
+    if not o.active then
+      host.log.info(string.format("[avenger] '%s': %s, and the overlay is not in front — the name is not read", label,
+        seen and "back after the dialog" or "no file dialog came"))
+      return
+    end
+    watchName(o, was, function(now)
+      local said
+      if now == nil then
+        said = label .. ": the preset name cannot be read now"
+      else
+        said = label .. ": " .. now .. (seen and "" or " — no file dialog was seen")
+      end
+      host.log.info(string.format("[avenger] '%s': the name after the dialog — %s", label, said))
+      host.speech.output(said, { interrupt = true })
+    end, label)
+  end)
+  if not ok then
+    host.log.info(string.format("[avenger] '%s': the name is not watched after the dialog — %s", label, tostring(err)))
+  end
+end
+
 -- `arms`: the item opens Avenger's warning box, which is looked for once the choice has been
 -- taken.
 local function menuEntry(ov, label, item, arms)
   ov:addCustomButton({
     label = label,
     onActivate = function(o)
+      if Ring.stillWorking(label) then return end
       if arms then
         local r, zoom, s = boxOffScreen(o)
         if r then
@@ -650,6 +685,8 @@ local function menuEntry(ov, label, item, arms)
       local origin = o:origin()
       local id = origin and origin.id
       local pick = {}
+      -- The name before the choice, for the watch after Load's and Save as's dialog.
+      local was = names.last
       local opened = o:chooseMenuItem({
         label = label,
         at = G.MENU,
@@ -662,6 +699,7 @@ local function menuEntry(ov, label, item, arms)
             DB.forget(label .. " chosen", OWN_NAME[label])
             unseen()
             if arms then D.arm(id, label) end
+            if ONE_CLICK[label] then nameAfterDialog(w, label, was) end
             return
           end
           closeLeftOpen(w, pick, err, label, G.MENU)
@@ -745,6 +783,7 @@ local function zoomStepper(ov)
       return "cannot be read now"
     end,
     onStep = function(dir, o)
+      if Ring.stillWorking("Zoom") then return false end
       local origin = o:origin()
       if H.stepping(origin) then
         host.log.info("[avenger] 'Zoom': the last step still waits for the zoom field — this press is not sent")
@@ -809,6 +848,7 @@ menuEntry(header, "Initialize preset", G.INITIALIZE, true)
 header:addCustomButton({
   label = "Undo",
   onActivate = function(o)
+    if Ring.stillWorking("Undo") then return end
     if not clickAt(o, "Undo", G.UNDO) then return end
     DB.forget("Undo")
     unseen()
@@ -827,6 +867,7 @@ header:addCustomButton({
   label = "Redo list",
   opensMenu = true,
   onActivate = function(o)
+    if Ring.stillWorking("Redo list") then return end
     if clickAt(o, "Redo list", G.UNDO, "right") then
       H.popup(o:origin())
       -- What the list redoes is chosen in the list, which this module does not read.
