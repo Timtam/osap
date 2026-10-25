@@ -7650,13 +7650,60 @@ the macOS system events) are not in this list. Done for Windows and the shared c
       the output switched in Control Center: `[sound] the audio output reported an error` or
       `… opened again`, and the next sound audible (cpal's `DeviceIsAlive` listener, from its
       source; never seen live — which is why `sound.md` does not describe it).
-- [ ] **`host.sound` on rodio 0.21** (checked from its source 2026-09-27, not taken in the uptime
+- [x] **`host.sound` on rodio 0.21** (checked from its source 2026-09-27, not taken in the uptime
       change): `OutputStreamBuilder::with_error_callback` and `open_default_stream` do what
       `sound.rs`'s `build`/`stream` do by hand. Moving means cpal 0.15.3 → 0.16 on both
       platforms (the macOS half only verifiable on a Mac), `Sink::connect_new` instead of
       `try_new`, `log_on_drop(false)`, and keeping the default-device check (its
       `OutputStream` does not name its device). Also removes cpal 0.15.3's leaked event handle
       per failed output, if 0.16 fixed that (not checked).
+
+      **Taken** (2026-10-25, wip/deps step C), as rodio 0.23.0 on cpal 0.18.2, not 0.21: 0.21
+      (cpal 0.16) and 0.22 (cpal 0.17) keep the leak — their WASAPI `Stream` closes the event only
+      when its thread is still there to take the terminate command — and cpal 0.18.0 gave the
+      event to the thread's context, which closes it as the thread ends. 0.22.2 also fixed a mixer
+      that sometimes never started a source added to it (rodio#855), and sounds come at any time.
+      0.23 itself only moves to cpal 0.18's one error type. sound.rs is now rodio's
+      `DeviceSinkBuilder::from_device` with our error callback and `log_on_drop(false)`, and the
+      sink's own mixer; `build`, `stream` and the hand-made mixer are gone (rodio's dispatch also
+      covers I24, which cpal 0.18 can pick as a device's default). Kept on purpose: the
+      default-device check, now by cpal's `DeviceId` (`Device::name` is gone), and our own
+      fallback loop. rodio's `open_default_sink` takes no error callback, skips every Core Audio
+      device (their descriptions name no driver), and opens cpal's handle that follows the
+      default, which on Windows is activated in a way that can fail for the rest of the process
+      (cpal#1402, open, fix #1413 not released): the output is opened on the default's endpoint,
+      looked up by its id (`device_by_id`), as 0.15.3 opened it. `BufferSize::Default` kept
+      against rodio's fixed ≈ 50 ms. cpal's notices through the error callback (`Xrun`,
+      `RealtimeDenied`, `DeviceChanged`) are not failures (`fails_the_output`). cpal's `realtime`
+      feature through a direct `cpal` entry (adds audio_thread_priority 0.35.1, MPL-2.0), so the
+      Windows audio thread keeps the raised priority 0.15.3 gave it unasked (MMCSS "Audio", or
+      time-critical); a test fails when rodio and that entry name two cpals. rodio's default
+      features off but playback and the four formats: no microphone, MP4/AAC or dither. WAV, FLAC
+      and Vorbis now decode through Symphonia (hound, claxon and lewton left the build), checked
+      on every sound the repository ships; its decoder reads the first block when it is made, on
+      the event loop (sound.md says so). `Sink::connect_new` never applied: sound.rs has no Sink.
+      Gone from the graph: windows 0.54, and on the Mac coreaudio-sys with its bindgen run
+      (coreaudio-rs 0.14 is objc2's). sound.rs type-checks for both Mac slices with the host's
+      features (a scratch crate around the unchanged file, as macos-check cannot borrow it
+      without mlua); linking and running it there is CI's macOS job. What is left: the item below.
+- [ ] **Live (Windows with NVDA, and the next Mac session): `host.sound` on rodio 0.23** (built
+      2026-10-25, not run). Windows, before wip/deps is merged: `examples/sound` plays with NVDA
+      running; make another device the default and play (one `opened again` line, the sound on the
+      new device); unplug a USB device while a sound plays (`the audio output reported an error`,
+      the next sound on the new default); Process Explorer shows the audio thread of the process
+      at a raised priority while a sound plays. Mac (the item "Next Mac session" above still
+      stands; a stream on one device keeps cpal's `DeviceIsAlive` listener): Audio MIDI Setup's
+      Format of the output device before and after the first sound — cpal 0.18 sets the device's
+      physical format to its stream's where it can (`set_physical_format`, cpal #1147), which
+      0.15.3 never did, and an interface shared with a DAW could be switched; no microphone prompt
+      at the first sound; a DAW that changes the device's sample rate gives one `the audio output
+      reported an error` line (cpal 0.18 now listens for the rate, `StreamInvalidated`) and the
+      next sound plays; and CI's macOS job links and runs `cargo test` on cpal 0.18 / rodio 0.23.
+- [ ] **rodio's `speakers` API, and cpal#1413.** rodio 0.23 calls itself a stopgap: its next major
+      release replaces `DeviceSinkBuilder` with the `speakers` API (experimental in 0.23), whose
+      fallback to another device rodio leaves to the caller — keep ours when moving. And once cpal
+      ships #1413 (cpal#1402's fix), look again at whether sound.rs still has to pin the
+      endpoint by id rather than open cpal's handle that follows the default.
 
 ## macOS over days of uptime (2026-09-27)
 

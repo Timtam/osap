@@ -17,7 +17,16 @@ rayon = "1"
 # how it uses that field; module-manifest's dev-dependency is pinned with it, for one mlua.
 mlua = { version = "=0.11.6", features = ["luau", "error-send", "serialize"] }
 module-manifest = { path = "../module-manifest" }
-rodio = "0.20"
+# `host.sound` (sound.rs): rodio's device sink and decoders. Playback and the four formats
+# sound.md names, all four Symphonia's; not the defaults' microphone (recording), MP4/AAC, or
+# dither, which brings rand.
+rodio = { version = "0.23.0", default-features = false, features = ["playback", "wav", "flac", "vorbis", "mp3"] }
+# Only for `realtime`: the audio thread at the multimedia class scheduler's "Audio" priority on
+# Windows, or time-critical when that is refused, as cpal 0.15.3 raised it without being asked;
+# cpal 0.17 and later do it only with this feature. Nothing on macOS. It must be the cpal rodio
+# uses, or the feature misses the stream that plays (sound.rs, `one_cpal_in_the_build`). Adds
+# audio_thread_priority (MPL-2.0, as Symphonia is).
+cpal = { version = "0.18.2", features = ["realtime"] }
 semver = "1"
 serde = { version = "1.0.228", features = ["derive"] }
 # `float_roundtrip`: `host.json.decode` reads a number as the double nearest to it, as .NET,

@@ -1,35 +1,33 @@
 //! `host.sound`'s audio output — and opening it again when the device it was opened on is gone.
 //!
-//! **Why not `rodio::OutputStream`.** It opens the default device once, and cpal binds the stream
-//! to that endpoint for as long as it lives. After the default device changed, a USB or
-//! Bluetooth device went away, or a resume invalidated the endpoint, every later sound was
-//! silent — or went to the old device — and nothing said so: rodio 0.20 hands the stream's error
-//! callback to `eprintln!` (to `tracing` only with its `tracing` feature, which this build does
-//! not enable), so the error never reached the log either. The application runs for days, and
-//! all three happen in days.
+//! **The output is rodio's device sink** (`DeviceSinkBuilder`, rodio 0.23 on cpal 0.18): the
+//! stream, the sample-format dispatch and the mixer sounds are added to are rodio's, opened on one
+//! device with an error callback of ours that marks the output as failed, and with
+//! `log_on_drop(false)`, without which every output let go prints a line to stderr. Before each
+//! sound [`needs_reopen`] decides: the stream failed, or the system's default output device is
+//! another than the default it was opened for. And the manager drops the output after a resume or
+//! a new connection (`system_events`), so the next sound opens it afresh. Decoding is rodio's too.
 //!
-//! So the stream is built here, with rodio's own mixer and cpal (rodio's re-export of it: the
-//! same version, no new dependency), which is what `OutputStream` does inside, plus an error
-//! callback that marks the output as failed. Before each sound [`needs_reopen`] decides: the
-//! stream failed, or the system's default output device is another than the default it was
-//! opened for. And the manager drops the output after a resume or a new connection
-//! (`system_events`), so the next sound opens it afresh. Decoding and mixing stay rodio's.
+//! **Why not rodio's `open_default_sink`.** It takes no error callback — its own writes to
+//! stderr, so a device that went away never reached the log, which is why this file exists — its
+//! fallback skips every device whose description names no driver, which is every Core Audio
+//! device as cpal 0.18 describes them, and it opens cpal's handle that follows the default device.
+//! That handle is also why [`Output::open`] looks the default endpoint up by its id and opens that:
+//! on Windows it is activated through `ActivateAudioInterfaceAsync`, which fails for the rest of
+//! the process once the system's device notifications have run while any thread is in the
+//! multithreaded apartment (cpal#1402, open on 2026-10-25), and the accessibility thread and the
+//! WinRT recogniser's are. So the output stays on the endpoint that was the default when it
+//! opened, as cpal 0.15.3 had it, and the default-device check is what moves it.
 //!
-//! **Why not rodio 0.21, which has this built in** (checked 2026-09-27 against its published
-//! source, `src/stream.rs` of 0.21.1): its `OutputStreamBuilder::with_error_callback` takes the
-//! same error callback, and `open_default_stream` does the same sample-format dispatch into the
-//! same mixer, so [`build`] and [`stream`] below are what 0.21 would replace. It is not taken in
-//! this change because 0.21 depends on cpal 0.16 where this build has 0.15.3 — a new major
-//! version of the audio layer on both platforms, whose macOS half can only be heard on a Mac —
-//! and because its API is not a drop-in (`OutputStreamHandle` and `Sink::try_new` are gone, and
-//! its `OutputStream` prints a line to stderr when dropped unless told not to). Its
-//! `OutputStream` does not name its device either, so [`needs_reopen`]'s default-device check
-//! stays here whichever version builds the stream. TODO.md keeps the move to 0.21.
+//! **The buffer is the system's** (`BufferSize::Default`), as with cpal 0.15.3. rodio's
+//! `from_device` asks for about 50 ms instead, for systems whose default is wrong, which would put
+//! some 30 ms more before every cue and, on Core Audio, set the device's own buffer size.
 //!
-//! **One known leak, in cpal 0.15.3 and negligible.** Its WASAPI `Stream` skips closing one
-//! event handle when dropped after its thread has already ended, which is always so after a
-//! device error. So each output dropped after a failure leaves one handle: one per unplugged
-//! device or failed resume, not per sound.
+//! **Not every stream error is a failure.** cpal 0.18 sends notices through the same callback: an
+//! underrun or a processing overload (`Xrun`; Core Audio reports every overload), a real-time
+//! priority the system refused (`RealtimeDenied`), and a stream that followed the default to
+//! another device (`DeviceChanged`, which a stream on one endpoint never reports). The sound goes
+//! on after each, so the output is kept and nothing is written ([`fails_the_output`]).
 
 use std::fs::File;
 use std::io::BufReader;
@@ -38,9 +36,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use rodio::cpal;
-use rodio::cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use rodio::dynamic_mixer::{self, DynamicMixer, DynamicMixerController};
-use rodio::Source;
+use rodio::cpal::traits::{DeviceTrait, HostTrait};
+use rodio::{DeviceSinkBuilder, DeviceSinkError, MixerDeviceSink, Source};
 
 use crate::errors::{sound, HostError};
 
@@ -50,7 +47,8 @@ pub(crate) type Sound = rodio::Decoder<BufReader<File>>;
 /// The sound file at `path`, opened and its header read, or why not, in the words the log has
 /// always had: `cannot play '…': …` — `not_found` for a file that is not there, `invalid` for one
 /// that does not decode, `failed` for one that is there and cannot be opened (no right to read it,
-/// a folder, another program holding it). On the event loop: it reads the file's header.
+/// a folder, another program holding it). On the event loop: it reads the file's header and
+/// decodes its first block, as rodio's decoder (Symphonia's) does when it is made.
 pub(crate) fn open(path: &Path) -> Result<Sound, HostError> {
     let cannot = |reason, e: &dyn std::fmt::Display| HostError::with(reason, format!("cannot play '{}': {e}", path.display()));
     let file = File::open(path).map_err(|e| {
@@ -72,26 +70,40 @@ pub(crate) fn source(root: &Path, path: &Path) -> mlua::Result<Result<Sound, Hos
     }
 }
 
-/// An open audio output: the stream, the mixer sounds are added to, and whether the stream has
-/// reported an error since.
+/// An open audio output: rodio's sink, which holds the stream and the mixer sounds are added
+/// to, and whether the stream has reported an error since.
 pub(crate) struct Output {
-    /// Kept only so the stream lives; dropping it stops the sound.
-    _stream: cpal::Stream,
-    mixer: Arc<DynamicMixerController<f32>>,
+    /// Dropping it stops the sound.
+    sink: MixerDeviceSink,
     failed: Arc<AtomicBool>,
     /// The name of the device it was opened on, when the device has one.
     device: Option<String>,
-    /// The name of the system's default output device when it was opened — the device itself
-    /// when that opened, another when the default would not open and the next one did.
+    /// The id of the system's default output device when it was opened (cpal's `DeviceId`, as
+    /// text) — the device itself when that opened, another when the default would not open and
+    /// the next one did. An id, not a name: two devices of the same name are told apart.
     default_then: Option<String>,
 }
 
 /// Whether the output has to be opened again before the next sound: its stream reported an
 /// error, or the system's default output device is another than the one that was the default
-/// when it was opened. A default that cannot be named now (none, or no name) keeps the output
+/// when it was opened. A default that cannot be identified now (none, or no id) keeps the output
 /// there is: opening again would find nothing better.
 pub(crate) fn needs_reopen(failed: bool, default_then: Option<&str>, default_now: Option<&str>) -> bool {
     failed || default_now.is_some_and(|now| default_then != Some(now))
+}
+
+/// Whether a stream error means the output has failed. Not for the notices cpal sends through
+/// the same callback while the sound goes on: an underrun or overload, a refused real-time
+/// priority, a stream that followed the default elsewhere. A kind cpal adds later counts as a
+/// failure: opening again is the safe side.
+pub(crate) fn fails_the_output(kind: cpal::ErrorKind) -> bool {
+    !matches!(kind, cpal::ErrorKind::Xrun | cpal::ErrorKind::RealtimeDenied | cpal::ErrorKind::DeviceChanged)
+}
+
+/// The audio system's words for why an output would not open: cpal's, which rodio's error
+/// carries as its source under a sentence of its own ("Error opening the stream with the OS").
+fn said(e: &DeviceSinkError) -> String {
+    std::error::Error::source(e).map_or_else(|| e.to_string(), |cause| cause.to_string())
 }
 
 /// What `host.sound.play` answers when no output could be opened: `no audio output device`, and
@@ -106,105 +118,67 @@ pub(crate) fn no_device(said: Option<String>) -> HostError {
 }
 
 impl Output {
-    /// Opens the system's default output device, or — as rodio's `try_default` does — the first
-    /// other device that opens when the default will not. Otherwise the audio system's words for
-    /// the default device that would not open, or `None` when there is no output device at all.
+    /// Opens the endpoint that is the system's default output device now, looked up by its id
+    /// (see the module doc for why not cpal's handle that follows the default), or the first
+    /// other device that opens when it will not — the fallback rodio's `open_default_sink` has,
+    /// without its filter. Otherwise the audio system's words for the default device that would
+    /// not open, or `None` when there is no output device at all.
     pub(crate) fn open() -> Result<Output, Option<String>> {
         let host = cpal::default_host();
         let default = host.default_output_device().ok_or(None)?;
-        let default_then = default.name().ok();
-        let mut out = match Output::open_on(&default) {
+        let id = default.id().ok();
+        let first = id.as_ref().and_then(|id| host.device_by_id(id)).unwrap_or(default);
+        let mut out = match Output::open_on(&first) {
             Ok(out) => out,
-            Err(first) => host
+            Err(words) => host
                 .output_devices()
                 .ok()
                 .and_then(|mut all| all.find_map(|d| Output::open_on(&d).ok()))
-                .ok_or(Some(first))?,
+                .ok_or(Some(words))?,
         };
-        out.default_then = default_then;
+        out.default_then = id.map(|id| id.to_string());
         Ok(out)
     }
 
+    /// The sink on `device`, in its default format. The error callback runs on the audio thread:
+    /// a failure marks the output failed and writes one line, the first time.
     fn open_on(device: &cpal::Device) -> Result<Output, String> {
-        let config = device.default_output_config().map_err(|e| e.to_string())?;
-        let (mixer, rx) = dynamic_mixer::mixer::<f32>(config.channels(), config.sample_rate().0);
         let failed = Arc::new(AtomicBool::new(false));
-        let stream = build(device, &config, rx, failed.clone()).map_err(|e| e.to_string())?;
-        stream.play().map_err(|e| e.to_string())?;
-        Ok(Output { _stream: stream, mixer, failed, device: device.name().ok(), default_then: None })
+        let flag = failed.clone();
+        let mut sink = DeviceSinkBuilder::from_device(device.clone())
+            .map_err(|e| said(&e))?
+            .with_buffer_size(cpal::BufferSize::Default)
+            .with_error_callback(move |e: cpal::Error| {
+                if fails_the_output(e.kind()) && !flag.swap(true, Ordering::AcqRel) {
+                    crate::logging::line(
+                        "sound",
+                        &format!("the audio output reported an error ({e}); it is opened again for the next sound"),
+                    );
+                }
+            })
+            .open_stream()
+            .map_err(|e| said(&e))?;
+        sink.log_on_drop(false);
+        let name = device.description().ok().map(|d| d.name().to_owned());
+        Ok(Output { sink, failed, device: name, default_then: None })
     }
 
     /// Whether this output has to be opened again before the next sound — see [`needs_reopen`].
-    /// Asks the system for its default output device: one query of the audio service, well
-    /// under a millisecond to a few, made only when a sound is about to play.
+    /// Asks the system for its default output device and that device's id: one query of the
+    /// audio service, well under a millisecond to a few, made only when a sound is about to play.
     pub(crate) fn stale(&self) -> bool {
-        let default_now = cpal::default_host().default_output_device().and_then(|d| d.name().ok());
+        let default_now = cpal::default_host().default_output_device().and_then(|d| d.id().ok()).map(|id| id.to_string());
         needs_reopen(self.failed.load(Ordering::Acquire), self.default_then.as_deref(), default_now.as_deref())
     }
 
     /// Plays `source` to its end, mixed with whatever else is playing; returns at once.
-    pub(crate) fn play<S>(&self, source: S)
-    where
-        S: Source + Send + 'static,
-        S::Item: rodio::Sample,
-        f32: cpal::FromSample<S::Item>,
-    {
-        self.mixer.add(source.convert_samples::<f32>());
+    pub(crate) fn play<S: Source + Send + 'static>(&self, source: S) {
+        self.sink.mixer().add(source);
     }
 
     pub(crate) fn device(&self) -> &str {
         self.device.as_deref().unwrap_or("an unnamed device")
     }
-}
-
-/// The stream for `device` in its own sample format, fed from the mixer. The error callback
-/// runs on the audio thread: it marks the output failed and writes one line, the first time.
-fn build(
-    device: &cpal::Device,
-    config: &cpal::SupportedStreamConfig,
-    rx: DynamicMixer<f32>,
-    failed: Arc<AtomicBool>,
-) -> Result<cpal::Stream, cpal::BuildStreamError> {
-    let cfg = config.config();
-    match config.sample_format() {
-        cpal::SampleFormat::F32 => stream::<f32>(device, &cfg, rx, failed),
-        cpal::SampleFormat::F64 => stream::<f64>(device, &cfg, rx, failed),
-        cpal::SampleFormat::I16 => stream::<i16>(device, &cfg, rx, failed),
-        cpal::SampleFormat::I32 => stream::<i32>(device, &cfg, rx, failed),
-        cpal::SampleFormat::I8 => stream::<i8>(device, &cfg, rx, failed),
-        cpal::SampleFormat::U16 => stream::<u16>(device, &cfg, rx, failed),
-        cpal::SampleFormat::U32 => stream::<u32>(device, &cfg, rx, failed),
-        cpal::SampleFormat::U8 => stream::<u8>(device, &cfg, rx, failed),
-        _ => Err(cpal::BuildStreamError::StreamConfigNotSupported),
-    }
-}
-
-fn stream<T>(
-    device: &cpal::Device,
-    config: &cpal::StreamConfig,
-    mut rx: DynamicMixer<f32>,
-    failed: Arc<AtomicBool>,
-) -> Result<cpal::Stream, cpal::BuildStreamError>
-where
-    T: cpal::SizedSample + cpal::FromSample<f32>,
-{
-    device.build_output_stream::<T, _, _>(
-        config,
-        move |data: &mut [T], _| {
-            for d in data.iter_mut() {
-                *d = rx.next().map(<T as cpal::Sample>::from_sample).unwrap_or(<T as cpal::Sample>::EQUILIBRIUM);
-            }
-        },
-        move |e| {
-            if !failed.swap(true, Ordering::AcqRel) {
-                crate::logging::line(
-                    "sound",
-                    &format!("the audio output reported an error ({e}); it is opened again for the next sound"),
-                );
-            }
-        },
-        None,
-    )
 }
 
 #[cfg(test)]
@@ -250,18 +224,84 @@ mod tests {
         assert_eq!(sound::NO_DEVICE.message, "no audio output device", "no `…`: nothing is formatted into it");
     }
 
+    /// The defaults are compared by cpal's device id, as text, so the strings here stand for ids.
     #[test]
     fn the_output_is_opened_again_when_it_failed_or_the_default_moved() {
+        let (speakers, headphones) = ("wasapi:{0.0.0.00000000}.{speakers}", "wasapi:{0.0.0.00000000}.{headphones}");
         // Healthy, on the default: kept.
-        assert!(!needs_reopen(false, Some("Speakers"), Some("Speakers")));
+        assert!(!needs_reopen(false, Some(speakers), Some(speakers)));
         // The stream reported an error — the device went away, a resume invalidated it.
-        assert!(needs_reopen(true, Some("Speakers"), Some("Speakers")));
+        assert!(needs_reopen(true, Some(speakers), Some(speakers)));
         // The user made another device the default, or the old one went and Windows chose one.
-        assert!(needs_reopen(false, Some("Speakers"), Some("Headphones")));
-        // The default had no name when it was opened, and the default now has one: opened again.
-        assert!(needs_reopen(false, None, Some("Headphones")));
+        assert!(needs_reopen(false, Some(speakers), Some(headphones)));
+        // The default had no id when it was opened, and the default now has one: opened again.
+        assert!(needs_reopen(false, None, Some(headphones)));
         // No default device to be found now: nothing better to open, so kept.
-        assert!(!needs_reopen(false, Some("Speakers"), None));
+        assert!(!needs_reopen(false, Some(speakers), None));
         assert!(!needs_reopen(false, None, None));
+    }
+
+    /// cpal's notices keep the output; everything else, a kind it adds later included, fails it.
+    #[test]
+    fn dropouts_and_refused_priority_are_not_failures() {
+        use cpal::ErrorKind::*;
+        for kind in [Xrun, RealtimeDenied, DeviceChanged] {
+            assert!(!fails_the_output(kind), "{kind:?}");
+        }
+        for kind in [DeviceNotAvailable, StreamInvalidated, DeviceBusy, BackendError, HostUnavailable, ResourceExhausted, Other] {
+            assert!(fails_the_output(kind), "{kind:?}");
+        }
+    }
+
+    /// The detail of `no audio output device` is cpal's words, not rodio's sentence above them.
+    #[test]
+    fn the_systems_words_are_cpals_not_rodios() {
+        let busy = cpal::Error::with_message(cpal::ErrorKind::DeviceBusy, "Failed to build audio client: in use");
+        assert_eq!(said(&DeviceSinkError::BuildError(busy)), "Failed to build audio client: in use");
+        let bare = cpal::Error::new(cpal::ErrorKind::DeviceNotAvailable);
+        assert_eq!(
+            said(&DeviceSinkError::DefaultSinkConfigError(bare)),
+            "The requested audio device is not available. It may have been disconnected."
+        );
+        // No cause under it: rodio's own words are all there is.
+        assert_eq!(said(&DeviceSinkError::NoDevice), "Could not find any output device");
+    }
+
+    /// Every sound the repository ships decodes to its end — the decoders are Symphonia's since
+    /// rodio 0.23 (hound, claxon and lewton before). Nothing is played: no output is opened.
+    #[test]
+    fn every_shipped_sound_decodes() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut stack: Vec<_> = ["modules", "examples", "tools"].iter().map(|d| root.join(d)).collect();
+        let mut decoded = 0;
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+            for path in entries.flatten().map(|e| e.path()) {
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                let ext = path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase);
+                if !matches!(ext.as_deref(), Some("wav" | "flac" | "ogg" | "mp3")) {
+                    continue;
+                }
+                let sound = open(&path).unwrap_or_else(|e| panic!("{e}"));
+                assert!(sound.channels().get() > 0 && sound.sample_rate().get() > 0, "{}", path.display());
+                assert!(sound.count() > 0, "{} has no samples", path.display());
+                decoded += 1;
+            }
+        }
+        // examples/sound's ding and VPS Avenger's three: the walk found them.
+        assert!(decoded >= 4, "only {decoded} sounds found under {}", root.display());
+    }
+
+    /// The `cpal` entry in Cargo.toml is there only for its `realtime` feature, which reaches
+    /// rodio's stream only while both name the same cpal. A rodio on another cpal would build
+    /// two, and the feature would miss the one that plays: this fails first.
+    #[test]
+    fn one_cpal_in_the_build() {
+        let lock = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.lock")).unwrap();
+        let cpals = lock.lines().filter(|l| *l == "name = \"cpal\"").count();
+        assert_eq!(cpals, 1, "Cargo.lock has {cpals} cpal packages: make crates/host/Cargo.toml's cpal the one rodio uses");
     }
 }
