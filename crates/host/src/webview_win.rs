@@ -57,7 +57,8 @@
 //! and the next build makes a new one, again without waiting. What is left of a build waits: wry
 //! makes the page's controller in a message loop of its own, so a build is never done inside
 //! Luau — `show` or `prepare` queues it and the tick builds it after the modules' callbacks ran
-//! (`webview_lua::build_pending`), with a line in the log before it starts. The web view's
+//! (`webview_lua::build_pending`), with a line in the log before it starts, and with the tick's
+//! own timer stopped until it is done (`gui::without_ticks`). The web view's
 //! callbacks do not reach Luau either: they queue a [`PageEvent`] here, and the tick hands it on.
 
 use std::borrow::Cow;
@@ -716,7 +717,7 @@ pub(crate) fn build(spec: &BuildSpec, env: &ICoreWebView2Environment) -> Result<
     let (win_refusals, download_refusals, asked_refusals) = (refusals.clone(), refusals.clone(), refusals.clone());
     // The environment carries the data folder and the browser's arguments; wry only makes the
     // page's controller in it.
-    let built = WebViewBuilder::new()
+    let builder = WebViewBuilder::new()
         .with_environment(env.clone())
         .with_url(spec.entry_url.clone())
         .with_custom_protocol(spec.scheme.clone(), move |_id, request| respond(&root, &scheme, &request, &served))
@@ -775,8 +776,11 @@ pub(crate) fn build(spec: &BuildSpec, env: &ICoreWebView2Environment) -> Result<
         .with_general_autofill_enabled(false)
         .with_back_forward_navigation_gestures(false)
         .with_browser_accelerator_keys(false)
-        .with_default_context_menus(false)
-        .build(&Parent(handle));
+        .with_default_context_menus(false);
+    // In a message loop of wry's own, which waits for WebView2's controller — with the tick's
+    // timer stopped, since this runs inside the tick (`gui::without_ticks`).
+    let parent = Parent(handle);
+    let built = crate::gui::without_ticks(|| builder.build(&parent));
     let webview = match built {
         Ok(w) => w,
         Err(e) => {

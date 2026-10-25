@@ -972,7 +972,8 @@ fn take_down(native: NativeRef) {
 ///
 /// **Then the build, which waits.** wry makes the page's controller in the environment in a
 /// message loop of its own — on a Mac the window and the web view, with no controller to wait for.
-/// Outside Luau: the tick's re-entrancy guard keeps a nested tick from running modules meanwhile.
+/// Outside Luau, and on Windows with the tick's timer stopped (gui.rs, `without_ticks`), so no tick
+/// runs modules meanwhile.
 /// A page closed while it was being built gets nothing: the new window is taken down again. Should
 /// WebView2 never answer, the event loop waits here with it — never seen, and the reason for the
 /// line before each build: the log's last word is then `building …`.

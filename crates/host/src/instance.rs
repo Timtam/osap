@@ -9,7 +9,7 @@
 //! Two parts, each an established mechanism rather than one written here:
 //!
 //! - **The lock** is wxWidgets' `wxSingleInstanceChecker`, which wxdragon has bound since
-//!   0.9.15 (the lock file holds 0.9.16, so no bump was needed): a named mutex on Windows, a
+//!   0.9.15 (the lock file holds 0.9.23): a named mutex on Windows, a
 //!   lock file holding the owner's pid on macOS. It is created in `gui.rs`, the one file that
 //!   talks to wxdragon, and reaches this module through the [`Lock`] trait — which is also
 //!   what lets `macos-check` borrow this file and type-check it for the Mac.

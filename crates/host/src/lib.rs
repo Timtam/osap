@@ -6158,8 +6158,9 @@ impl Manager {
                             }
                         }
                         // The pages a `show` asked for, built last and outside Luau: WebView2's
-                        // start pumps window messages while it runs, and this tick's
-                        // re-entrancy guard keeps the nested ticks from running modules.
+                        // start pumps window messages while it runs, and the tick's timer is
+                        // stopped meanwhile (gui.rs, `without_ticks`), so no tick runs modules
+                        // inside it.
                         webview_lua::build_pending(&shared);
                     },
                     move || errors_shared.drain_errors(),
@@ -13909,7 +13910,7 @@ mod quit_key_wiring_tests {
     fn every_way_out_takes_the_tray_icon_away_once() {
         // The removal itself is run in gui.rs (`the_one_removal_finds_the_tray`).
         let gui = body(GUI, "pub fn run_gui(");
-        assert_eq!(gui.matches("remove_tray_icon();").count(), 2, "in quit and as the window goes");
+        assert_eq!(gui.matches("remove_tray_icon()").count(), 2, "in quit and as the window goes");
         let quit = &gui[gui.find("let quit = move || match quit_step(&open_dialogs()) {").expect("quit")..];
         let end_loop = &quit[quit.find("QuitStep::EndLoop => {").expect("the loop's end")..];
         let (begun, removed, ended) = (
@@ -13922,10 +13923,9 @@ mod quit_key_wiring_tests {
             !quit[..quit.find("QuitStep::EndLoop => {").unwrap()].contains("remove_tray_icon"),
             "not when only a dialog is ended: its loop goes on"
         );
-        let destroyed = &gui[gui.find("frame.on_destroy(move |event| {").expect("the window's destruction")..];
-        let destroyed = &destroyed[..destroyed.find("\n        });\n").expect("its end")];
-        assert!(destroyed.contains("if e.get_event_object().is_some_and(|w| w.as_ptr() == frame_ptr) {\n                    remove_tray_icon();"));
-        assert!(gui.find("let frame_ptr = frame.handle_ptr();").expect("the window's own pointer") < gui.find("frame.on_destroy(").unwrap());
+        // As the window goes: its own destruction only, which wxdragon's `on_destroy` sees to
+        // itself since 0.9.19 — a child's destroy event comes up to it too, and is dropped there.
+        assert!(gui.contains("frame.on_destroy(move |_| remove_tray_icon());"), "the window's destruction");
         // The tray is held, leaked, from where the icon's handlers are bound, and takes the
         // notifications, which it refuses while the application quits.
         assert!(gui.contains("Box::leak(Box::new(Tray::new(taskbar, !cfg!(target_os = \"macos\"))));"));

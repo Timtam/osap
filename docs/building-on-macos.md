@@ -82,7 +82,8 @@ cargo build --release
 ```
 
 The **first** build compiles wxWidgets from source: the `wxdragon-sys` build script
-downloads a ~100 MB pinned wxWidgets 3.3.2 tarball and builds it with CMake. Expect
+downloads the pinned wxWidgets 3.3.4 zip (47,309,846 bytes, about 45 MB), checks it against
+its SHA-256, and builds it with CMake. Expect
 several minutes and a network connection. Later builds reuse it. Cargo also fetches wry, the web
 view, from its Git repository at a fixed revision until a release carries the fix the Mac needs
 (`crates/host/Cargo.toml` says which); an offline build needs that repository in Cargo's Git

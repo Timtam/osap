@@ -49,7 +49,13 @@ hex = "0.4.3"
 # mlua's `serialize` feature, with the path of whatever was wrong (`states[3].cells`).
 serde_path_to_error = "0.1.20"
 
-wxdragon = "0.9.15"
+# The module window (gui.rs) and the Windows page frames (webview_win.rs). 0.9.23 builds
+# wxWidgets 3.3.4, and skips a handler that a nested event loop re-enters — which is why the
+# timer tick opens no dialog itself (gui.rs, `later`).
+wxdragon = "0.9.23"
+# The tick's resets on every way out of a handler, a panic's included (gui.rs). Already in the
+# lock file, at this version, under mlua's parking_lot.
+scopeguard = "1.2"
 
 # The single-instance guard's "show the manager" request: a named pipe on Windows, a
 # Unix-domain socket on macOS (instance.rs, which says why not wxWidgets' own IPC).

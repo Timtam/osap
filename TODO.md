@@ -2460,14 +2460,20 @@ See [docs/macos-port.md](docs/macos-port.md) for the decisions and
       closing it only hides it (`gui.rs`). So nothing ends, and the window is hidden. A logout
       waits on this application; whether macOS then cancels the logout or ends the process is for
       a Mac to show. For a VoiceOver user that is a restart that stalls. The tray's Quit, File >
-      Quit and Command-Q are not affected. wxdragon 0.9.16 has no binding for
-      `wxEVT_QUERY_END_SESSION`. One way: `NSWorkspaceWillPowerOffNotification`, observed beside
-      the other NSWorkspace notifications in `backend/macos/system.rs`, sets a flag that makes the
-      window's close handler quit (`begin_quit`, `exit_main_loop`) instead of refusing. Windows
-      asks every top-level window to close at a logout as well (`wxApp::OnQueryEndSession`,
-      `src/msw/app.cpp`); whether it is held there too: "A logoff does not get that far" under
-      "The tray icon left behind on Windows after the quit key" at the top (read in the sources,
-      not seen).
+      Quit and Command-Q are not affected. wxdragon has the bindings since 0.9.19 (the lock holds
+      0.9.23 since 2026-10-25; this said 0.9.16 had none): on macOS `app.on_should_terminate`
+      (`Fn() -> bool + Send`) and `app.on_will_terminate`, which once registered replace
+      wxWidgets' own `OSXOnShouldTerminate` and `OSXOnWillTerminate` (`WxdApp`, cpp/src/app.cpp
+      of wxdragon-sys) — the first is the step that asks the module window to close; on Windows
+      `app.on_query_end_session` and `app.on_end_session`, bound on the application object, which
+      is where wxMSW sends the query (`wxTheApp->SafelyProcessEvent`, src/msw/window.cpp). So the
+      crate's hook comes first; the other way, `NSWorkspaceWillPowerOffNotification` observed
+      beside the other NSWorkspace notifications in `backend/macos/system.rs`, would set a flag
+      that makes the window's close handler quit (`begin_quit`, `exit_main_loop`) instead of
+      refusing. Windows asks every top-level window to close at a logout as well
+      (`wxApp::OnQueryEndSession`, `src/msw/app.cpp`); whether it is held there too: "A logoff does
+      not get that far" under "The tray icon left behind on Windows after the quit key" at the top
+      (read in the sources, not seen).
 - [ ] **The neural recogniser around macOS 13.3.** Microsoft builds 1.22 for 13.3, and the
       application does not open the library on an older macOS at all (`RUNTIME_MACOS` in
       `backend/paddle_ocr.rs`; the log says "not available" with the version, and Vision reads
@@ -2635,12 +2641,46 @@ See [docs/macos-port.md](docs/macos-port.md) for the decisions and
       (`ocr/paddle_pre.rs`) holds the two files to them. Which revision of PaddleOCR's model was
       converted the conversion does not say, and its `config.json` gives opset 11 and a height of
       32 where the graph has 14 and 48.
-- [ ] **wxDragon on wxWidgets 3.3.4 — look regularly** (2026-10-11): 3.3.4 gives VoiceOver better
+- [x] **wxDragon on wxWidgets 3.3.4 — look regularly** (2026-10-11): 3.3.4 gives VoiceOver better
       names on macOS. As of 2026-10-11 wxdragon-sys 0.9.22 on crates.io and wxDragon's main branch
       still build wxWidgets 3.3.3, and this application is on 0.9.16. Where to look: the newest
       wxdragon-sys on crates.io, and `WX_VERSION` in the build script (`build.rs`) of
       AllenDang/wxDragon. Once it is 3.3.4: update, and hear on a Mac whether the module manager's
       controls are named.
+
+      **Taken** (2026-10-25, wip/deps step A): wxdragon 0.9.23 (crates.io, 2026-10-15), whose
+      build script pins wxWidgets-3.3.4.zip (47,309,846 bytes) by its SHA-256. The application had
+      been on 0.9.16, which builds wxWidgets 3.3.2, not 3.3.3. Two changes came with it, both in
+      gui.rs: since wxWidgets 3.3.3 (#26270) a checkbox on Windows is named by its label, so the
+      `set_name` beside each checkbox is gone; and since wxdragon 0.9.23 (#238) a handler that a
+      nested event loop calls again is skipped, with a warning in the log, so the tick opens no
+      dialog itself any more and stops its own timer while a page is built. Also dropped for the
+      crate's own: the key codes (`WXK_SPACE`, `WXK_ESCAPE`) and the module window's check of the
+      destroy event's object. The hearing is the two items below.
+- [ ] **Live (Windows with NVDA, and the next Mac session): the tick's dialogs on wxdragon
+      0.9.23** (built 2026-10-25, none of it can run in a test). The install and update reviews and
+      their result messages ("Installed", "Updated", "Modules") are opened by `later`, a one-shot
+      timer, right after the tick that asked; a page's build runs with the tick's timer stopped
+      (`without_ticks`). To hear: while a review is open a module's hotkey still works, and the
+      quit key ends the review and then the application; a second start while an "Installed" or
+      "Updated" message is open brings the window forward; a module's page still opens the first
+      time it is shown; and the log has no `[dep:wxdragon] warn: Re-entrant invocation of
+      rust_event_handler_trampoline skipped`, after a page's build too — such a line names a
+      nested loop inside a handler that is not known yet. With NVDA as well: the Application
+      settings checkboxes and those of a module's Settings… still read their labels without
+      `set_name`, and the Installed tree reads, ticks and refuses Space as before (wxWidgets 3.3.3
+      and 3.3.4 changed its colours and its label-edit focus, src/msw/treectrl.cpp).
+- [ ] **macOS: the module manager's fields named by the text before them** (wxWidgets 3.3.4, read
+      in the sources 2026-10-25, not heard). A native control with no label of its own, made right
+      after a StaticText, gets that text as its accessibility title (src/osx/window_osx.cpp,
+      `MacPostControlCreate`): the settings dialog's number, text and choice fields, the review's
+      text, the Terminal-line field on the Permissions page, the Browse tab's search box, and the
+      Installed list by its heading. Hear with VoiceOver whether each is named, and that no
+      checkbox or button takes the paragraph before it as its name: a control that has a title
+      already is skipped (`HasAccessibilityTitle`, src/osx/cocoa/window.mm), and a checkbox's or a
+      button's title is set before that check, which should cover the Application settings
+      checkboxes after the previous one's help text and the Permissions page's buttons after
+      their lines.
 
 ## Documentation
 
@@ -5514,10 +5554,11 @@ update flows of `crates/host/src/gui.rs`.
       are tested only against a table, and so is a percent-encoded branch in the raw path
       (`raw…/fix%2312/module.toml`), which raw.githubusercontent.com has to decode. Then the
       review dialog with NVDA: the text is read when it opens, Escape and the close box cancel,
-      and every button reads its label. The review is shown from the timer tick with its
-      re-entrancy guard lifted, so the modules keep running behind it; that nothing else stacks
-      a dialog meanwhile is argued in the code, not observed, and so is that a module error
-      raised during the review appears only after it closes.
+      and every button reads its label. The review is shown by `later`, right after the timer tick
+      that asked (gui.rs, since 2026-10-25; the tick used to show it with its re-entrancy guard
+      lifted), so the modules keep running behind it; that nothing else stacks a dialog
+      meanwhile is argued in the code, not observed, and so is that a module error raised during
+      the review appears only after it closes.
 - [ ] **Live (Windows): an update while the module holds a file open** — a sound playing. The
       rename of the installed folder is expected to fail and leave the module as it was, with
       the "is a file in it open?" message; not yet seen.

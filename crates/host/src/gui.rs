@@ -8,6 +8,7 @@
 //! tray "Quit" actually exits. Double-clicking the tray icon reopens it.
 
 use std::cell::{Cell, RefCell};
+use std::collections::VecDeque;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
@@ -599,9 +600,8 @@ impl ListInner {
             // nothing has happened yet for a screen reader to announce.
             let (checkable, items) = (checkable.clone(), items.clone());
             ctrl.on_key_down(move |e| {
-                const SPACE: i32 = 32;
                 if let WindowEventData::Keyboard(k) = &e {
-                    if k.get_key_code() == Some(SPACE) {
+                    if k.get_key_code() == Some(WXK_SPACE) {
                         let caret = native_checkboxes::caret(hwnd);
                         let blocked = items
                             .borrow()
@@ -742,9 +742,8 @@ impl ListInner {
         {
             let (t, c) = (toggled.clone(), ctrl);
             ctrl.on_key_down(move |e| {
-                const SPACE: i32 = 32;
                 if let WindowEventData::Keyboard(k) = &e {
-                    if k.get_key_code() == Some(SPACE) {
+                    if k.get_key_code() == Some(WXK_SPACE) {
                         if let Some(i) = c.get_selection() {
                             c.check(i, !c.is_checked(i));
                             if let Some(f) = t.borrow_mut().as_mut() {
@@ -1007,15 +1006,14 @@ pub fn run_gui(
             //
             // There used to be, and the comment said a checkbox's own label is not what the
             // screen reader announces. That was half right and it produced the wrong shape.
-            // On WINDOWS the name comes from `set_name`: wxCheckBox installs an accessible
-            // that returns the window name, whose default is the literal string "check", and
-            // the StaticText never contributed to it. On macOS `set_name` does nothing at all
-            // — wxWidgets compiles its accessibility layer out for every port but MSW — and
-            // the name of an NSButton is its title, which was empty. So the arrangement gave
-            // Windows a label twice over and macOS a labelled paragraph sitting next to a
-            // nameless control. Label plus name is one announcement on both.
+            // Under wxWidgets 3.3.2 the name on WINDOWS came from `set_name`: wxCheckBox
+            // installed an accessible that returned the window name, whose default is the
+            // literal string "check", and the StaticText never contributed to it. On macOS the
+            // name of an NSButton is its title, which was empty. Since wxWidgets 3.3.3 (#26270)
+            // the Windows accessible returns the label, mnemonics stripped
+            // (`wxWindowAccessible::GetName`, src/common/wincmn.cpp), so the label is the name
+            // on both, and the `set_name` this needed is gone.
             let cb = CheckBox::builder(&app_tab).with_label(&label).build();
-            cb.set_name(&label);
             // A stored "on" that macOS will not honour is put right once, at start: the old
             // flow stored it on over a refusal ("the setting stays on and changes nothing"), the
             // settings live beside the application so a new build inherits them, and a grant
@@ -1161,7 +1159,10 @@ pub fn run_gui(
             // while the process runs. What it costs, and the one Terminal line that ends it in a
             // read-only field of its own, to be selected and copied — the application never runs
             // it (portable.rs). Labelled by the text before it: a text field has no label of its
-            // own, and its name is read on Windows only.
+            // own. Windows names it by that text, and since wxWidgets 3.3.4 macOS does too — a
+            // native control without a label, made right after a StaticText, gets it as its
+            // accessibility title (src/osx/window_osx.cpp, `MacPostControlCreate`). Read in the
+            // sources; not heard with VoiceOver yet.
             let moved = crate::portable::translocation();
             if let (Some(said), Some(line)) = (moved.spoken(), moved.terminal_line()) {
                 ps.add(
@@ -1609,8 +1610,9 @@ pub fn run_gui(
         }
 
         // ----- Browse / Updates: background HTTP (GitHub) delivered to the GUI
-        // thread via a shared inbox drained on the timer tick (wxdragon has no
-        // CallAfter). Threads only move owned data; controls stay on this thread.
+        // thread via a shared inbox drained on the timer tick (wxdragon's `call_after`
+        // takes only a `Send` closure, and no control is one). Threads only move owned
+        // data; controls stay on this thread.
         enum Job {
             /// An update landed on disk: hot-load the modules it newly needed (`new_dirs`),
             /// then rebuild the running module + its dependents.
@@ -1822,8 +1824,8 @@ pub fn run_gui(
         // Not from inside a modal dialog's loop: wx ends only the main loop, and only while it
         // is the loop running — `wxAppConsoleBase::ExitMainLoop` does nothing while a dialog's
         // nested loop is (wxWidgets src/common/appbase.cpp, `IsRunning` in include/wx/evtloop.h).
-        // The tick goes on inside a dialog opened from a click, and inside the reviews, so the
-        // quit key can be answered there. The dialog is then ended as its Cancel would end it,
+        // The tick goes on inside a dialog opened from a click, and inside the reviews (`later`),
+        // so the quit key can be answered there. The dialog is then ended as its Cancel would end it,
         // and the quit is asked for again: the next tick that runs the pump, in the loop
         // outside the dialog, comes back here, until that loop is the main one.
         let quit = move || match quit_step(&open_dialogs()) {
@@ -1879,10 +1881,10 @@ pub fn run_gui(
         // taskbar button (Windows) exist for while the window is shown.
         //
         // Re-labelling THIS menu is enough — no rebuild, no second `set_popup_menu` — and that
-        // was read in the vendored sources rather than assumed. wxdragon-sys 0.9.16 keeps
+        // was read in the vendored sources rather than assumed. wxdragon-sys 0.9.23 keeps
         // this menu only as a template: `wxdTaskBarIcon::CreatePopupMenu` (cpp/src/taskbar.cpp)
         // builds a fresh copy item by item, `GetItemLabel()` and `GetHelp()` included, each
-        // time wxWidgets asks for the popup, and wxWidgets 3.3.2 asks on every click — from
+        // time wxWidgets asks for the popup, and wxWidgets 3.3.4 asks on every click — from
         // `wxTaskBarIconBase::OnRightButtonDown` (src/common/taskbarcmn.cpp) on Windows and
         // from `-[wxOSXStatusItemTarget clickedAction:]` (src/osx/cocoa/taskbar.mm) for the
         // status item on macOS — then deletes the copy. Both try `GetPopupMenu()` first, but
@@ -1896,8 +1898,8 @@ pub fn run_gui(
             .build();
         taskbar.set_popup_menu(&mut menu);
         // A non-owning handle to the same wxMenu, taken BEFORE the forget below (see
-        // `TRAY_MENU` for why it stays valid). Not `taskbar.get_popup_menu()` later: that
-        // wraps the pointer in an OWNING `Menu`, whose drop would destroy the tray's template.
+        // `TRAY_MENU` for why it stays valid). `taskbar.get_popup_menu()` would give the same
+        // non-owning handle — its pointer is `const` — but the taskbar is in `Tray` by then.
         TRAY_MENU.with(|m| *m.borrow_mut() = Some(Menu::from(menu.as_const_ptr())));
         std::mem::forget(menu); // the tray icon owns it for the app's lifetime
         // The window starts hidden, so the label above is already right; asking the frame
@@ -1936,16 +1938,10 @@ pub fn run_gui(
             tray.notify(title, text, crate::instance::quit_asked())
         }));
         // The way out that does not pass `quit`: wx deleting the module window, which it does
-        // before the icon's window (`Tray`). Its own destruction only, as wxdragon's handler
-        // for it checks too: a destroy event is a command event, and a child's can come up.
-        let frame_ptr = frame.handle_ptr();
-        frame.on_destroy(move |event| {
-            if let WindowEventData::General(e) = &event {
-                if e.get_event_object().is_some_and(|w| w.as_ptr() == frame_ptr) {
-                    remove_tray_icon();
-                }
-            }
-        });
+        // before the icon's window (`Tray`). Its own destruction only: a destroy event is a
+        // command event, and a child's can come up — which wxdragon's `on_destroy` drops itself
+        // since 0.9.19, by the event's object.
+        frame.on_destroy(move |_| remove_tray_icon());
 
         // The one signal that the application actually started. On macOS there is no balloon
         // and no Dock icon to notice either, so somebody who cannot see the screen would have
@@ -1994,51 +1990,53 @@ pub fn run_gui(
         // (hotkeys / captured keys / foreground changes) reach Luau. The init
         // closure returns *before* the loop runs, so the timer must outlive it —
         // leak it for the app's lifetime (its Drop would stop the wxTimer).
-        let timer = Timer::new(&frame);
+        //
+        // The tick runs no nested event loop of its own — no dialog, no wait — and since
+        // wxdragon 0.9.23 that is wxdragon's rule as much as ours: a handler that a nested loop
+        // calls again while it is still running is skipped, with a warning in the log
+        // (`ReentrantCallback`, wxDragon issue #238, which names this very case: a modal dialog
+        // opened from a timer's handler). The tick used to open the install and update reviews
+        // and their result messages itself, and the ticks inside them were how the modules kept
+        // running behind a review and the window came forward behind a message. So `later`, a
+        // one-shot timer of its own, opens them right after the tick that asked, and the ticks
+        // inside its dialogs are ordinary ones. A page's build, the one loop left inside the
+        // tick, stops this timer while it runs instead (`without_ticks`).
+        let timer: &'static Timer<Frame> = Box::leak(Box::new(Timer::new(&frame)));
+        let later: &'static Timer<Frame> = Box::leak(Box::new(Timer::new(&frame)));
+        // What the tick leaves to `later`, in the order it was asked for.
+        let deferred: Rc<Deferred<Later>> = Rc::new(Deferred::new());
+        // How much of the tick waits while `later` has a dialog open.
+        let hold = Rc::new(Cell::new(Hold::Nothing));
+        // Set while the tick runs. `later` can fire inside it, in a page's build, which pumps
+        // messages; it then leaves its dialogs to the tick's end, which starts it again.
+        let ticking = Rc::new(Cell::new(false));
         {
             let inbox = inbox.clone();
             let (rows, busy, list) = (rows.clone(), busy.clone(), list.clone());
-            // Re-entrancy guard: the modal dialogs below run a NESTED wx event loop,
-            // during which this continuous timer keeps firing and re-enters on_tick.
-            // Bail on re-entry so we don't pump module callbacks — or stack further
-            // dialogs — behind an already-open modal.
+            let browse_results = browse_results.clone();
+            let (deferred, hold, ticking) = (deferred.clone(), hold.clone(), ticking.clone());
+            // Module ERRORS do not go through a modal, so they do not pause the pump: a faulting
+            // module keeps running while its report sits on screen, and a second fault appends
+            // to the same window. That is the intended trade — a modal that stopped everything
+            // was how the unreachable window held the whole application.
             //
-            // Module ERRORS no longer go through a modal, so they no longer pause the pump:
-            // a faulting module keeps running while its report sits on screen, and a second
-            // fault appends to the same window. That is the intended trade — a modal that
-            // stopped everything was how the unreachable window held the whole application —
-            // but it is a behaviour change, and the guard below still exists for the
-            // `modal_message` callers that remain.
-            let in_tick = Rc::new(std::cell::Cell::new(false));
-            // Set while an install or update review is open. The guard above is lifted for the
-            // review so the modules keep running behind it, and this keeps the one thing a
-            // running module can do to the review from happening: a module error raises and
-            // focuses the error window (and activates the application on macOS), which would
-            // move the screen reader out of the text being read. The errors stay queued in the
-            // host and are shown by the first tick after the review closes.
-            let reviewing = Rc::new(std::cell::Cell::new(false));
             // Lives as long as the timer: the error window outlives the tick that opened it.
             let error_window: Rc<RefCell<Option<ErrorWindow>>> = Rc::new(RefCell::new(None));
             timer.on_tick(move |_event| {
                 // Somebody started the application again (or, on macOS, reopened it): the window
-                // they are looking for. Before the re-entrancy guard, so it also comes forward
-                // while a modal message is open — the message is its child and comes with it.
-                // Nothing else here runs during that nested loop, and showing a window is safe
-                // there. The request may be older than the window: one made while the modules
-                // were still loading is answered at the first tick.
+                // they are looking for. First, so it also comes forward while a result message
+                // is open — the message is its child and comes with it. Nothing else here runs
+                // then (`Hold::Everything`), and showing a window is safe there. The request may
+                // be older than the window: one made while the modules were still loading is
+                // answered at the first tick.
                 if crate::instance::take_show_request() {
                     show_manager(&frame);
                 }
-                if in_tick.replace(true) {
+                if hold.get() == Hold::Everything {
                     return;
                 }
-                struct Reset<'a>(&'a std::cell::Cell<bool>);
-                impl Drop for Reset<'_> {
-                    fn drop(&mut self) {
-                        self.0.set(false);
-                    }
-                }
-                let _reset = Reset(&in_tick);
+                ticking.set(true);
+                scopeguard::defer! { ticking.set(false) }
                 pump();
                 // The quit key, pressed during that pump (the host has logged it and said its
                 // sentence), a Mac's app page answering Command-Q (logged by
@@ -2088,8 +2086,8 @@ pub fn run_gui(
                 // Surface any module callback failures collected during pump() in an
                 // accessible dialog (deduped + queued host-side), so a faulting module
                 // is visible (and isolated) rather than silently logged or a crash. Not while
-                // a review is open — see `reviewing`.
-                if !reviewing.get() {
+                // a review is open — see `Hold::Interruptions`.
+                if hold.get() != Hold::Interruptions {
                     for (title, msg) in drain_errors() {
                         report_error(&error_window, &frame, &title, &msg);
                     }
@@ -2099,7 +2097,7 @@ pub fn run_gui(
                 // again. The list is rebuilt only when a row changed, since a rebuild can make
                 // the screen reader read the selected row again — and, like the error window,
                 // not while a review is being read.
-                let changes = if reviewing.get() { Vec::new() } else { drain_changes() };
+                let changes = if hold.get() == Hold::Interruptions { Vec::new() } else { drain_changes() };
                 if !changes.is_empty() {
                     let changed = {
                         let mut rb = rows.borrow_mut();
@@ -2171,142 +2169,12 @@ pub fn run_gui(
                             updates_status.set_label(&format!("{} update(s) available.", v.len()));
                             *update_results.borrow_mut() = v;
                         }
+                        // The reviews are `later`'s, opened after this tick.
                         Job::InstallPlan(plan) => {
                             browse_status.set_label("");
-                            let text = crate::registry::install_review_text(
-                                &plan,
-                                std::env::consts::OS,
-                            );
-                            // Two ways to say yes when there are optional modules, so the
-                            // choice is made in the one dialog that lists them, rather than
-                            // in a second question after the first was answered.
-                            let yes: &[(&str, i32)] = if plan.has_optional() {
-                                &[
-                                    ("Install with the optional modules", ID_YES),
-                                    ("Install without them", ID_NO),
-                                ]
-                            } else {
-                                &[("Install", ID_OK)]
-                            };
-                            // The modules keep running behind the review. The guard at the top
-                            // of this tick exists so nothing is pumped, and no second dialog is
-                            // stacked, behind a RESULT dialog; a review is read slowly, and the
-                            // one that came before this one ran from a click handler, which the
-                            // guard never paused. Nothing else can put up a dialog meanwhile:
-                            // `busy` holds every install and update back until this flow ends,
-                            // and a module error waits for the review to close (`reviewing`).
-                            // No borrow is held across the call.
-                            in_tick.set(false);
-                            reviewing.set(true);
-                            let choice = review_dialog(
-                                &frame,
-                                "Review before installing",
-                                "What will be installed",
-                                &text,
-                                yes,
-                            );
-                            reviewing.set(false);
-                            in_tick.set(true);
-                            if choice == ID_CANCEL {
-                                busy.set(false);
-                                update_btn.enable(true);
-                                refresh_install_btn(
-                                    &browse_list,
-                                    &browse_results.borrow(),
-                                    false,
-                                    &install_btn,
-                                );
-                                browse_status.set_label("Install cancelled. Nothing was installed.");
-                            } else {
-                                let with_optional = choice == ID_YES;
-                                let repo = plan.modules[0].repo.clone();
-                                browse_status.set_label(&format!("Installing {repo}\u{2026}"));
-                                let inbox = inbox.clone();
-                                std::thread::spawn(move || {
-                                    let job = std::panic::catch_unwind(
-                                        std::panic::AssertUnwindSafe(|| {
-                                            match crate::registry::install_resolved(
-                                                &plan,
-                                                with_optional,
-                                            ) {
-                                                // The hot-load resolves the now-installed
-                                                // dependencies as siblings.
-                                                Ok(_) => Job::Installed(
-                                                    crate::registry::install_dir(&repo),
-                                                ),
-                                                Err(e) => Job::Done(format!("Install failed: {e:#}")),
-                                            }
-                                        }),
-                                    )
-                                    .unwrap_or_else(|_| {
-                                        Job::Done("Install failed (internal error).".to_string())
-                                    });
-                                    inbox.lock().unwrap().push(job);
-                                });
-                            }
+                            deferred.push(Later::Install(plan));
                         }
-                        Job::UpdatePlan(plan) => {
-                            let id = plan.id.clone();
-                            let go = !plan.needs_review() || {
-                                let text = crate::registry::update_review_text(
-                                    &plan,
-                                    &crate::registry::installed(),
-                                    std::env::consts::OS,
-                                );
-                                // Modules keep running behind it, as behind the install
-                                // review above, and for the same reasons.
-                                in_tick.set(false);
-                                reviewing.set(true);
-                                let choice = review_dialog(
-                                    &frame,
-                                    "Review before updating",
-                                    "What the update changes",
-                                    &text,
-                                    &[("Update", ID_OK)],
-                                );
-                                reviewing.set(false);
-                                in_tick.set(true);
-                                choice == ID_OK
-                            };
-                            if !go {
-                                busy.set(false);
-                                update_btn.enable(true);
-                                refresh_install_btn(
-                                    &browse_list,
-                                    &browse_results.borrow(),
-                                    false,
-                                    &install_btn,
-                                );
-                                updates_status
-                                    .set_label(&format!("Update of {id} cancelled. Nothing was changed."));
-                            } else {
-                                updates_status.set_label(&format!("Updating {id}\u{2026}"));
-                                let inbox = inbox.clone();
-                                std::thread::spawn(move || {
-                                    let job = std::panic::catch_unwind(
-                                        std::panic::AssertUnwindSafe(|| {
-                                            match crate::registry::install_update(&plan) {
-                                                // Everything written besides the updated
-                                                // module itself is new to this machine.
-                                                Ok(written) => Job::Updated {
-                                                    id: plan.id.clone(),
-                                                    new_dirs: written
-                                                        .into_iter()
-                                                        .filter(|m| m.manifest.id != plan.id)
-                                                        .map(|m| m.root)
-                                                        .collect(),
-                                                },
-                                                Err(e) => Job::Done(format!("Update failed: {e:#}")),
-                                            }
-                                        }),
-                                    )
-                                    .unwrap_or_else(|_| {
-                                        Job::Done("Update failed (internal error).".to_string())
-                                    });
-                                    inbox.lock().unwrap().push(job);
-                                });
-                            }
-                        }
+                        Job::UpdatePlan(plan) => deferred.push(Later::Update(plan)),
                         Job::Installed(dir) => {
                             // Re-enable + clear busy up front, so even a panic in
                             // on_install can't leave the buttons stuck disabled.
@@ -2341,7 +2209,8 @@ pub fn run_gui(
                                     "Installed, but loading failed:\n{e}\n\nRestart the app to retry."
                                 ),
                             };
-                            modal_message(&frame, "Installed", &msg, false);
+                            // Loaded here, said by `later`: the message is a dialog.
+                            deferred.push(Later::Message("Installed", msg));
                         }
                         Job::Updated { id, new_dirs } => {
                             busy.set(false);
@@ -2444,7 +2313,7 @@ pub fn run_gui(
                                     add_failed.join("\n")
                                 ));
                             }
-                            modal_message(&frame, "Updated", &msg, false);
+                            deferred.push(Later::Message("Updated", msg));
                         }
                         Job::Done(msg) => {
                             busy.set(false);
@@ -2458,14 +2327,177 @@ pub fn run_gui(
                                 false,
                                 &install_btn,
                             );
-                            modal_message(&frame, "Modules", &msg, false);
+                            deferred.push(Later::Message("Modules", msg));
                         }
                     }
+                }
+                // The dialogs asked for above, right after this tick.
+                if deferred.start() {
+                    later.start(1, true);
                 }
             });
         }
         timer.start(15, false);
-        std::mem::forget(timer);
+        #[cfg(windows)]
+        TICK.with(|t| t.set(Some(timer)));
+
+        // `later`: the dialogs the tick asked for, opened here, after it. One at a time and in
+        // order, and none once a quit is asked for: the quit ended the dialog that was open, and
+        // the next would only hold it up.
+        later.on_tick(move |_event| {
+            // Fired inside the tick, in a page's build: what is queued waits for the tick's
+            // end, which starts this again.
+            if ticking.get() {
+                deferred.done();
+                return;
+            }
+            // A dialog that panicked holds nothing back, and the next tick starts this again
+            // for what is still queued.
+            scopeguard::defer! {
+                hold.set(Hold::Nothing);
+                deferred.done();
+            }
+            while let Some(work) = deferred.next(crate::instance::quit_asked()) {
+                match work {
+                    Later::Install(plan) => {
+                        let text = crate::registry::install_review_text(
+                            &plan,
+                            std::env::consts::OS,
+                        );
+                        // Two ways to say yes when there are optional modules, so the
+                        // choice is made in the one dialog that lists them, rather than
+                        // in a second question after the first was answered.
+                        let yes: &[(&str, i32)] = if plan.has_optional() {
+                            &[
+                                ("Install with the optional modules", ID_YES),
+                                ("Install without them", ID_NO),
+                            ]
+                        } else {
+                            &[("Install", ID_OK)]
+                        };
+                        // The modules keep running behind the review, as behind a dialog
+                        // opened from a click: the ticks inside it are ordinary ones, and a
+                        // review is read slowly. Nothing else puts up a dialog meanwhile:
+                        // `busy` holds every install and update back until this flow ends,
+                        // and a module error waits for the review to close
+                        // (`Hold::Interruptions`).
+                        hold.set(Hold::Interruptions);
+                        let choice = review_dialog(
+                            &frame,
+                            "Review before installing",
+                            "What will be installed",
+                            &text,
+                            yes,
+                        );
+                        hold.set(Hold::Nothing);
+                        if choice == ID_CANCEL {
+                            busy.set(false);
+                            update_btn.enable(true);
+                            refresh_install_btn(
+                                &browse_list,
+                                &browse_results.borrow(),
+                                false,
+                                &install_btn,
+                            );
+                            browse_status.set_label("Install cancelled. Nothing was installed.");
+                        } else {
+                            let with_optional = choice == ID_YES;
+                            let repo = plan.modules[0].repo.clone();
+                            browse_status.set_label(&format!("Installing {repo}\u{2026}"));
+                            let inbox = inbox.clone();
+                            std::thread::spawn(move || {
+                                let job = std::panic::catch_unwind(
+                                    std::panic::AssertUnwindSafe(|| {
+                                        match crate::registry::install_resolved(
+                                            &plan,
+                                            with_optional,
+                                        ) {
+                                            // The hot-load resolves the now-installed
+                                            // dependencies as siblings.
+                                            Ok(_) => Job::Installed(
+                                                crate::registry::install_dir(&repo),
+                                            ),
+                                            Err(e) => Job::Done(format!("Install failed: {e:#}")),
+                                        }
+                                    }),
+                                )
+                                .unwrap_or_else(|_| {
+                                    Job::Done("Install failed (internal error).".to_string())
+                                });
+                                inbox.lock().unwrap().push(job);
+                            });
+                        }
+                    }
+                    Later::Update(plan) => {
+                        let id = plan.id.clone();
+                        let go = !plan.needs_review() || {
+                            let text = crate::registry::update_review_text(
+                                &plan,
+                                &crate::registry::installed(),
+                                std::env::consts::OS,
+                            );
+                            // Modules keep running behind it, as behind the install
+                            // review above, and for the same reasons.
+                            hold.set(Hold::Interruptions);
+                            let choice = review_dialog(
+                                &frame,
+                                "Review before updating",
+                                "What the update changes",
+                                &text,
+                                &[("Update", ID_OK)],
+                            );
+                            hold.set(Hold::Nothing);
+                            choice == ID_OK
+                        };
+                        if !go {
+                            busy.set(false);
+                            update_btn.enable(true);
+                            refresh_install_btn(
+                                &browse_list,
+                                &browse_results.borrow(),
+                                false,
+                                &install_btn,
+                            );
+                            updates_status
+                                .set_label(&format!("Update of {id} cancelled. Nothing was changed."));
+                        } else {
+                            updates_status.set_label(&format!("Updating {id}\u{2026}"));
+                            let inbox = inbox.clone();
+                            std::thread::spawn(move || {
+                                let job = std::panic::catch_unwind(
+                                    std::panic::AssertUnwindSafe(|| {
+                                        match crate::registry::install_update(&plan) {
+                                            // Everything written besides the updated
+                                            // module itself is new to this machine.
+                                            Ok(written) => Job::Updated {
+                                                id: plan.id.clone(),
+                                                new_dirs: written
+                                                    .into_iter()
+                                                    .filter(|m| m.manifest.id != plan.id)
+                                                    .map(|m| m.root)
+                                                    .collect(),
+                                            },
+                                            Err(e) => Job::Done(format!("Update failed: {e:#}")),
+                                        }
+                                    }),
+                                )
+                                .unwrap_or_else(|_| {
+                                    Job::Done("Update failed (internal error).".to_string())
+                                });
+                                inbox.lock().unwrap().push(job);
+                            });
+                        }
+                    }
+                    // As the tick did when it opened the message itself: nothing runs
+                    // behind it but the window coming forward (`Hold::Everything`).
+                    Later::Message(title, text) => {
+                        hold.set(Hold::Everything);
+                        modal_message(&frame, title, &text, false);
+                        hold.set(Hold::Nothing);
+                    }
+                }
+            }
+        });
 
         // Window starts hidden: the manager lives in the background.
     })
@@ -2665,10 +2697,9 @@ fn report_error(
     // builds its menu bar. This window has two focusable controls and no menu bar, so binding
     // only the text control left Escape dead the moment Tab moved focus to the button — which
     // is exactly where somebody looking for the way out arrives.
-    const ESCAPE: i32 = 27;
     let escapes = move |e: WindowEventData| {
         if let WindowEventData::Keyboard(k) = &e {
-            if k.get_key_code() == Some(ESCAPE) {
+            if k.get_key_code() == Some(WXK_ESCAPE) {
                 frame.close(true);
                 return;
             }
@@ -2770,6 +2801,170 @@ mod quit_step_tests {
     }
 }
 
+/// A dialog the tick asks for and `later` opens, right after it (`run_gui`): the tick runs no
+/// nested event loop of its own — see where its timer is made.
+enum Later {
+    /// Everything an install would add, for review before anything is downloaded.
+    Install(crate::registry::InstallPlan),
+    /// What an update would change: reviewed when it asks for anything new, applied at once when
+    /// it does not.
+    Update(crate::registry::UpdatePlan),
+    /// A result message: its title and its text.
+    Message(&'static str, String),
+}
+
+/// How much of the tick waits while `later` has a dialog open (`run_gui`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Hold {
+    /// No dialog of `later`'s: the tick runs in full.
+    Nothing,
+    /// An install or update review. The modules run behind it — the quit key is answered there,
+    /// a permission's answer heard — but what a running module can do to the review waits until
+    /// it closes: a module error raises and focuses the error window (and activates the
+    /// application on macOS), and a rebuilt list can have its selected row read again, either of
+    /// which would move the screen reader out of the text being read. The errors stay queued in
+    /// the host and the rows' changes with them, for the first tick after the review.
+    Interruptions,
+    /// A result message: the tick only brings the window forward, as it did when it opened the
+    /// message itself — no module runs behind it, and the quit key is answered once it is closed.
+    Everything,
+}
+
+/// What the tick leaves to `later`, and whether `later` is due: started and not yet through its
+/// handler. The tick queues, and starts `later` at its end when this says so; `later` takes one
+/// item at a time — no borrow held across a dialog — until none is left.
+struct Deferred<T> {
+    queue: RefCell<VecDeque<T>>,
+    due: Cell<bool>,
+}
+
+impl<T> Deferred<T> {
+    fn new() -> Self {
+        Deferred { queue: RefCell::new(VecDeque::new()), due: Cell::new(false) }
+    }
+
+    /// Queued, behind what is queued already.
+    fn push(&self, item: T) {
+        self.queue.borrow_mut().push_back(item);
+    }
+
+    /// Whether `later` is to be started now: something is queued, and it is not due already.
+    /// Due includes being inside one of its dialogs, where a start would fire a tick of its own
+    /// inside its handler, which wxdragon skips. Marks it due.
+    fn start(&self) -> bool {
+        let start = !self.due.get() && !self.queue.borrow().is_empty();
+        if start {
+            self.due.set(true);
+        }
+        start
+    }
+
+    /// The next item for `later`: none when the queue is empty, and none once a quit is asked
+    /// for, when what is left is dropped.
+    fn next(&self, quitting: bool) -> Option<T> {
+        let mut queue = self.queue.borrow_mut();
+        if quitting {
+            queue.clear();
+        }
+        queue.pop_front()
+    }
+
+    /// `later` is through, or gave its turn back: the next `start` may start it again.
+    fn done(&self) {
+        self.due.set(false);
+    }
+}
+
+#[cfg(test)]
+mod deferred_tests {
+    use super::*;
+
+    /// `later` takes one dialog at a time, in order, and is started again only once it is
+    /// through: what the tick queues while a dialog is open is taken by the same turn, after it.
+    /// A turn given back inside the tick is started again at the tick's end; after a quit
+    /// nothing more is opened.
+    #[test]
+    fn one_dialog_at_a_time_and_none_after_a_quit() {
+        let d = Deferred::new();
+        assert!(!d.start(), "nothing queued, nothing to start");
+        d.push("install review");
+        assert!(d.start(), "started for it");
+        assert!(!d.start(), "and only once");
+        assert_eq!(d.next(false), Some("install review"));
+        // A tick inside the review: the install's result arrives and is queued, and `later`,
+        // inside its dialog, is not started again.
+        d.push("Installed");
+        assert!(!d.start(), "due: the turn that is open takes it");
+        assert_eq!(d.next(false), Some("Installed"));
+        assert_eq!(d.next(false), None);
+        d.done();
+        assert!(!d.start(), "through, and nothing left");
+
+        // Fired inside the tick: the turn is given back, and the tick's end starts it again.
+        d.push("Updated");
+        assert!(d.start());
+        d.done();
+        assert!(d.start(), "started again for what is still queued");
+        assert_eq!(d.next(false), Some("Updated"));
+        d.done();
+
+        // A quit ended the dialog that was open: nothing queued after it is opened, and nothing
+        // is left to start `later` for.
+        d.push("Modules");
+        d.push("Updated");
+        assert!(d.start());
+        assert_eq!(d.next(true), None);
+        d.done();
+        assert!(!d.start());
+    }
+
+    /// The tick opens no dialog of its own — wxdragon would skip every tick inside it — and
+    /// starts `later` for the ones it asks for; `later` opens the two reviews and the result
+    /// messages; and a page's build, the one loop left inside the tick, stops the tick's timer.
+    /// None of it can run in a test, so it is checked where it is written.
+    #[test]
+    fn the_tick_runs_no_nested_loop_of_its_own() {
+        const FILE: &str = include_str!("gui.rs");
+        let tick = &FILE[FILE.find("timer.on_tick(move |_event| {").expect("the tick")..];
+        let tick = &tick[..tick.find("\n            });\n").expect("its end")];
+        for opens in ["modal_message(", "review_dialog(", "open_settings_dialog(", "show_modal"] {
+            assert!(!tick.contains(opens), "the tick opens a dialog: {opens}");
+        }
+        assert!(tick.ends_with("if deferred.start() {\n                    later.start(1, true);\n                }"), "{tick}");
+        let later = &FILE[FILE.find("later.on_tick(move |_event| {").expect("later")..];
+        let later = &later[..later.find("\n        });\n").expect("its end")];
+        assert_eq!(later.matches("review_dialog(").count(), 2, "the install's and the update's");
+        assert_eq!(later.matches("modal_message(").count(), 1, "the result messages");
+        const WIN: &str = include_str!("webview_win.rs");
+        assert!(WIN.contains("let built = crate::gui::without_ticks(|| builder.build(&parent));"));
+    }
+}
+
+thread_local! {
+    /// The tick's timer (`run_gui`), for [`without_ticks`]. Set once the tick is running.
+    #[cfg(windows)]
+    static TICK: Cell<Option<&'static Timer<Frame>>> = const { Cell::new(None) };
+}
+
+/// Runs `f` with the tick's timer stopped, and starts it again at the same interval after it, a
+/// panic included. For the one call inside the tick that runs a message loop of its own: a page's
+/// build, where wry waits for WebView2's controller (webview_win.rs, `build`). A tick that fired
+/// in that loop would be one inside the tick, which wxdragon skips — and writes a warning for,
+/// each 15 ms the build takes. So nothing of the tick runs during a build, as before; only a
+/// second start's request for the window, which a tick inside the build used to answer, now
+/// waits for the first tick after it. With no tick running — headless, or a test — it only runs
+/// `f`.
+#[cfg(windows)]
+pub(crate) fn without_ticks<R>(f: impl FnOnce() -> R) -> R {
+    let Some(timer) = TICK.with(Cell::get) else {
+        return f();
+    };
+    let ms = timer.get_interval();
+    timer.stop();
+    scopeguard::defer! { timer.start(ms, false); }
+    f()
+}
+
 #[cfg(test)]
 mod tray_tests {
     use super::*;
@@ -2851,7 +3046,8 @@ mod tray_tests {
 
 /// `dialog.show_modal()`, with a `[gui]` line as it opens and one as it closes: how long it was
 /// open, how many pump iterations ran inside it — the pump goes on from its timer inside the
-/// dialog's own loop — and the longest of them (`crate::modal_spans`). Two lines per dialog, on
+/// dialog's own loop, behind every dialog but a result message (`Hold::Everything`) — and the
+/// longest of them (`crate::modal_spans`). Two lines per dialog, on
 /// the event loop, where the dialog is. While it is open the dialog is on `OPEN_DIALOGS`, for a
 /// Quit to end.
 fn show_modal_said(dialog: &Dialog, title: &str) -> i32 {
@@ -2958,7 +3154,7 @@ fn review_dialog(
         .with_style(TextCtrlStyle::MultiLine | TextCtrlStyle::ReadOnly)
         .build();
     text.set_value(message);
-    text.set_name(label); // SetLabel() asserts on a TextCtrl; the name is what is read
+    text.set_name(label); // SetLabel() asserts on a TextCtrl; read is the StaticText before it
     text.set_min_size(review_size(message));
     sizer.add(&text, 1, SizerFlag::All | SizerFlag::Expand, 12);
 
@@ -3020,11 +3216,10 @@ fn open_settings_dialog(
     for d in descs {
         match d.kind {
             settings::Kind::Bool => {
-                // Label AND name, and no StaticText in front — see the Application
-                // settings tab for why the leading StaticText was the wrong shape. The
-                // fields below keep theirs: a text field cannot carry a label at all.
+                // Its own label, which is its name, and no StaticText in front — see the
+                // Application settings tab for why the leading StaticText was the wrong shape.
+                // The fields below keep theirs: a text field cannot carry a label at all.
                 let cb = CheckBox::builder(&panel).with_label(&d.label).build();
-                cb.set_name(&d.label);
                 cb.set_value(matches!(d.value, settings::Value::Bool(true)));
                 sizer.add(&cb, 0, SizerFlag::All, 8);
                 controls.push((d.key.clone(), Ctl::Bool(cb)));
