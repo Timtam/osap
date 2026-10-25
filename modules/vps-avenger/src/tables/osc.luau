@@ -25,6 +25,12 @@ T.CONTROLS = {
 }
 -- The controls pressed with the right button.
 T.RIGHT_BUTTON = { pan = true, random_pitch = true }
+
+-- What a reset (a double-click on the knob) sets each control to: Volume 100 %, the rest 0.
+-- SOURCE: the avenger_control project's actions.py — its Initialize Preset's values for an
+-- oscillator, and its defaults for a value it has not read. A reset is said as done only where the
+-- knob reads this after it (src/act.luau, Act.resetAnswer).
+T.DEFAULTS = { volume = 100, pan = 0, transpose = 0, fine_tune = 0, random_pitch = 0 }
 -- How far an amount drag goes either way, in points at 50 %.
 T.LIMIT = 106
 

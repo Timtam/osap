@@ -19,11 +19,9 @@
 --      central tab and the sample browser's rows where EDITOR shows no tab of the editor's (the
 --      strip, the central tab and the editor's pixels decided before it when the dots gave the
 --      count) — waited for in the handler of the last answer, and the knob reader over a few hundred
---      points of the picture (read/knob.luau).
---      Only when neither the browser's caption nor its header's name settles whether an expansion
---      is open, a second text read of the browser's area — the one region the project read only
---      then, and the largest by far, too slow on an Intel Mac to read every time — and with an
---      expansion open, of its presets' column.
+--      points of the picture (read/knob.luau). Nothing of the expansion browser below its header is
+--      read as text (read/browser.luau): its state is the header's, the picture test's and the
+--      user's word (Br.state).
 --   4. The values (state.luau's), each nil where it was not read; the log with every share, count,
 --      angle and word, and the times; in a calibrating run, marked pictures of the parts read.
 --
@@ -109,9 +107,9 @@ end
 -- SQ's controls and the expansion browser — marked at the corners of the view's caption and the
 -- header's name it is told by, FAV's point and the stars read (the browser's own actions write
 -- "browser-grid-…" and "browser-open-…"). One picture of each per zoom in a session, of the
--- picture the reads were answered from; and "browser-unsettled" once per zoom where the header,
--- the caption and the area together settled nothing (read/browser.luau, Br.state) — the pictures
--- the second Mac test's plan asked for.
+-- picture the reads were answered from; and "browser-unsettled" once per zoom where the caption,
+-- the header and the picture test together settled nothing (read/browser.luau, Br.state) — the
+-- pictures the second Mac test's plan asked for.
 Open.PICTURES = {
   strip = { 230, 18, 640, 145 },
   macros = { 700, 425, 871, 535 },
@@ -358,25 +356,16 @@ local function decide(ctx)
   end
 
   -- The browser (read/browser.luau, Br.state's order): the view's label where Avenger draws it; the
-  -- header's name — none read there, the grid in the view stored, one the catalog or Avenger's own
-  -- list has, that expansion open; and only where neither settles it, a second text read of the
-  -- area, the one region the project read only then, and the largest by far (the expansion known
-  -- open in this window scored first, the grid told by the catalog's expansions and Avenger's own
-  -- list). FAV by its star column where an expansion reads open; and with an open expansion named,
-  -- the category its preset rows read as and, with FAV on, their stars — from the presets' column,
-  -- of the same picture.
+  -- header's name — one the catalog or the roster has, that expansion open; the picture test of its
+  -- title band and the categories' scrollbar (read/expansion.luau, E.look), of the grids asked with
+  -- the rest; and the user's word, the grid confirmed in this window. FAV by its star column where an
+  -- expansion reads open; and with FAV on, the stars of the rows this session's own clicks placed.
   local reads = { ["expansion view"] = byName["expansion view"], ["expansion name"] = byName["expansion name"] }
-  local seen, why = Br.state(reads, ctx.opts.expected)
-  local areaRead = nil
-  if not seen then
-    local area = Expansion.area(pl)
-    if area then
-      areaRead = host.ocr.recognize({ name = "browser area", region = area }, { snapshot = snap, lang = H.lang() })
-      reads["browser area"] = areaRead
-      seen, why = Br.state(reads, ctx.opts.expected)
-    end
-  end
+  local look = Expansion.look(pl, got)
+  local seen, why = Br.state(reads, look, { window = ctx.window, zoom = opts.zoom, expected = ctx.opts.expected })
   log("expansion: " .. tostring(why))
+  Br.gateLine("the page key", { window = ctx.window, pl = pl, byName = reads, look = look, st = seen, words = why,
+    zoom = opts.zoom }, "no click — the state posted to the page")
   for _, p in ipairs({ { X.VIEW_TEXT[1], X.VIEW_TEXT[2] }, { X.VIEW_TEXT[3], X.VIEW_TEXT[4] }, { X.NAME_TEXT[1], X.NAME_TEXT[2] },
     { X.NAME_TEXT[3], X.NAME_TEXT[4] } }) do
     local x, y = pl:point(p[1], p[2])
@@ -386,12 +375,14 @@ local function decide(ctx)
   if seen then
     v.expansionOpen = seen.open
     v.selectedExpansion = seen.open and (seen.name or "") or ""
-    if not seen.open then v.expansionView, v.expansionViewFrom = seen.view, seen.viewFrom end
-    -- Named by what it lists, the database's naming — unless it is the one this window had open by
-    -- the word clicked, and the database's scoring only says it still is. A name read in the header
-    -- is read.
-    v.selectedFromDatabase = seen.score ~= nil and seen.name ~= nil
-      and not (seen.name == ctx.opts.expected and not ctx.opts.expectedFromDatabase) or nil
+    if not seen.open then
+      v.expansionView, v.expansionViewFrom = seen.view, seen.viewFrom
+      S.forgetBrowserAt(ctx.window, "the page key reads the grid")
+    elseif seen.name and seen.name ~= ctx.opts.expected then
+      S.forgetBrowserAt(ctx.window, "the page key reads " .. seen.name)
+    end
+    -- Named by its place in the database's list where the header did not read it (Br.state).
+    v.selectedFromDatabase = seen.byPlace or nil
     if seen.name then
       local ok, lists = pcall(DB.lists, seen.name)
       if ok and lists then
@@ -401,14 +392,11 @@ local function decide(ctx)
     end
   end
   Expansion.favorite(pl, got, v, log, marks.browser, v.expansionOpen == true)
-  if v.lists then
-    local column = areaRead and Br.column(areaRead, pl:rect(X.PRESET_TEXT))
-    if not column then column = Br.read(snap, pl, { "presets" })["presets"] end
-    local lines = Br.lines(Br.rows(column), v.lists.presets, v.lists.presetCategories, "preset rows")
-    v.categoryShown = Br.categoryOf(lines, v.lists.presetCategories)
-    if v.favoriteView then
-      Br.stars(snap, pl, lines, marks.browser)
-      v.favoriteStates = Br.starStates(lines)
+  if v.lists and v.favoriteView then
+    local rows = Br.shownRows(pl, ctx.window, v.selectedExpansion, v.lists)
+    if rows then
+      Br.stars(snap, pl, rows, marks.browser)
+      v.favoriteStates = Br.starStates(rows)
     end
   end
 
@@ -628,12 +616,12 @@ end
 --            page shows DRUM SQ whatever the strip shows (src/actions/drumsq.luau)
 --   macros   the macro panel: the tab shown, its buttons and its knobs' amounts; the tabs counted
 --            and the five names read with `text`
---   browser  the expansion browser (read/browser.luau, Br.part): the view's caption as text and
---            FAV's pixels; with the field "area", the area read where the caption reads no view, for
---            an open expansion; with "presets", the preset rows and their stars where FAV reads on
---            (`expected` in the opts: the expansion known open, whose lists the rows are placed in)
+--   browser  the expansion browser (read/browser.luau, Br.part): the view's caption and the header's
+--            name as text, the picture test, FAV's pixels; with "presets", the stars of the rows this
+--            session's own clicks placed where FAV reads on (`expected` in the opts: the expansion
+--            known open)
 -- `fields` (Open.part's opts) names what is read as text besides: the sample editor's menus' fields,
--- the envelope's preset name and the browser's rows (read/sample.luau), DRUM SQ's LENGTH and SPEED
+-- the envelope's preset name and the sample browser's rows (read/sample.luau), DRUM SQ's LENGTH and SPEED
 -- (read/drumsq.luau) — each asked only where the pixels read before the text read say it is shown.
 Open.PARTS = {
   strip = { rect = { 230, 18, 640, 145 }, strip = true },

@@ -26,14 +26,15 @@
 -- kit's name, as the tool showed its factory names.
 --
 -- The browser's (src/actions/browser.luau, src/read/browser.luau): its view, an open expansion and
--- the expansion the database names by what its columns list (`selectedFromDatabase` where only the
--- database named it, posted as `selected_expansion_from_database`, a key of the port's), FAV, the
--- preset rows read with FAV on and their stars (`favoriteStates`, by the preset's place in the
--- expansion's list, from 0), the category whose presets the rows read as (`categoryShown`, for the
--- next row's click, not posted), and the category the page asked for (`pageCategory`, a category or
--- "__all__", posted as `selected_preset_category`). And for the session, not per window and not a
--- setting: Avenger's own list of expansions, read off its grid when the user asks (S.avengerList),
--- which the page shows in place of the database's roster.
+-- its name read in the header — or, where the header did not read it after this session's own click
+-- on its tile, the one the database's list has at the place clicked (`selectedFromDatabase`, posted
+-- as `selected_expansion_from_database`, a key of the port's) — FAV, the stars of the rows shown
+-- where this session's own clicks placed them (`favoriteStates`, by the preset's place in the
+-- expansion's list, from 0), and the category the page asked for (`pageCategory`, a category or
+-- "__all__", posted as `selected_preset_category`). What this session's own clicks did in the
+-- browser, which no read shows — nothing below its header is read as text — is kept as facts by
+-- window: the grid confirmed by the user (S.confirmGrid), and the category clicked and the presets'
+-- page scrolled to (S.browserAt).
 
 local S = {}
 
@@ -117,6 +118,75 @@ end
 -- A fact of this session in window `id` (above): `value`, or nil to forget it.
 function S.note(id, key, value)
   forWindow(id).facts[key] = value
+end
+
+-- ── The grid confirmed ───────────────────────────────────────────────────────
+-- The user's word that window `id` shows the grid of expansions in view `view` with no expansion
+-- open, at zoom `zoom` (the page's Confirm Expansion View, the project's
+-- action_confirm_expansion_view, which sets AVGExpansionOpen to 0), or a view Set Expansion View
+-- chose there (`how` "confirmed" or "set"; the project's action_set_expansion_view sets it too).
+-- Kept until a read there says an expansion is open, an Open clicks a tile, Close's outcome is
+-- read, the user's own Browse Presets has Avenger's browser (src/actions/browser.luau,
+-- Bw.forgetPlaces), or the view or the zoom differs (S.gridConfirmed) — never by time. It settles
+-- only a header nothing is read in (read/browser.luau, Br.state).
+function S.confirmGrid(id, view, zoom, how)
+  if not id then return end
+  forWindow(id).facts.gridConfirmed = { view = view, zoom = zoom, how = how or "confirmed" }
+end
+
+-- How the grid was confirmed in window `id` for view `view` at zoom `zoom` ("confirmed" or "set"),
+-- or nil: never, or for another view or zoom, which is then forgotten.
+function S.gridConfirmed(id, view, zoom)
+  local st = id and byWindow[id] or nil
+  local c = st and st.facts.gridConfirmed
+  if not c then return nil end
+  if c.view ~= view or c.zoom ~= zoom then
+    st.facts.gridConfirmed = nil
+    host.log.info(string.format("[avenger] [browser] the grid confirmed for %s at %s %% is forgotten: the view is %s "
+      .. "at %s %% now", tostring(c.view), tostring(c.zoom), tostring(view), tostring(zoom)))
+    return nil
+  end
+  return c.how
+end
+
+-- The grid's confirmation in window `id` as it is kept — { view, zoom, how } or nil — for the log,
+-- forgetting nothing.
+function S.gridConfirmation(id)
+  local st = id and byWindow[id] or nil
+  return st and st.facts.gridConfirmed
+end
+
+-- The grid's confirmation in window `id` forgotten, and why in the log, where there was one.
+function S.forgetGrid(id, why)
+  local st = id and byWindow[id] or nil
+  if not (st and st.facts.gridConfirmed) then return end
+  st.facts.gridConfirmed = nil
+  host.log.info("[avenger] [browser] the grid confirmed is forgotten: " .. tostring(why))
+end
+
+-- ── The browser's place ──────────────────────────────────────────────────────
+-- Where this session's own clicks left the open expansion's lists in window `id`, which nothing
+-- read shows: { expansion, categories = "top" | "bottom" | nil (the end of its list of categories
+-- the scrollbar's clicks took it to), category = the category clicked, presets = { page, first,
+-- final } of that category's list (src/tables/pages.luau, Pg.presetPlace's) }, or nil: not known —
+-- the expansion opened by another way, the user's own Browse Presets, a read naming another one,
+-- a preset's name after a click that is not the one asked.
+function S.browserAt(id)
+  local st = id and byWindow[id] or nil
+  return st and st.facts.browserAt
+end
+
+function S.setBrowserAt(id, at)
+  if not id then return end
+  forWindow(id).facts.browserAt = at
+end
+
+-- The browser's place in window `id` forgotten, and why in the log, where one was known.
+function S.forgetBrowserAt(id, why)
+  local st = id and byWindow[id] or nil
+  if not (st and st.facts.browserAt) then return end
+  st.facts.browserAt = nil
+  host.log.info("[avenger] [browser] where the lists stand is forgotten: " .. tostring(why))
 end
 
 -- ── The count confirmed ──────────────────────────────────────────────────────
@@ -313,28 +383,8 @@ local function macroPanel(v)
   return out
 end
 
--- ── Avenger's own list ────────────────────────────────────────────────────────
--- The expansions Avenger lists, in its order, read off its grid from its top to its end
--- (read_expansion_list): { names, marks = { [i] = true where the name is the database's spelling of
--- a read that took similarity }, at = when it was read }, or nil. Kept for the session — dropped when
--- a later read of the grid names an expansion it does not have, and when the module is reloaded —
--- and never written anywhere: a list kept beyond the session would say what the user had once, and
--- nothing would read it again by itself (the maintainer's Q3).
-S.avengerList = nil
-
-function S.setAvengerList(names, marks)
-  S.avengerList = { names = names, marks = marks or {}, at = host.now() }
-end
-
-function S.dropAvengerList()
-  S.avengerList = nil
-end
-
--- The list of expansions the page shows: Avenger's, where it has been read this session — {
--- names, avenger = true, marks } — otherwise the database's roster `roster` ({ names }), or nil.
+-- The list of expansions the page shows: the database's roster `roster` ({ names }), or nil.
 function S.expansions(roster)
-  local own = S.avengerList
-  if own then return { names = own.names, avenger = true, marks = own.marks } end
   if roster then return { names = roster } end
   return nil
 end
@@ -386,24 +436,13 @@ function S.snapshot(id, shown, opts)
   out.favorite_preset_states = stars(v.favoriteStates)
   if shown then
     out.expansions = shown.names
-    if shown.avenger then
-      out.expansions_from_avenger = true
-      -- Every entry true or false, never a hole: a list of few marks far down would be too sparse
-      -- for JSON.
-      if anyOf(shown.marks, #shown.names) then
-        local marks = table.create(#shown.names)
-        for i = 1, #shown.names do marks[i] = shown.marks[i] == true end
-        out.expansions_marks = marks
-      end
-    else
-      out.expansions_from_database = true
-      -- Every entry true or false, as the marks are: a roster's expansion the database has no data
-      -- for (page.luau), a key of the port's.
-      if anyOf(shown.noData, #shown.names) then
-        local none = table.create(#shown.names)
-        for i = 1, #shown.names do none[i] = shown.noData[i] == true end
-        out.expansions_without_data = none
-      end
+    out.expansions_from_database = true
+    -- Every entry true or false, never a hole — a list of few marks far down would be too sparse for
+    -- JSON: a roster's expansion the database has no data for (page.luau), a key of the port's.
+    if anyOf(shown.noData, #shown.names) then
+      local none = table.create(#shown.names)
+      for i = 1, #shown.names do none[i] = shown.noData[i] == true end
+      out.expansions_without_data = none
     end
   end
   if opts and opts.age and st and st.at then

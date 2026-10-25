@@ -1,6 +1,6 @@
 id = "com.platform.vps-avenger"
 name = "VPS Avenger"
-version = "0.11.0"
+version = "0.13.0"
 license = "GPL-3.0-or-later"
 # The runtime's page support (O:addPage, O:inPlugin) came with version 0.6; `identify`'s `again`
 # and O:watch's count of readings, which the header's read and the name after ◀ and ▶ use, with 0.7;
@@ -13,8 +13,14 @@ license = "GPL-3.0-or-later"
 # O:holdKeys, which holds Page Up, Page Down, Return and Escape for a knob turned from the ring
 # (src/ring.luau, src/amount.luau), with 0.13; O:afterDialog, after which the ring's Load preset and
 # Save preset as say the name (src/main.luau), and the page's `openLater`, which lets the page key's
-# reads be asked at once with callbacks (src/page.luau, src/read/open.luau), with 0.14.
-dependencies = ["com.platform.overlay >= 0.14", "com.platform.daw-hosts"]
+# reads be asked at once with callbacks (src/page.luau, src/read/open.luau), with 0.14; O.doubleClick
+# as the host's one gesture (host.input.click's `clicks = 2`: on a Mac the second press marked as
+# click 2, its callback once both clicks are out), which every knob's reset and the expansion
+# browser's Load use (src/act.luau, src/main.luau, src/actions/browser.luau), with 0.15; a hand-over's
+# and a hold's `swallow`, with which every hand-over of the module's — a knob held from the page or
+# the ring, a rename, the browsers — swallows Tab and Shift+Tab, which switch Avenger's oscillators
+# on Windows, and says once how it ends (src/act.luau, src/amount.luau, src/handover.luau), with 0.16.
+dependencies = ["com.platform.overlay >= 0.16", "com.platform.daw-hosts"]
 # The catalog of Avenger's expansions (modules/vps-avenger-presets), when it is installed:
 # the preset's expansion, category, oscillators and macros, and the neighbour ◀ and ▶ lead to,
 # said marked as the database's (src/presets.luau). Without it the module is what it was.
@@ -34,9 +40,10 @@ optional_dependencies = ["com.platform.vps-avenger-presets"]
 #           Avenger's editor, read back off a picture (src/handover.luau); the sample editor's
 #           menus' fields, the envelope's preset name, the sample browser's rows and a field typed
 #           into (src/read/sample.luau, src/handover.luau), and DRUM SQ's SPEED
-#           (src/read/drumsq.luau); the expansion browser's caption, the open expansion's name in
-#           its header, its grid of expansions and an open expansion's categories and preset rows,
-#           once per picture (src/read/browser.luau)
+#           (src/read/drumsq.luau); the expansion browser's header — its view's caption and the
+#           open expansion's name — once per picture (src/read/browser.luau), never its grid, its
+#           categories, its preset rows or the view list a Close may open on the grid, which its
+#           pixels tell
 #   input   the clicks on ◀ and ▶, UNDO and the redo list's right click, an opener clicked again
 #           (or Escape, for a right click's) to close a popup a choice left open, and the warning
 #           box's YES the page answers; the oscillator strip's and the macros' clicks, right clicks
@@ -51,14 +58,13 @@ optional_dependencies = ["com.platform.vps-avenger-presets"]
 #           DRUM SQ's clicks, right clicks, menus, and LENGTH's double-click and drag
 #           (src/actions/drumsq.luau); the sample editor's and DRUM SQ's knobs pressed and held
 #           (src/amount.luau); the expansion browser's view list opened with the left button, Close,
-#           FAV, a tile's, a category's and a preset row's words clicked, a row double-clicked, its
-#           star clicked, and its three lists moved a wheel notch — or, where the wheel moves nothing,
-#           a click on the scrollbar's track — at a time (src/actions/browser.luau)
+#           FAV, a tile, a category and a preset row clicked at their places and their scrollbars at
+#           the tool's points, a row double-clicked, its star clicked (src/actions/browser.luau)
 #   speech  the new preset name, the refusals of its own clicks, why the page key opened nothing,
 #           the tool's sentences for a knob's amount (src/amount.luau, #6 to #11) and a drum slot's
 #           Browse and a row of the sample browser (#13), the pattern DRUM SQ's watcher reads
-#           selected (src/watch.luau), that a search of the browser's grid and a read of Avenger's
-#           own list have begun (src/actions/browser.luau), that the page key changed, and that the
+#           selected (src/watch.luau), that an expansion is being looked for in the browser's grid by
+#           its place (src/actions/browser.luau), that the page key changed, and that the
 #           page was described again when its mode changed from it (src/page.luau)
 #   log     what was read, and where
 #   screen  the screen's size, before a choice that opens Avenger's warning box; for the page, one
@@ -72,9 +78,11 @@ optional_dependencies = ["com.platform.vps-avenger-presets"]
 #           after Return (src/handover.luau); the sample editor's tabs' captions' grid and points,
 #           and its switches' grid (src/read/sample.luau); LENGTH's change waits
 #           (src/actions/drumsq.luau); DRUM SQ's watcher's picture, its key's pending, and its
-#           questions with callbacks (src/watch.luau); the expansion browser's pictures, the star
-#           column's and the stars' grids, and the change waits after a click and after every step
-#           of a list (src/actions/browser.luau, src/read/browser.luau);
+#           questions with callbacks (src/watch.luau); the expansion browser's pictures, its title
+#           band's, its list bar's, the star column's and the stars' grids, the change waits after
+#           a click and after every click on a scrollbar, and the profiles of the view list's place
+#           before and after a Close where nothing told (src/actions/browser.luau, src/act.luau,
+#           src/read/browser.luau);
 #           the calibration pictures of the header, the warning box, the page's reads, the editor,
 #           the knobs, the watcher and the browser, in a calibrating run only
 #   path    where those pictures are written

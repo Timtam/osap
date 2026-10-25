@@ -12,9 +12,11 @@
 --   3. CHECK. Still where the action began: `trip:inFront()` in a trip (false has ended it), the
 --      overlay's own O:stillHere in the ring.
 --   4. CLICK. Left or right (main.luau's clickAt, placed and checked as the ring's own clicks), a
---      double-click (doubleAt, O.doubleClick, its button and its callback after the second click),
---      or an item of the right click's menu, chosen once a menu test sees the popup
---      (O:chooseMenuItem; popups.luau places the item).
+--      double-click (doubleAt, O.doubleClick: since overlay runtime 0.15 the host's one gesture,
+--      host.input.click's `clicks = 2` — on a Mac the second press marked as click 2 — with its
+--      button, and its callback once both clicks are out or the second was not sent), or an item of
+--      the right click's menu, chosen once a menu test sees the popup (O:chooseMenuItem; popups.luau
+--      places the item).
 --   5. CHANGE. A change wait from the picture of step 1 — after the double-click's second click,
 --      after the menu took its item — on the part's rectangle or the watched boxes in it, at most
 --      Act.CHANGE_WITHIN (host.screen.snapshot's `change`); then the part read again off the picture
@@ -62,6 +64,19 @@ Act.CHANGE_WITHIN = 2000
 -- What counts as changed in a change wait: a channel 16 apart, in 4 pixels — the host's defaults.
 local TOLERANCE, MIN_PIXELS = 16, 4
 
+-- The keys that never reach VPS Avenger while the user works in it through a hand-over — a knob
+-- held (src/amount.luau: the page's trip:handOver{ kind = "keys" } and the ring's O:holdKeys), a
+-- field renamed and the browsers (src/handover.luau) — swallowed with the runtime's `swallow`
+-- (overlay runtime 0.16): Avenger on Windows switches its oscillators on Tab, and a Tab pressed then
+-- changed the oscillator by accident (the maintainer's decision of 2026-10-25). They do nothing, and
+-- each hand-over says once, at the first of them, how it ends.
+Act.SWALLOWED = { "Tab", "Shift+Tab" }
+
+-- A hand-over's `swallow`, its sentence `say`.
+function Act.swallow(say)
+  return { keys = Act.SWALLOWED, say = say }
+end
+
 -- Why a choice in Avenger's menu was not made, by the code of O:chooseMenuItem's error value
 -- (docs/api/overlay.md), in the page's words; another code says its message.
 local NOT_CHOSEN = {
@@ -92,6 +107,53 @@ Act.NO_MENU_HERE = "the menu cannot be seen here; nothing was chosen"
 
 function Act.menuHere(o)
   return o == Header
+end
+
+-- ── A reset's answer ─────────────────────────────────────────────────────────
+-- What a knob's reset says — the oscillator's controls and the macro knobs (src/actions/osc.luau,
+-- src/actions/macros.luau) — from the knob read before the double-click and after it, against the
+-- control's default, the tool's (tables/osc.luau's DEFAULTS, tables/macros.luau's AMOUNT_DEFAULT).
+-- In the third Mac test no reset took from a value off the default, and "unchanged" alone did not
+-- say whether one had been needed (the avenger_control developer's report of 2026-10-25, its §7):
+--   after not read                     "<Name> cannot be read now; whether it was reset is not
+--                                      confirmed"
+--   before and after at the default    "<words>, already at its default" — nothing to reset
+--   after at the default               "<words>, reset"
+--   after off it, and not as before    "<words>, not its default <default>; the reset is not
+--                                      confirmed" — before not read included
+--   after off it, as before            "<words>, unchanged; the reset failed"
+-- "At the default" is the reading equal to it. The reader rounds (read/knob.luau): Volume and a
+-- macro's amount to 10 %, Pan and Random Pitch to 25, Transpose to 12 semitones, Fine Tune to 25
+-- cents — so a knob within half a step of its default reads it (a Transpose of +5 reads 0, and is
+-- said already at its default), and the double-click is sent whatever was read before. Nothing is
+-- taken for the default from the click: what is said is what was read after it. One log line a
+-- reset, with the three values.
+-- `label` the action's, `name` the control's ("Volume", a macro knob's name), `value(v)` a reading
+-- in words without the name ("160 percent"), `before` and `after` the readings (nil: not read),
+-- `default`, `focus` the page's element for an answer that is no error. The answer (Act.run's).
+function Act.resetAnswer(label, name, value, before, after, default, focus)
+  local function words(v) return name .. " " .. value(v) end
+  local verdict, result
+  if after == nil then
+    verdict = "not read"
+    result = { error = name .. " cannot be read now; whether it was reset is not confirmed" }
+  elseif after == default and before == default then
+    verdict = "already at its default"
+    local w = words(after) .. ", already at its default"
+    result = { note = w, said = w, focus = focus }
+  elseif after == default then
+    verdict = "reset"
+    result = { said = words(after) .. ", reset", focus = focus }
+  elseif before ~= nil and after == before then
+    verdict = "failed: unchanged"
+    result = { error = words(after) .. ", unchanged; the reset failed" }
+  else
+    verdict = "changed, not to its default"
+    result = { error = words(after) .. ", not its default " .. value(default) .. "; the reset is not confirmed" }
+  end
+  host.log.info(("[avenger] [act] '%s': before %s, after %s, its default %s (the tool's) — %s"):format(label,
+    before ~= nil and value(before) or "not read", after ~= nil and value(after) or "not read", value(default), verdict))
+  return result
 end
 
 local function corners(r)
@@ -131,6 +193,10 @@ end
 --             Pp.submenuRow); `dialog`: the item opens a file dialog, waited for in a trip, nothing
 --             read after it — with "read", the part read once more when Avenger is in front again
 --   macroCount   the macro tabs counted before, where the part's text is not read (the tab shown)
+--   pictured(snap, pl)   once the click is decided, before it: what the action keeps of the picture
+--             the read before was made of — its profiles, waited for, for a comparison after the
+--             click (src/actions/browser.luau, Close's view list); never the picture itself, which
+--             Act.run lets go of as always
 --   watch(vb, click) -> { rect }?   the boxes the change is looked for in (default: the part)
 --   same(vb, va) -> boolean?   nothing this action changes changed; nil — or no `same` — where
 --             nothing read says it: the change wait's verdict decides
@@ -203,6 +269,16 @@ function Act.run(o, spec, done, trip)
     snap:release()
     log("nothing clicked — %s", tostring(refusal))
     return done({ part = before, error = refusal, focus = refusalFocus })
+  end
+  -- What the action keeps of the picture before the click, which may wait: nothing is clicked in a
+  -- place the user has left meanwhile.
+  if spec.pictured then
+    local okP, errP = pcall(spec.pictured, snap, pl)
+    if not okP then log("what it keeps of the picture before the click failed: %s", tostring(errP)) end
+    if not here("after the picture before the click was profiled") then
+      snap:release()
+      return movedOn()
+    end
   end
 
   local afterOpts = { pl = pl, text = spec.textAfter, preset = readOpts.preset,

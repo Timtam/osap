@@ -153,9 +153,13 @@ local function clickPoint(o, label, x, y, button, quiet)
 end
 
 -- O.doubleClick at screen point (x, y) with `button` (nil: the left), its answers as this file's: false
--- and what was said where the first click was not made — no second goes out, and `after` is not
--- called — otherwise true, and `after(true)`, as a handler, once the second has gone out, or
--- `after(false, said)` where the second was not made. Each refusal is said unless `quiet`.
+-- and what was said where the host refused it at the call — nothing goes out, and `after` is not
+-- called — otherwise true, and `after(true)`, as a handler, once both clicks have gone out, or
+-- `after(false, said)` where the gesture stopped after the call: since overlay runtime 0.15 the
+-- host makes the double-click as one gesture on a thread of its own (host.input.click's `clicks =
+-- 2`), and its callback's `false, err` may come from either half — the window at the point changed
+-- before the second (`covered`), or a click the system did not take; the host's `[input]
+-- double-click` line says which. Each refusal is said unless `quiet`.
 local function doubled(label, x, y, button, quiet, after)
   local function refuse(err)
     local said = label .. " was not clicked: " .. tostring(err)
@@ -164,11 +168,10 @@ local function doubled(label, x, y, button, quiet, after)
   end
   local refused = false
   local ok, err = O.doubleClick(x, y, button and { button = button } or nil, function(ok2, err2)
-    -- The first click's refusal was answered at the call.
+    -- A refusal at the call was answered there; the callback hears it too, once, and is not followed.
     if refused then return end
     if ok2 == false then
-      host.log.info(string.format("[avenger] '%s': the double-click's second click was not made — %s", label,
-        tostring(err2)))
+      host.log.info(string.format("[avenger] '%s': the double-click was not made whole — %s", label, tostring(err2)))
       return after(false, refuse(err2))
     end
     after(true)
@@ -187,16 +190,6 @@ local function doublePoint(o, label, x, y, quiet, after)
   if not px then return false, py end
   host.log.info(string.format("[avenger] '%s': double-clicking (%d,%d)", label, px, py))
   return doubled(label, px, py, nil, quiet, after)
-end
-
--- The wheel turned `notches` (positive up, host.input.scroll) at table point `at`, placed and
--- checked as a click is: true and the point, or false and what was said.
-local function wheelAt(o, label, at, notches, quiet)
-  local x, y = pointOf(o, label, at, quiet)
-  if not x then return false, y end
-  host.log.info(string.format("[avenger] '%s': the wheel %+g at (%d,%d)", label, notches, x, y))
-  host.input.scroll(x, y, notches)
-  return true, x, y
 end
 
 local function clickAt(o, label, at, button, quiet)
@@ -904,7 +897,6 @@ Page.start({
     pointAt = pointAt,
     clickPoint = clickPoint,
     doublePoint = doublePoint,
-    wheelAt = wheelAt,
     nameNow = nameNow,
     lastName = lastName,
     noteName = noted,

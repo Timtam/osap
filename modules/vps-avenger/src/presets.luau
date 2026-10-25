@@ -660,38 +660,11 @@ function DB.lists(e)
   return { categories = categories, presets = presets, presetCategories = presetCategories }
 end
 
--- The expansion whose presets text `text` (Avenger's browser read as text, in small letters)
--- names most: 6 for every preset name of at least 8 characters found in it, at least one needed
--- (the avenger_control project's _detect_open_expansion_from_area_text, without its categories,
--- which are in the expansions' files and not in the index). Its name and score, and where another
--- expansion scores as much, that one's name too — the first two in the catalog's order: the text
--- does not tell them apart, where the project took the first of its roster. Or nil.
-local OPEN_NAME_MIN = 8
-local OPEN_PER_PRESET = 6
-
-function DB.openExpansion(text)
-  if not catalog() then return nil end
-  local best, bestScore, tied = nil, 0, nil
-  for e, own in ipairs(cat.folds) do
-    local score = 0
-    for _, f in ipairs(own) do
-      if #f >= OPEN_NAME_MIN and string.find(text, f, 1, true) then score += OPEN_PER_PRESET end
-    end
-    if score > bestScore then
-      best, bestScore, tied = cat.idx.expansions[e].name, score, nil
-    elseif score == bestScore and score > 0 and not tied then
-      tied = cat.idx.expansions[e].name
-    end
-  end
-  if bestScore < OPEN_PER_PRESET then return nil end
-  return best, bestScore, tied
-end
-
 -- ── For the browser ──────────────────────────────────────────────────────────
 -- What the browser's reads (src/read/browser.luau) take from the database: the expansions' names
--- the grid's words are named among, an open expansion's lists its rows are placed in, and the
--- score that says which expansion its columns show. Each places what was READ; none of it ever
--- decides that a click did something (the plan for the browser, §2.6).
+-- the header's name is looked up among, and an open expansion's lists, whose places the browser's
+-- actions click (src/tables/pages.luau). The lookups place what was READ; none of it ever decides
+-- that a click did something (the plan for the browser, §2.6).
 
 -- Text `s` as names are compared: tidied and in small letters (SNAPPING's 1 and 2).
 function DB.fold(s)
@@ -762,26 +735,6 @@ function DB.expansionNames()
   end
   expansionNames = { names = names, folds = folds }
   return names, folds
-end
-
--- How much folded text `text` (an open expansion's columns, or the browser's area, read) names of
--- expansion `e`: the avenger_control project's score for one expansion — 6 for every preset name of
--- OPEN_NAME_MIN characters or more found in it, 1 for every category name of 4 or more (its
--- _detect_open_expansion_from_area_text) — read from `e`'s file; 0 where it cannot be read.
-function DB.scoreOpen(text, e)
-  if not (P and e and e ~= "") then return 0 end
-  local ok, x = pcall(P.expansion, e)
-  if not (ok and x) then return 0 end
-  local score = 0
-  for _, pr in ipairs(x.presets) do
-    local f = fold(pr.name)
-    if #f >= OPEN_NAME_MIN and string.find(text, f, 1, true) then score += OPEN_PER_PRESET end
-  end
-  for _, c in ipairs(x.categories) do
-    local f = fold(c.name)
-    if #f >= 4 and string.find(text, f, 1, true) then score += 1 end
-  end
-  return score
 end
 
 -- The oscillators and macros of preset `i` of expansion file `x`, as said.

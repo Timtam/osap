@@ -1,20 +1,17 @@
 -- The expansion browser, read off the page's picture: its view (List, or 1 to 8 per Row) while it
--- shows the expansions, where Avenger draws it; whether an expansion is open instead, and which;
--- and whether the favourites view (FAV) is on.
+-- shows the expansions, where Avenger draws it; whether an expansion is open instead; and whether
+-- the favourites view (FAV) is on.
 --
--- SOURCE: the avenger_control project's detect_expansion_state and its helpers (its actions.py)
--- and its detect_expansion_favorite_view (clicker/__init__.py), taken over with its developer's
--- permission (NOTICE): the view's caption read as text — an open expansion shows an icon there —
--- and, where it reads no view, the browser's text compared with the preset database; FAV from its
--- brightest pixel and its bright ones. Three differences: the expansion an action expects is scored
--- the project's way, by its presets and its categories, and any other only by its presets, which
--- the database's index holds — every expansion's categories would mean reading every expansion's
--- file — and a text two expansions' presets are named in as much names neither, where the project
--- took the first of its roster; the grid is told by the catalog's expansions and Avenger's own list
--- read this session, not by the roster the page shows, which may hold none of the names a scrolled
--- grid shows; and a text that settles nothing is "not read", where the project kept what it had
--- last known. Since the second Mac test of the page (2026-10-24) the browser is first told by the
--- open expansion's name in its header (src/read/browser.luau, Br.state), and FAV by its star column.
+-- SOURCE: the avenger_control project's detect_expansion_state (its actions.py) and its
+-- detect_expansion_favorite_view (clicker/__init__.py), taken over with its developer's permission
+-- (NOTICE): the view's caption read as text — an open expansion shows an icon there. The rest is
+-- this module's own: since the second Mac test of the page (2026-10-24) the browser is told by the
+-- open expansion's name in its header (src/read/browser.luau, Br.state), FAV by its star column;
+-- since the third (2026-10-25) also by a picture test of the header's title band and of the
+-- categories' scrollbar (E.look) — pixels only. Nothing below the header is read as text: the
+-- project's reading of the area's words against the database — the grid's names, the categories,
+-- the preset rows — read nothing at the browser's sizes, and the maintainer's decision of that day
+-- leaves the lists to the preset database and the places to src/tables/pages.luau.
 
 local P = host.include("src/read/picture.luau")
 local X = host.include("src/tables/expansion.luau")
@@ -48,20 +45,48 @@ local STAR_DRAWN_MIN, STAR_DRAWN_MAX = 0.05, 0.6
 local STAR_MIDDLE = 5
 local STAR_CELLS = 4
 
--- Words in an open expansion's categories and presets, of which a text has to hold two to be an
--- open expansion's (the project's markers); an expansion's name has to be this long to count as
--- seen in the browser's grid.
-local OPEN_MARKERS = {
-  "arp", "bass", "bells", "chords", "drums", "effects", "instruments", "leads", "mallets",
-  "strings", "guitar", "synth", "seq", "pad",
-}
+-- The shortest text of the header taken for an expansion's name by similarity (DB.nameIn).
 local NAME_MIN = 5
 E.NAME_MIN = NAME_MIN
--- What an open expansion has to score (DB.scoreOpen, DB.openExpansion): one preset name, the
--- project's least.
-local OPEN_SCORE = 6
 
+-- The picture test of the grid against an open expansion (tables/expansion.luau, TITLE_BAND and
+-- LIST_BAR, measured on the second Mac test's 22 pictures of the grid and 3 of an open expansion):
+-- the title band's share of light pixels (E.BRIGHT) — 0.00 % on every picture of the grid, 3.0 to
+-- 7.4 % with an expansion open — and the categories' scrollbar's share of pixels of r + g + b 180
+-- or more (E.BAR) — 0.0 to 5.0 % on the grid, 26 to 36.5 % open. An expansion is open where the
+-- title band holds TITLE_OPEN or more, whatever its name reads: an open expansion draws its title
+-- there, and TITLE_OPEN is a sixth of the least measured ("Factory", seven letters at 50 %), so
+-- that the catalog's shortest name, "PSY", should light it too — not measured. The band holds no
+-- title where it is at TITLE_DARK or less, and the grid shows where the bar is then at BAR_DARK or
+-- less as well; the bar, measured in 8 per Row only, never says open by itself. Not measured either:
+-- a Retina capture, the views but 8 per Row, the search field open, the pointer over the header.
+E.BAR = host.screen.predicate("r + g + b >= 180")
+E.TITLE_OPEN = 0.005
+E.TITLE_DARK = 0.002
+E.BAR_DARK = 0.10
+
+-- The picture test's grids: only their shares over the whole band and the whole bar are wanted, so
+-- a few cells each — TITLE_CELLS across the band, one row; BAR_CELLS down the bar, one column — and
+-- Luau's work on them is a few dozen turns (a cell a unit across, as the other grids are, would be a
+-- thousand cells and some ten thousand turns a read). A cell's share is the host's, rounded to
+-- 1/255 (docs/api/screen.md), so a band with no light pixel is 0 exactly, and one lit pixel in a
+-- cell counts.
+local TITLE_CELLS, BAR_CELLS = 24, 14
+
+-- The browser's grids, asked of the page's picture with the rest (read/open.luau) and of the
+-- browser's own (src/read/browser.luau): the title band, the categories' scrollbar, and FAV's star
+-- column twice.
 function E.ask(pl, out)
+  local band = pl:rect(X.TITLE_BAND)
+  if band then
+    out[#out + 1] = { name = "title band", kind = "cells", rect = band, cols = math.min(TITLE_CELLS, band[3] - band[1]),
+      rows = 1, pred = E.BRIGHT }
+  end
+  local bar = pl:rect(X.LIST_BAR)
+  if bar then
+    out[#out + 1] = { name = "list bar", kind = "cells", rect = bar, cols = 1, rows = math.min(BAR_CELLS, bar[4] - bar[2]),
+      pred = E.BAR }
+  end
   local r = pl:rect(X.STAR_COLUMN)
   if not r then return end
   out[#out + 1] = { name = "fav stars", kind = "cells", rect = r, cols = 1, rows = X.PRESET_VISIBLE_ROWS * STAR_CELLS,
@@ -133,52 +158,31 @@ function E.parseView(text)
   return nil
 end
 
--- The browser's area, for the read made when the caption reads no view.
-function E.area(pl)
-  return pl:rect(X.AREA)
-end
-
--- What the browser's text `text` (its area, or an open expansion's two columns, read) says, with the
--- preset database `DB`, the expansion an action expects open (`expected`, or nil) and the names a
--- grid is told by (`names`: { names, folds } — the catalog's expansions and Avenger's own list):
--- { open = true, name = the expansion, score } for an open expansion the database recognises — the
--- one expected where it scores, else the one whose presets the text names most; { open = true } where
--- two expansions' presets it names as much — which of them is open the text does not say; { open =
--- false } for the grid of expansions — one of `names` named in it; { open = true } for an open
--- expansion the database does not recognise — two of the markers; or nil, nothing settled. And the
--- log's words.
-function E.fromArea(text, DB, expected, names)
-  local t = DB.fold(text)
-  if t == "" then return nil, "nothing read" end
-  if DB.present then
-    if expected and expected ~= "" then
-      local okS, score = pcall(DB.scoreOpen, t, expected)
-      if okS and score >= OPEN_SCORE then
-        return { open = true, name = expected, score = score }, string.format("%s, the one expected, by what it lists (%d)",
-          expected, score)
-      end
-    end
-    local ok, n, sc, other = pcall(DB.openExpansion, t)
-    if not ok then return nil, "the preset database failed: " .. tostring(n) end
-    if n and other then
-      return { open = true }, string.format("two expansions list what was read: %s and %s, by their presets named (%d each)",
-        n, other, sc)
-    end
-    if n then return { open = true, name = n, score = sc }, string.format("%s, by its presets named (%d)", n, sc) end
+-- What the picture test says, from the grids `got` (E.ask's names): { title, bar = the shares, nil
+-- where not read; verdict = "open" (the title band lit), "grid" (no title, the bar dark), "dark" (no
+-- title, the bar lit or not read), "between" (a few light pixels: neither), or nil (the band not
+-- read); words, for the log }.
+function E.look(pl, got)
+  local function shareOf(name, rect)
+    local g, r = got[name], pl:rect(rect)
+    if not (g and r) then return nil end
+    return (g:share(r))
   end
-  for k, f in ipairs(names and names.folds or {}) do
-    if #f >= NAME_MIN and string.find(t, f, 1, true) then
-      return { open = false }, string.format("the grid of expansions: '%s' named", names.names[k])
+  local title, bar = shareOf("title band", X.TITLE_BAND), shareOf("list bar", X.LIST_BAR)
+  local verdict = nil
+  if title ~= nil then
+    if title >= E.TITLE_OPEN then
+      verdict = "open"
+    elseif title <= E.TITLE_DARK then
+      verdict = (bar ~= nil and bar <= E.BAR_DARK) and "grid" or "dark"
+    else
+      verdict = "between"
     end
   end
-  local hits = {}
-  for _, m in ipairs(OPEN_MARKERS) do
-    if string.find(t, m, 1, true) then hits[#hits + 1] = m end
-  end
-  if #hits >= 2 then
-    return { open = true }, "an open expansion the database does not name: " .. table.concat(hits, ", ")
-  end
-  return nil, "nothing it settles"
+  local words = string.format("title band %s lit, list bar %s lit — %s", P.pct(title), P.pct(bar), ({
+    open = "an expansion's title", grid = "the grid", dark = "no title, the bar not dark",
+    between = "neither", })[verdict] or "not read")
+  return { title = title, bar = bar, verdict = verdict, words = words }
 end
 
 return E

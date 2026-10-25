@@ -5,15 +5,14 @@
 -- clicker reads the browser in (clicker/__init__.py), taken over with its developer's permission
 -- (NOTICE): at 50 % of Avenger's zoom, in points from the top-left corner of Avenger's own
 -- interface; the numbers as the project wrote them, starting values nobody here has checked
--- (geometry.luau, "Where the numbers come from"). Not taken over: the project's scrollbar tables,
--- a page for each view and roster size, and its tables of where a category's presets lie once
--- scrolled, measured for one roster and one set of category sizes — the browser's actions read the
--- grid and the lists and click the words read (src/actions/browser.luau).
+-- (geometry.luau, "Where the numbers come from"). The project's page and scroll tables, by which
+-- the browser's actions click every expansion, category and preset by its place as the project
+-- clicks them (the maintainer's decision of 2026-10-25), are in src/tables/pages.luau.
 --
 -- WORKED OUT HERE, not the project's (the plan for the browser, §2.1): the browser's picture, the
--- columns' text regions, the star column, the lists' wheel points and scrollbar tracks, and the
--- grid's columns per view — each from the project's numbers beside it, and STARTING VALUES until
--- a picture of the browser settles them (TODO.md, D14 and D15).
+-- columns' regions a change is watched in, the star column, and the header's name and title band —
+-- each from the project's numbers beside it or measured on the second Mac test's pictures, and
+-- STARTING VALUES until a picture of the browser settles them (TODO.md, D15).
 
 local T = {}
 
@@ -44,12 +43,33 @@ T.VIEW_OPTIONS = {
 T.VIEW_TEXT = { 9, 43, 9 + 78, 43 + 16 }
 
 -- The open expansion's name, centred in the browser's header — this module's own, measured on the
--- second Mac test's pictures: "African House" from 69 to 122 and from 43 to 58 at 100 %
+-- second Mac test's pictures: "African House" from 69 to 122 at 100 %
 -- (`Expansions/Avenger, 100, Open African House,Fav Stars Off.png`), "Factory" from 73 to 114 at
--- 50 % (`Expansions/VPS Avenger Open Expansion.png`); with no expansion open nothing light lies
--- between 20 and 146 there at 50, 80 or 100 %, and the BPM ramp starts at 147. Read from 22, clear
--- of the back arrow left of it, to 144.
-T.NAME_TEXT = { 22, 43, 144, 58 }
+-- 50 % (`Expansions/VPS Avenger Open Expansion.png`), the title's glyphs from y 45 to 51.5 in both;
+-- with no expansion open nothing light lies between 20 and 146 there at 50, 80 or 100 %, and the BPM
+-- ramp starts at 147. Read from 22, clear of the back arrow left of it, to 144, and from 43 to 54:
+-- 2.5 points of room below the glyphs for a descender, and clear of the grid's first row of tiles,
+-- whose dark outlines begin at 55 to 56. Until the third Mac test it reached 58, and those outlines
+-- were ink to the host's crop (docs/api/ocr.md, a pixel far from the mean of the crop's corners) on
+-- 21 of the 22 closed pictures — the 21 `Avenger NN closed.png`, 50 to 200 %, and `VPS Avenger
+-- Closed Expansion.png`; at 80 % in its bottom 3 rows of 24 — so the header over the grid read
+-- `none`, never `blank`, and nothing was taken as closed. To 54 it is blank on all 22, and holds
+-- the title's ink on the three open ones.
+T.NAME_TEXT = { 22, 43, 144, 54 }
+
+-- The picture test of the grid against an open expansion (src/read/expansion.luau, E.look) — this
+-- module's own, measured on the same 22 closed pictures and the three open ones (`VPS Avenger Open
+-- Expansion.png` at 50 %, the two `Avenger, 100, Open African House,…` at 100 %), with Avenger's
+-- corner placed exactly and 2 pixels off either way:
+--   TITLE_BAND  the header's band the open expansion's title is drawn in: its share of light
+--               pixels, r + g + b of 451 or more — none in any closed picture, 3.0 % (50 %) and
+--               7.4 % (100 %) open. Whatever the name reads, a lit title is an open expansion.
+--   LIST_BAR    the categories' scrollbar's track left of them, round x 12: its share of pixels
+--               with r + g + b of 180 or more — 0.0 to 5.0 % closed, where a dark box lies there,
+--               and 26.0 to 36.5 % open. Measured in 8 per Row only, so it only confirms the grid
+--               where the title is dark; it never says open by itself.
+T.TITLE_BAND = { 22, 44, 144, 53 }
+T.LIST_BAR = { 9, 70, 15, 210 }
 
 -- The view menu: List at y 60, then 1 to 8 per Row from y 74, 11.5 apart, at x 27.
 T.VIEW_MENU_X = 27
@@ -57,7 +77,10 @@ T.VIEW_MENU_LIST_Y = 60
 T.VIEW_MENU_GRID_FIRST_Y = 74
 T.VIEW_MENU_Y_PITCH = 11.5
 
--- The browser's area, from (10, 56) to (225, 224); its text is read over the whole of it.
+-- The browser's area, from (10, 56) to (225, 224): the grid's tiles lie in it, and a change after a
+-- click on its scrollbar is watched for in it. Nothing in it is read as text — the expansions' names
+-- there are about 5 pixels tall at 80 % on a 1x display, and the avenger_control developer found no
+-- recogniser that reads them (the maintainer's decision of 2026-10-25).
 T.AREA = { 10, 56, 225, 224 }
 
 -- The list view's column, and the 8 per Row grid: the first tile at (23, 68), 27.5 across and 20
@@ -86,49 +109,23 @@ T.FAVORITE_VIEW = { 212, 50 }
 T.FAVORITE_VIEW_STATE = { 25, 10 }
 T.FAVORITE_STATE = { 9, 9 }
 
--- An open expansion's two lists as text, each a region of its own: the host joins engine lines that
--- overlap vertically into one row (docs/api/ocr.md), so a category and a preset at the same height
--- would come back as one line of one region. The categories right of their scrollbar at x 12, the
--- nine rows of 20 from y 66; the presets left of their stars at x 220, the fourteen rows of 12.5
--- from y 60; the stars' column round x 220, as wide as a star's box, from the first star's top — FAV's
--- box above it reaches y 55, and a grid cell that held part of it would count FAV's light as the
--- first row's star.
+-- An open expansion's two lists, where a change after a click on them or their scrollbars is watched
+-- for — never read as text: the categories right of their scrollbar at x 12, the nine rows of 20
+-- from y 66; the presets left of their stars at x 220, the fourteen rows of 12.5 from y 60; and the
+-- stars' column round x 220, as wide as a star's box, from the first star's top — FAV's box above it
+-- reaches y 55, and a grid cell that held part of it would count FAV's light as the first row's star.
 T.CATEGORY_TEXT = { 16, 56, 70, 236 }
 T.PRESET_TEXT = { 72, 53, 212, 229 }
 T.STAR_COLUMN = { 215, 55.5, 225, 229 }
 
--- The three lists the browser moves: the grid of expansions, an open expansion's categories and its
--- presets — each with its text region (`rect`), where the wheel is turned (the list's middle, away
--- from both scrollbars) and its scrollbar's track, clicked at its end to move the list a page: x,
--- and y at the top (`up`) and the bottom (`down`) — the project's track ends (its EXPANSION_SCROLL_*,
--- EXPANSION_CATEGORY_SCROLL_* and EXPANSION_PRESET_SCROLL_*, the grid's from its List view's).
+-- The three lists the browser scrolls by their scrollbars (src/tables/pages.luau): the grid of
+-- expansions, an open expansion's categories and its presets, each with the region its change is
+-- watched in, top and bottom quarter (src/actions/browser.luau, `bands`).
 T.LISTS = {
-  grid = { rect = T.AREA, wheel = { 117, 140 }, track = { x = 228, up = 58, down = 222 } },
-  categories = { rect = T.CATEGORY_TEXT, wheel = { 42, 146 }, track = { x = 12, up = 66, down = 218 } },
-  presets = { rect = T.PRESET_TEXT, wheel = { 142, 141 }, track = { x = 228, up = 58, down = 227 } },
+  grid = { rect = T.AREA },
+  categories = { rect = T.CATEGORY_TEXT },
+  presets = { rect = T.PRESET_TEXT },
 }
-
--- The grid's columns in view `view`: the middle of each (`xs`), half a column's width (`half`)
--- and the distance from one row of tiles to the next (`pitch`). List: one column at the project's
--- x, its rows 36 apart (its List view's y cycle); 8 per Row: the project's tiles, from x 23 every
--- 27.5, rows 20 apart; 1 to 7 per Row: the area split evenly, as the project places their tiles (its
--- expansion_cell_pos), as many rows as columns. nil for a view Avenger does not have.
-function T.columns(view)
-  if view == "List" then
-    return { xs = { T.LIST_X }, half = (T.AREA[3] - T.AREA[1]) / 2, pitch = 36 }
-  end
-  if view == "8 per Row" then
-    local xs = {}
-    for c = 0, 7 do xs[c + 1] = T.GRID8_X0 + c * T.GRID8_X_STEP end
-    return { xs = xs, half = T.GRID8_X_STEP / 2, pitch = T.GRID8_Y_STEP }
-  end
-  local n = tonumber(string.match(tostring(view or ""), "^(%d) per Row$"))
-  if not (n and n >= 1 and n <= 7) then return nil end
-  local w = (T.AREA[3] - T.AREA[1]) / n
-  local xs = {}
-  for c = 0, n - 1 do xs[c + 1] = T.AREA[1] + (c + 0.5) * w end
-  return { xs = xs, half = w / 2, pitch = (T.AREA[4] - T.AREA[2]) / n }
-end
 
 -- Where row `view` of the view menu is (the project's expansion_view_menu_pos), or nil for a view
 -- Avenger does not have.

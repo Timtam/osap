@@ -330,10 +330,11 @@ fn the_mac_page_mode_from_the_page_describes_the_page_again_and_says_so() {
 }
 
 /// The expansions list from the page: the state's list follows, then the settings, and nothing in
-/// the error region. Where Avenger's own list was read this session, the setting is stored and the
-/// list shown stays Avenger's, which a note says. A list that is not one of the two is refused.
+/// the error region — every time, the list shown being the database's roster (the third Mac test
+/// of the page, 2026-10-25: no list is read off Avenger's grid). A list that is not one of the four
+/// is refused.
 #[test]
-fn the_roster_from_the_page_posts_its_list_and_says_where_avengers_own_is_held() {
+fn the_roster_from_the_page_posts_its_list() {
     run_mac(&scenario(r##"
         T.presets()
         T.pageUp()
@@ -343,19 +344,15 @@ fn the_roster_from_the_page_posts_its_list_and_says_where_avengers_own_is_held()
         T.ok(table.concat(T.lastPost("state").state.expansions, "|") == "Alpha|Beta|Gamma|Delta", "the roster's four")
         T.ok(T.lastPost("settings").values.roster == "Complete" and T.lastPost("error").text == "", T.lastPost("error").text)
         T.agree("Complete")
-        local St = S.included["modules/vps-avenger/src/state.luau"][1]
-        St.setAvengerList({ "Gamma", "Alpha" })
         T.set("roster", "Factory Standard")
         T.ok(S.settings.roster == "Factory Standard", "stored")
-        T.ok(table.concat(T.lastPost("state").state.expansions, "|") == "Gamma|Alpha", "Avenger's list shown still")
-        T.ok(T.lastPost("error").text == "Expansions List: Factory Standard is kept; the list shown stays VPS Avenger's own "
-          .. "for this session", T.lastPost("error").text)
+        T.ok(T.lastPost("state").state.expansions_from_database == true and T.lastPost("error").text == "",
+          T.lastPost("error").text)
         T.agree("Factory Standard")
         local sets = S.settingSets
         T.set("roster", "Unknown List")
         T.ok(S.settingSets == sets and S.settings.roster == "Factory Standard"
           and T.lastPost("error").text == "Expansions List: Unknown List is not one of the expansions lists", T.lastPost("error").text)
-        T.ok(St.avengerList ~= nil, "Avenger's list kept")
     "##));
 }
 
@@ -386,15 +383,13 @@ fn the_drum_sq_cadence_from_the_page_rearms_the_watcher_and_a_bad_one_is_refused
 
 /// Reset Saved Settings: every setting at its default — the default key registered — the Mac mode
 /// last, so the page is described again once, after everything else, and posted nothing to; Close.wav
-/// and the spoken sentence; the new page's `ready` answers the defaults. Avenger's own list is left as
-/// it is (the tool's reset left what it held in memory). With the Mac mode already off: the note, and
-/// nothing described. With the default key refused: the note says which key stays, and why.
+/// and the spoken sentence; the new page's `ready` answers the defaults. With the Mac mode already
+/// off: the note, and nothing described. With the default key refused: the note says which key
+/// stays, and why.
 #[test]
 fn reset_sets_every_setting_to_its_default_the_mac_mode_last() {
     run_mac(&scenario(r##"
         local _, _, W = T.pageUp()
-        local St = S.included["modules/vps-avenger/src/state.luau"][1]
-        St.setAvengerList({ "Gamma", "Alpha" })
         T.setting("roster", "Complete")
         T.setting("pageKey", "Ctrl+Shift+F2")
         T.setting("sounds", false)
@@ -427,7 +422,6 @@ fn reset_sets_every_setting_to_its_default_the_mac_mode_last() {
         end
         T.ok(table.concat(order, ",") == "roster,expansionView,sounds,drumSqCadence,pageKey,pageLeavesDawActive",
           table.concat(order, ","))
-        T.ok(St.avengerList ~= nil, "Avenger's list left as it is")
         T.pageMsg({ action = "ready" })
         T.agree("after the reset")
         -- Again, the Mac mode off already: the note, nothing described.

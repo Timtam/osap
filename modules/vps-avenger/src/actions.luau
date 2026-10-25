@@ -73,15 +73,16 @@
 --   central_drum_sq_speed {item}, central_drum_sq_sequence_menu_item {item}, central_drum_sq_length
 --   {steps}, central_drum_sq_control {control}, reset_central_drum_sq_control {control}
 --
--- and the expansion browser (the plan's slice 9, src/actions/browser.luau), every click on the words
--- READ in a picture of it, never on the tool's point for an index: the view, Close and FAV through
--- src/act.luau; the others trips of its own that move a list a step at a time where the name is not
--- read in it; Go to Category the database's, with no trip:
+-- and the expansion browser (the plan's slice 9, src/actions/browser.luau), every expansion, category
+-- and preset clicked by its place, as the tool clicks them — the preset database's lists and the
+-- tool's page and scroll tables (src/tables/pages.luau) — and confirmed by the header's names: the
+-- view, Close and FAV through src/act.luau; the others trips of its own; Go to Category the
+-- database's, with no trip:
 --
 --   set_expansion_view {view}, close_expansion, toggle_expansion_favorite_view {enabled},
 --   open_expansion {index, page_start, visible_index}, select_expansion_category {index, total},
 --   select_all_expansion_presets, go_to_loaded_preset_category, select_expansion_preset {…},
---   load_expansion_preset {…}, mark_expansion_preset_favorite {…}, read_expansion_list,
+--   load_expansion_preset {…}, mark_expansion_preset_favorite {…},
 --   align_open_expansion (the page's Settings section, the plan's slice 10: no click)
 --
 -- Nothing is taken for done: every answer is what was read after the click, and a read that did
@@ -360,8 +361,7 @@ A.HANDLERS.pick_initialize_preset = function(o)
         local w2 = E.plugin()
         local before = S.values(w2 and w2.id)
         local okR, values, whyNot = pcall(Reads.read, m, { zoom = origin and E.zoomOf(origin), mark = m:here(),
-          expected = before and before.selectedExpansion or nil, expectedFromDatabase = before and before.selectedFromDatabase,
-          window = w2 and w2.id })
+          expected = before and before.selectedExpansion or nil, window = w2 and w2.id })
         if not (okR and values) then
           log("Initialize Preset: VPS Avenger was not read again — " .. tostring(okR and whyNot or values))
           return t:done({ error = "VPS Avenger cannot be read again now" })
@@ -513,8 +513,14 @@ A.HANDLERS.rename_macro = function(o, args)
   go(o, "rename_macro", function(w, trip) Hv.renameMacro(w, trip, i) end)
 end
 
+-- The user's own browsing of Avenger's browser: where this session's clicks left its lists is not
+-- known after it (src/actions/browser.luau, Bw.forgetPlaces).
 A.HANDLERS.browse_expansion_presets = function(o)
-  go(o, "browse_expansion_presets", function(w, trip, forget) Hv.browse(w, trip, forget) end)
+  go(o, "browse_expansion_presets", function(w, trip, forget)
+    local p = E.plugin()
+    Bw.forgetPlaces(p and p.id, "Browse Presets hands the keyboard to VPS Avenger's browser")
+    Hv.browse(w, trip, forget)
+  end)
 end
 
 -- ── The knobs turned ─────────────────────────────────────────────────────────
@@ -604,7 +610,8 @@ for _, name in ipairs({ "set_expansion_view", "toggle_expansion_favorite_view" }
 end
 
 -- Close Expansion through src/act.luau as the others, and where nothing told whether an expansion
--- was open, the view list its click may have opened looked for after it (Bw.listAfterClose).
+-- was open, the view list its click may have opened looked for after it by its pixels, against
+-- its place's before the click (Bw.listAfterClose).
 A.HANDLERS.close_expansion = function(o, args)
   local label = E.LABELS.close_expansion
   local w = E.plugin()
@@ -613,7 +620,7 @@ A.HANDLERS.close_expansion = function(o, args)
     Act.run(m, spec, function(result)
       -- nil: the trip's own check ended it, and its give-up says the rest.
       if not result then return end
-      if spec.unsure() then return Bw.listAfterClose(m, trip, result, label) end
+      if spec.unsure() then return Bw.listAfterClose(m, trip, result, label, spec.listBefore()) end
       trip:done(result)
     end, trip)
   end)
@@ -656,11 +663,6 @@ for kind, action in pairs({ select = "select_expansion_preset", load = "load_exp
   end
 end
 
-A.HANDLERS.read_expansion_list = function(o)
-  local k = known()
-  go(o, "read_expansion_list", function(w, trip) Bw.list(w, trip, E.LABELS.read_expansion_list, k) end)
-end
-
 -- Correct open Expansion (the tool's, in the page's Settings section): a trip with no click and no
 -- `forget` — nothing in Avenger changes — whose one read of the browser expects no expansion.
 A.HANDLERS.align_open_expansion = function(o)
@@ -670,17 +672,19 @@ end
 
 -- Confirm Expansion View (the tool's action_confirm_expansion_view, in its status menu; here in the
 -- page's Settings section): no trip and no click — the view the user says VPS Avenger shows, stored
--- as confirmed (src/actions/browser.luau, B.confirmView), and the state posted with it where no
--- expansion reads open: the user's word over what was read before, which the next read replaces
--- where a view's label is drawn to read.
+-- as confirmed, and the grid with no expansion open confirmed in the window the page was shown
+-- beside, for that view and the zoom last read there (src/actions/browser.luau, B.confirmView): the
+-- user's word over what was read before, as the tool sets AVGExpansionOpen to 0 whatever it had —
+-- until a read there says an expansion is open, an Open clicks a tile, or the view or the zoom
+-- differs. Refused where the page was not shown beside a window: the grid is confirmed for one.
 A.HANDLERS.confirm_expansion_view = function(_, args)
-  local set, why = Bw.confirmView(args)
-  if not set then return refuse("confirm_expansion_view", why) end
   local w = E.plugin()
   local id = w and w.id
   local v = S.values(id)
-  if id and not (v and v.expansionOpen == true) then S.set(id, set) end
-  log("Confirm Expansion View: " .. set.expansionView)
+  local part, why = Bw.confirmView(args, id, v and v.zoom)
+  if not part then return refuse("confirm_expansion_view", why) end
+  S.part(id, part.keys, part.values)
+  log("Confirm Expansion View: " .. part.values.expansionView)
   E.postState(id)
   E.post({ kind = "error", text = "" })
   E.post({ kind = "restoreFocus" })

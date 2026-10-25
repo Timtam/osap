@@ -382,10 +382,10 @@ fn the_reads_of_one_picture_give_the_tools_state_keys() {
         local snaps, from, asked = S.snaps, #S.pageOrder, S.cellsAsked + S.profilesAsked
         T.pageKey()
         T.ok(S.snaps == snaps + 1, "one picture, in the key's handler")
-        -- The picture's 26 (read/open.luau, the asks: among them DRUM SQ's patterns' rows, one
-        -- profile each, and FAV's two grids of the star column), every one with a callback, and the
-        -- first text read beside them.
-        T.ok(#S.screenOut == 26 and S.cellsAsked + S.profilesAsked == asked + 26 and #S.pageReads == 1,
+        -- The picture's 28 (read/open.luau, the asks: among them DRUM SQ's patterns' rows, one
+        -- profile each, FAV's two grids of the star column, and the browser's picture test's two),
+        -- every one with a callback, and the first text read beside them.
+        T.ok(#S.screenOut == 28 and S.cellsAsked + S.profilesAsked == asked + 28 and #S.pageReads == 1,
           "every question asked at once: " .. #S.screenOut .. ", " .. (S.cellsAsked + S.profilesAsked - asked))
         T.ok(T.pageSince(from) == "", "nothing posted or shown in the key's handler: " .. T.pageSince(from))
         local early = {}
@@ -395,7 +395,7 @@ fn the_reads_of_one_picture_give_the_tools_state_keys() {
         T.tick()
         -- Then a grid for the three macro knobs' rings and one for the oscillator's three
         -- (read/knob.luau), in the last answer's handler.
-        T.ok(S.cellsAsked + S.profilesAsked == asked + 28, "the knobs' grids after: " .. (S.cellsAsked + S.profilesAsked - asked))
+        T.ok(S.cellsAsked + S.profilesAsked == asked + 30, "the knobs' grids after: " .. (S.cellsAsked + S.profilesAsked - asked))
         T.ok(T.pageSince(from) == "post state,post error,post focus,show,sound sounds/Open.wav", T.pageSince(from))
         asked = S.cellsAsked + S.profilesAsked
         T.tick()
@@ -435,7 +435,7 @@ fn the_reads_of_one_picture_give_the_tools_state_keys() {
           "[avenger] [read] strip: the tabs' bottom strips, darkest selected:", "OSC 1 Mute 100.0 % red",
           "[avenger] [read] macros: button 1 highlight ", "ON; button 2 highlight 0.0 %", "[avenger] [read] oscillator: Level ",
           "[avenger] [read] expansion: FAV not read — no expansion reads open", "[avenger] [read] words: preset 'LD Lead 1'",
-          "[avenger] [read] 26 questions of one picture; the picture ", "[avenger] [page] shown beside" }) do
+          "[avenger] [read] 28 questions of one picture; the picture ", "[avenger] [page] shown beside" }) do
           T.ok(T.count(line) == 1, "the log: " .. line)
         end
     "##.replace("@WORDS@", WORDS));
@@ -597,8 +597,8 @@ fn what_a_read_could_not_find_is_not_read() {
         T.ok(o.drums_mute == false and o.trig_solo == false, "a switch on a picture shows off")
         T.ok(m.count == nil and m.selected_index == nil and m.tabs == nil and m.amount_values[1] == nil,
           "the macros not read")
-        T.ok(T.count("[avenger] [read] expansion: the header reads no name — no expansion open, the view 8 per Row stored")
-          == 1, T.dump())
+        T.ok(T.count("[avenger] [read] expansion: the header reads no name (blank); title band 0.0 % lit, list bar 0.0 % "
+          .. "lit — the grid: no expansion open, the view 8 per Row stored") == 1, T.dump())
         T.ok(T.count("[avenger] [read] strip: the tabs read whole — no count") == 1, T.dump())
     "##);
     run_mac(r##"
@@ -616,22 +616,26 @@ fn what_a_read_could_not_find_is_not_read() {
     "##);
 }
 
-/// The browser told by its header (read/browser.luau, Br.state): the header's name read as an
-/// expansion's, that one open, with the database's lists, marked, and the preset placed in it the
-/// one loaded — and no area read. Nothing read in the header: no expansion open, the view the one
-/// stored, "8 per Row" by default (this Avenger draws no view's label: `Expansions/Avenger 100
-/// closed.png`). The header reading no name: the area is read as text — a second read of the same
-/// picture, the only one — and with the preset database the presets it names give the open
-/// expansion; without the database, two words of an open expansion's say an expansion is open,
-/// which one not read. A caption that reads a view reads no area.
+/// The browser told by its header and the picture test (read/browser.luau, Br.state): the header's
+/// name read as an expansion's, that one open, with the database's lists, the preset placed in it
+/// the one loaded. Nothing drawn in the header and no title in its band: no expansion open, the view
+/// the one stored, "8 per Row" by default (this Avenger draws no view's label: `Expansions/Avenger
+/// 100 closed.png`). A text in the header that is no expansion's name over a picture of the grid
+/// settles nothing. A caption that reads a view is the grid in that view. The browser's area, its
+/// categories and its preset rows are never read as text (the maintainer's decision of 2026-10-25).
 #[test]
-fn an_open_expansion_is_read_from_its_header_or_else_the_browsers_area() {
-    run_mac(r##"
+fn an_open_expansion_is_read_from_its_header_and_the_grid_from_the_header_and_its_picture() {
+    let none_below = r##"
+        for _, r in ipairs(S.recognized) do
+          T.ok(r.name ~= "browser area" and r.name ~= "categories" and r.name ~= "presets", "nothing below the header read")
+        end
+    "##;
+    run_mac(&format!(r##"
         local S = T.S
         T.presets()
         T.avengerAt80("Init Preset")
         T.pageReady()
-        T.words({ preset = "LD Lead 2", ["expansion name"] = "Delta" })
+        T.words({{ preset = "LD Lead 2", ["expansion name"] = "Delta" }})
         T.openPage()
         local st = T.lastPost("state").state
         T.ok(st.expansion_open == true and st.selected_expansion == "Delta" and st.expansion_view == nil
@@ -639,59 +643,44 @@ fn an_open_expansion_is_read_from_its_header_or_else_the_browsers_area() {
         T.ok(table.concat(st.expansion_categories, "|") == "Leads" and st.expansion_lists_from_database == true,
           "its lists, the database's")
         T.ok(st.loaded_expansion_preset_index == 1 and st.expansion == "Delta", "the preset loaded")
-        for _, r in ipairs(S.recognized) do T.ok(r.name ~= "browser area", "no area read") end
-        T.ok(T.count("the header reads 'Delta' — Delta open (exact)") == 1, T.dump())
-    "##);
-    run_mac(r##"
+        T.ok(T.count("expansion: the header reads 'Delta' — Delta open (exact)") == 1, T.dump())
+        {none_below}
+    "##));
+    run_mac(&format!(r##"
         local S = T.S
         T.presets()
         T.avengerAt80("Init Preset")
         T.pageReady()
-        T.words({ preset = "LD Lead 2", ["browser area"] = "Leads LD Lead 1 LD Lead 2 LD Lead 3" })
+        T.words({{ preset = "LD Lead 2" }})
         T.openPage()
         local st = T.lastPost("state").state
         T.ok(st.expansion_open == false and st.expansion_view == "8 per Row" and st.expansion_view_from == "stored"
           and st.selected_expansion == "", "closed, the view stored: " .. tostring(st.expansion_view_from))
-        for _, r in ipairs(S.recognized) do T.ok(r.name ~= "browser area", "no area read") end
-    "##);
-    run_mac(r##"
+        {none_below}
+    "##));
+    run_mac(&format!(r##"
         local S = T.S
         T.presets()
         T.avengerAt80("Init Preset")
         T.pageReady()
-        T.words({ preset = "LD Lead 2", ["expansion name"] = "~", ["browser area"] = "Leads LD Lead 1 LD Lead 2 LD Lead 3" })
+        T.words({{ preset = "LD Lead 2", ["expansion name"] = "Qqx" }})
         T.openPage()
         local st = T.lastPost("state").state
-        T.ok(st.expansion_open == true and st.selected_expansion == "Delta" and st.expansion_view == nil
-          and st.selected_expansion_from_database == true, "Delta open, by the database")
-        T.ok(table.concat(st.expansion_categories, "|") == "Leads"
-          and table.concat(st.expansion_presets, "|") == "LD Lead 1|LD Lead 2|LD Lead 3"
-          and table.concat(st.expansion_preset_categories, "|") == "Leads|Leads|Leads"
-          and st.expansion_lists_from_database == true, "its lists, the database's")
-        T.ok(st.loaded_expansion_preset_index == 1 and st.expansion == "Delta", "the preset loaded")
-        local asked = false
-        for _, r in ipairs(S.recognized) do if r.name == "browser area" and r.snapshot then asked = true end end
-        T.ok(asked and T.count("Delta, by its presets named (18)") == 1, T.dump())
-    "##);
-    run_mac(r##"
+        T.ok(st.expansion_open == nil and st.selected_expansion == nil, "not read: " .. tostring(st.expansion_open))
+        T.ok(T.count("expansion: the header reads 'Qqx', no expansion's name; title band 0.0 % lit, list bar 0.0 % lit — the grid "
+          .. "— not taken as closed") == 1, T.dump())
+        {none_below}
+    "##));
+    run_mac(&format!(r##"
         local S = T.S
         T.avengerAt80("Init Preset")
         T.pageReady()
-        T.words({ ["expansion name"] = "~", ["browser area"] = "Bass Leads Pads" })
-        T.openPage()
-        local st = T.lastPost("state").state
-        T.ok(st.expansion_open == true and st.selected_expansion == "" and st.expansion_categories == nil, "open, not named")
-    "##);
-    run_mac(r##"
-        local S = T.S
-        T.avengerAt80("Init Preset")
-        T.pageReady()
-        T.words({ ["expansion view"] = "4 per Row", ["browser area"] = "Bass Leads Pads" })
+        T.words({{ ["expansion view"] = "4 per Row" }})
         T.openPage()
         local st = T.lastPost("state").state
         T.ok(st.expansion_view == "4 per Row" and st.expansion_view_from == nil and st.expansion_open == false, "the view")
-        for _, r in ipairs(S.recognized) do T.ok(r.name ~= "browser area", "no area read") end
-    "##);
+        {none_below}
+    "##));
 }
 
 /// A press while another's reads are out reads afresh, and only the latest press's answer shows the
@@ -838,7 +827,7 @@ local function counted()
   count("drumsq", { "decide" })
   count("drums", { "decide" })
   count("macros", { "selected", "buttons", "labels", "count" })
-  count("expansion", { "favorite", "fromArea", "parseView" })
+  count("expansion", { "favorite", "look", "parseView" })
   count("knob", { "macro", "macros", "osc", "oscMiddles" })
 end
 local function within(bounds)
@@ -1807,43 +1796,45 @@ fn the_page_claims_nothing_of_drum_sq_at_a_click_and_reads_the_slot_lists_either
     }
 }
 
-/// The browser's page edits (the plan's slice 9, §7): Read Avenger's List is a button of the browser's
-/// view row with its action, hidden while an expansion is open; the state's `expansions_from_avenger`,
-/// `expansions_marks` and `selected_expansion_from_database` are read in applyState; the list's label
-/// says whose list it is; a name the database spelt is marked in its button's aria-label, never in
-/// its text, so the search still filters by the name; the open expansion's heading carries the mark,
+/// The browser's page edits (the plan's slice 9, §7, and the third Mac test of the page,
+/// 2026-10-25): Read Avenger's List is gone — the lists are the preset database's, never read off
+/// the grid (the maintainer's decision) — from the markup, the script and its list of actions; the
+/// state's `selected_expansion_from_database` is read in applyState; the list's label says it is the
+/// database's; a roster's expansion without data is marked in its button's aria-label, never in its
+/// text, so the search still filters by the name; the open expansion's heading carries the mark,
 /// and whether an expansion is known is told by the name the module posted, not by the heading.
+/// Confirm Expansion View's help says it confirms the grid with no expansion open.
 #[test]
 fn the_browsers_page_edits_read_the_new_keys_and_mark_in_aria_labels_only() {
     let html = INDEX_HTML.replace("\r\n", "\n");
     let js = PANEL_JS.replace("\r\n", "\n");
-    let row = html.find("id=\"expansion-view-row\"").expect("the view row");
-    let at = html.find("id=\"read-expansion-list-button\"").expect("index.html has Read Avenger's List");
-    let end = html.find("id=\"expansion-search-section\"").expect("the search's section after the row");
-    assert!(at > row && at < end, "the button is in the view row");
-    let tag = &html[html[..at].rfind('<').unwrap()..at + html[at..].find('>').unwrap()];
-    assert!(
-        tag.contains("data-action=\"read_expansion_list\"")
-            && tag.contains("title=\"Read the expansions VPS Avenger lists, in its order, and show them here for this session.\""),
-        "{tag}"
-    );
+    for gone in ["read-expansion-list-button", "read_expansion_list", "Read Avenger's List"] {
+        assert!(!html.contains(gone) && !js.contains(gone), "{gone} is still on the page");
+    }
+    for gone in ["expansions_from_avenger", "expansions_marks", "currentExpansionsFromAvenger", "as VPS Avenger lists them"] {
+        assert!(!js.contains(gone), "panel.js still has {gone}");
+    }
     let apply = js.find("function applyState(s) {").expect("panel.js has applyState");
     let apply_end = apply + js[apply..].find("\n  }\n").expect("applyState ends");
-    for key in ["s.expansions_from_avenger", "s.expansions_marks", "s.selected_expansion_from_database"] {
-        let i = js.find(key).unwrap_or_else(|| panic!("panel.js reads {key}"));
-        assert!(i > apply && i < apply_end, "{key} is read outside applyState");
-    }
-    assert!(js.contains("readList.hidden = currentExpansionOpen === true;"), "the button hidden while an expansion is open");
-    assert!(js.contains("', as VPS Avenger lists them'"), "the list's label says it is Avenger's");
+    let i = js.find("s.selected_expansion_from_database").expect("panel.js reads selected_expansion_from_database");
+    assert!(i > apply && i < apply_end, "selected_expansion_from_database is read outside applyState");
     let search = js.find("function renderExpansionSearch() {").expect("panel.js has renderExpansionSearch");
     let body = &js[search..search + js[search..].find("\n  }\n").unwrap()];
     assert!(
-        body.contains("btn.setAttribute('aria-label', `${item.name}, from the database`);") && body.contains("btn.textContent = item.name;"),
-        "the mark in the aria-label, the text the name: {body}"
+        body.contains("btn.setAttribute('aria-label', `${item.name}, no presets in the database`);")
+            && body.contains("btn.textContent = item.name;")
+            && body.contains("(currentExpansionsFromDatabase ? ', from the database' : '')"),
+        "the mark in the aria-label, the text the name, the list the database's: {body}"
     );
-    assert!(!body.contains("textContent = `${item.name}, from"), "the mark in the button's text");
+    assert!(!body.contains("textContent = `${item.name}, "), "the mark in the button's text");
     assert!(js.contains("(currentSelectedFromDatabase ? `${selected}, from the database` : selected)"), "the heading's mark");
     assert!(js.contains("const hasKnownExpansion = currentSelectedExpansion !== '';"), "known by the name posted");
+    let at = html.find("id=\"settings-expansion-view-trigger\"").expect("Confirm Expansion View");
+    let tag = &html[at..at + html[at..].find('>').unwrap()];
+    assert!(
+        tag.contains("title=\"Tell the page which Expansion View VPS Avenger's grid is in, with no expansion open — nothing in VPS Avenger changes.\""),
+        "{tag}"
+    );
 }
 
 /// Every action the tool's page sends (inventory A of the port's plan, §11.1: its panel/pages.py),
@@ -1878,16 +1869,15 @@ const TOOL_PAGE_ACTIONS: &[&str] = &[
 /// is daw-hosts' to derive (modules/daw-hosts: DAW knowledge only there).
 const DROPPED: &[&str] = &["toggle_windows_reaper_rect_x"];
 
-/// The port's own: Read Avenger's List (slice 9), the Settings section's two (slice 10), and the
-/// tool's Confirm OSC Count and Confirm Expansion View, from its status menu, in the Settings
-/// section (the second Mac test of the page, 2026-10-24).
-const PORT_OWN: &[&str] = &["read_expansion_list", "set_setting", "reset_settings", "confirm_osc_count",
-    "confirm_expansion_view"];
+/// The port's own: the Settings section's two (slice 10), and the tool's Confirm OSC Count and
+/// Confirm Expansion View, from its status menu, in the Settings section (the second Mac test of the
+/// page, 2026-10-24). Read Avenger's List, the port's own of slice 9, is gone with the third.
+const PORT_OWN: &[&str] = &["set_setting", "reset_settings", "confirm_osc_count", "confirm_expansion_view"];
 
 /// The page's list against what it sends: every name the script quotes as an action and every
 /// `data-action` of the markup is on ACTIONS, every name on ACTIONS is sent from somewhere — a
 /// quote outside the list, or the markup — and the list is the tool's 81 page actions less the one
-/// the port drops, with the port's own five: the port is closed. Then the module: every name on
+/// the port drops, with the port's own four: the port is closed. Then the module: every name on
 /// ACTIONS has the words of its answer, and either a handler or a place on the explicit list of
 /// actions not built yet, never both — and that list is empty; and nothing the module lists is a
 /// name the page does not send. Sent while the page has the keyboard, each one not built would be
@@ -1896,7 +1886,7 @@ const PORT_OWN: &[&str] = &["read_expansion_list", "set_setting", "reset_setting
 fn every_action_the_page_sends_is_on_its_list_and_answered_by_the_module() {
     let actions = page_actions();
     assert_eq!(TOOL_PAGE_ACTIONS.len(), 81, "the tool's page sends 81 actions");
-    assert_eq!(actions.len(), 85, "the tool's 81, less the one dropped, and the port's five: {actions:?}");
+    assert_eq!(actions.len(), 84, "the tool's 81, less the one dropped, and the port's four: {actions:?}");
     let mut sorted = actions.clone();
     sorted.sort();
     sorted.dedup();

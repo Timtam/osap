@@ -17,7 +17,8 @@
 --   drums_menu_item, trig_menu_item   Initialize in the tab's menu; the strip read
 --   reset_osc_control     a double-click on the selected oscillator's knob — with the right
 --                         button for Pan and Random Pitch, as the tool does — never while Drums or
---                         Trig is selected (the tool clicked there all the same); the knob read
+--                         Trig is selected (the tool clicked there all the same); the knob read,
+--                         and said against the tool's default (Act.resetAnswer)
 --
 -- Each builder is `(args, label, known) -> spec | nil, why`: `args` the page's (or the ring's
 -- own), `label` the action's words, `known` the values last read in this window (state.luau's,
@@ -28,6 +29,7 @@ local OSC = host.include("src/tables/osc.luau")
 local Strip = host.include("src/read/strip.luau")
 local Open = host.include("src/read/open.luau")
 local Knob = host.include("src/read/knob.luau")
+local Act = host.include("src/act.luau")
 
 local A = {}
 
@@ -290,19 +292,25 @@ A.drums_menu_item = tabMenu(T.DRUMS_TAB_X, "Drums")
 A.trig_menu_item = tabMenu(T.TRIG_TAB_X, "Trig")
 
 -- The selected oscillator's controls a double-click resets, by the page's names: the knob, the
--- reader's value and its words. Pan is Level's knob and Random Pitch Fine Tune's, with the right
--- button (OSC.RIGHT_BUTTON).
+-- reader's value, its words, and the value's words alone (`value`, for a reset's answer). Pan is
+-- Level's knob and Random Pitch Fine Tune's, with the right button (OSC.RIGHT_BUTTON).
+local function percent(v) return v .. " percent" end
+local function semitones(v) return v .. " semitones" end
+local function cents(v) return v .. " cents" end
 local CONTROLS = {
-  volume = { field = "volume", words = function(v) return "Volume " .. v .. " percent" end },
-  pan = { field = "pan", words = function(v) return "Pan " .. v end },
-  transpose = { field = "transpose", words = function(v) return "Transpose " .. v .. " semitones" end },
-  fine_tune = { field = "fineTune", words = function(v) return "Fine Tune " .. v .. " cents" end },
-  random_pitch = { field = "randomPitch", words = function(v) return "Random Pitch " .. v end },
+  volume = { field = "volume", value = percent, words = function(v) return "Volume " .. percent(v) end },
+  pan = { field = "pan", value = tostring, words = function(v) return "Pan " .. v end },
+  transpose = { field = "transpose", value = semitones, words = function(v) return "Transpose " .. semitones(v) end },
+  fine_tune = { field = "fineTune", value = cents, words = function(v) return "Fine Tune " .. cents(v) end },
+  random_pitch = { field = "randomPitch", value = tostring, words = function(v) return "Random Pitch " .. v end },
 }
 A.CONTROLS = CONTROLS
 A.CONTROL_NAMES = { volume = "Volume", pan = "Pan", transpose = "Transpose", fine_tune = "Fine Tune",
   random_pitch = "Random Pitch" }
 
+-- A reset: the double-click, then the knob read and said against the control's default (the tool's,
+-- OSC.DEFAULTS; Act.resetAnswer): reset, already at its default, not its default, unchanged, or not
+-- read.
 function A.reset_osc_control(args, label)
   local key = args.control
   local c, p = CONTROLS[key], OSC.CONTROLS[key]
@@ -324,12 +332,9 @@ function A.reset_osc_control(args, label)
       local a = valueOf(va)
       return a ~= nil and a == valueOf(vb)
     end,
-    answer = function(_, va, how)
-      local a = valueOf(va)
-      if a == nil then return { error = A.CONTROL_NAMES[key] .. " cannot be read now" } end
-      local words = c.words(a)
-      if how == "unchanged" then return { note = "unchanged, " .. words, said = words .. ", unchanged" } end
-      return { said = words, focus = "osc-reset-" .. string.gsub(key, "_", "-") }
+    answer = function(vb, va)
+      return Act.resetAnswer(label, A.CONTROL_NAMES[key], c.value, valueOf(vb), valueOf(va), OSC.DEFAULTS[key],
+        "osc-reset-" .. string.gsub(key, "_", "-"))
     end,
   }
 end

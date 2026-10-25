@@ -1,7 +1,11 @@
 -- The page's renames and Browse Presets (the plan's slice 6): the avenger_control tool's rename and
 -- return modes, as hand-overs of the overlay runtime's (trip:handOver, docs/api/overlay.md). The
 -- user works in Avenger's own editor or browser, and what Avenger shows after it is READ: this
--- module records, sends and types no key (the maintainer's decision of 2026-10-12).
+-- module records, sends and types no key (the maintainer's decision of 2026-10-12). Tab and
+-- Shift+Tab do nothing meanwhile — swallowed with the runtime's `swallow` (Act.SWALLOWED), since
+-- Avenger on Windows switches its oscillators on Tab — and the first of them says once how the
+-- hand-over ends (Hv.RENAME_ENDS, Hv.FIELD_ENDS, Hv.BROWSE_ENDS; the maintainer's decision of
+-- 2026-10-25).
 --
 --   start_rename      the field double-clicked where the tool double-clicks it — the preset's name,
 --   rename_osc        the OSC tab, the macro knob's or button's field — and Avenger's editor seen
@@ -68,6 +72,12 @@ Hv.BROWSE_SLOT = "Use the Avenger browser. To return to Avenger Control, press R
 Hv.NOT_OPEN = "VPS Avenger's editor did not open; nothing was renamed"
 Hv.STILL_OPEN = "VPS Avenger's editor is still open: Return keeps the name, Escape cancels."
 Hv.NOT_READ = "the new name cannot be read now"
+-- What a hand-over says once, at the first Tab or Shift+Tab it swallows (Act.swallow: Avenger on
+-- Windows switches its oscillators on Tab): a rename's — a sample field's holds a value — and a
+-- browser's, the tool's own words for its return mode.
+Hv.RENAME_ENDS = "Return keeps the name, Escape cancels."
+Hv.FIELD_ENDS = "Return keeps the value, Escape cancels."
+Hv.BROWSE_ENDS = "To return to Avenger Control, press Return."
 Hv.NO_KEYBOARD = "the keyboard cannot be handed to VPS Avenger now"
 
 local function log(fmt, ...)
@@ -253,7 +263,8 @@ function Hv.rename(o, trip, F)
         -- The edges are what is kept: no picture is held while the user types.
         release(held)
         if not trip:inFront() then return end
-        local handed, errH = trip:handOver({ kind = "typing", ends = ends, onEnd = onEnd })
+        local handed, errH = trip:handOver({ kind = "typing", ends = ends, onEnd = onEnd,
+          swallow = Act.swallow(F.kind == "sample" and Hv.FIELD_ENDS or Hv.RENAME_ENDS) })
         if handed or not trip.live then return end -- not live: given up, and onGiveUp posts it
         log("'%s': the keyboard was not handed over (%s); VPS Avenger's editor is open", F.kind, tostring(errH))
         over({ error = Hv.NO_KEYBOARD .. "; its editor is still open" })
@@ -445,6 +456,7 @@ function Hv.browse(o, trip, forget)
   end
   local handed, err = trip:handOver({
     kind = "browse",
+    swallow = Act.swallow(Hv.BROWSE_ENDS),
     onEnd = function(o2, t2, how)
       if how ~= "ended" or not t2:inFront() then return end
       E.ring.settledName(o2, function(name, n)
@@ -570,7 +582,7 @@ local function browseName(o, trip, F)
     end
   end
 
-  local handed, errH = trip:handOver({ kind = "browse", onEnd = onEnd })
+  local handed, errH = trip:handOver({ kind = "browse", onEnd = onEnd, swallow = Act.swallow(Hv.BROWSE_ENDS) })
   if not handed then
     release(held)
     if not trip.live then return end -- given up already: onGiveUp posts it
@@ -727,7 +739,7 @@ function Hv.browseEnvelope(o, trip, button, label)
     end
   end
 
-  local handed, errH = trip:handOver({ kind = "browse", onEnd = onEnd })
+  local handed, errH = trip:handOver({ kind = "browse", onEnd = onEnd, swallow = Act.swallow(Hv.BROWSE_ENDS) })
   if not handed then
     release(held)
     if not trip.live then return end -- given up already: onGiveUp posts it

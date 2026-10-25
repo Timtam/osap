@@ -14,13 +14,15 @@
 --   macro_button_menu_item  a button's menu, its item once (a tick: a second click would undo it);
 --                           then the buttons' change waited for and both read again — Special
 --                           Switch may turn the other one off
---   reset_macro_amount      a double-click on the knob; the knob reader's amount after it
+--   reset_macro_amount      a double-click on the knob; the knob reader's amount after it, said
+--                           against the tool's default, 0 (Act.resetAnswer)
 --
 -- Builders as osc.luau's: `(args, label, known) -> spec | nil, why`, `known` the values last read
 -- in this window, for words (a name, the tab shown for the page's focus) and never a decision.
 
 local M = host.include("src/tables/macros.luau")
 local Knob = host.include("src/read/knob.luau")
+local Act = host.include("src/act.luau")
 
 local A = {}
 
@@ -226,13 +228,11 @@ function A.reset_macro_amount(args, label, known)
       local a = va.macroAmounts and va.macroAmounts[i]
       return a ~= nil and a == (vb.macroAmounts and vb.macroAmounts[i])
     end,
-    answer = function(vb, va, how)
-      local name = nameOf(i, vb, known, "macro knob " .. i)
-      local a = va and va.macroAmounts and va.macroAmounts[i]
-      if a == nil then return { error = name .. "'s knob cannot be read now" } end
-      local words = name .. " " .. a .. " percent"
-      if how == "unchanged" then return { note = "unchanged, " .. words, said = words .. ", unchanged" } end
-      return { said = words, focus = string.format("macro-%d-slot-%d-reset-amount", shown(vb, va, known), i) }
+    -- Said against the knob's default, the tool's (M.AMOUNT_DEFAULT; Act.resetAnswer).
+    answer = function(vb, va)
+      local function amount(v) return v and v.macroAmounts and v.macroAmounts[i] end
+      return Act.resetAnswer(label, nameOf(i, vb, known, "macro knob " .. i), function(a) return a .. " percent" end,
+        amount(vb), amount(va), M.AMOUNT_DEFAULT, string.format("macro-%d-slot-%d-reset-amount", shown(vb, va, known), i))
     end,
   }
 end

@@ -258,7 +258,7 @@ and to build it as soon as the usage allows.
 
 ## Keys that must not reach a plug-in during a hand-over (2026-10-25)
 
-- [ ] **Tab reaches the plug-in during a hand-over (2026-10-25, from the maintainer, oral report
+- [x] **Tab reaches the plug-in during a hand-over (2026-10-25, from the maintainer, oral report
       from Windows).** VPS Avenger on Windows switches its oscillators on Tab. The ring captures
       Tab, but a hand-over that lets the user work in Avenger directly does not: the knob hold
       (`trip:handOver{ kind = "keys" }` / `O:holdKeys`: PageUp, PageDown, Return, Escape), a rename
@@ -270,6 +270,51 @@ and to build it as soon as the usage allows.
       while it lasts, declared by the module (Avenger: Tab and Shift+Tab), with docs
       (Returns/Errors) and tests. Built right after the third Mac test's fixes (`wip/fix-test3`),
       which touch the same files.
+- [x] **Built (2026-10-25, `wip/fix-test3`; overlay runtime 0.16.0, VPS Avenger 0.13.0).**
+      - **The runtime:** `swallow = { keys, say }` on `trip:handOver` (every kind) and
+        `O:holdKeys`. Its keys, 1 to 8 and none of the spec's own `keys`, are captured for as long
+        as it lasts and handed to nobody: not the plug-in, not `onKey`, not the overlay's own
+        claims of them. In a hold they are the hold's over the overlay's Tab, as `keys` are. `say`,
+        the module's sentence, is said once per hold or hand-over, interrupting, at the first key
+        swallowed with the plug-in's window in front; every press is logged. Every end gives them
+        back with the rest, and in a hold the overlay takes its own Tab again. Code:
+        `Overlay._swallowOf`, `Overlay:_holdSwallowed` and `pg.handOverSwallowed`.
+      - **The host, for `"typing"` and `"browse"`:** while their menu flag counts, the hook lets
+        every captured key through, so `host.keys.capture` has a new option,
+        `menu = "through" | "taken"`, `"through"` the default. `"taken"` keeps the key the
+        capture's while a menu flag counts (`Captured::menu_taken`, `capture_decision`). It is not
+        recorded for `passedThrough`, which needs `menu_taken` in the Windows hook's record of
+        Return and Escape and `!taken` in the Mac tap's `decide`. A menu the system drew still
+        gets the key. A bad value raises.
+      - **VPS Avenger:** `Act.SWALLOWED = { "Tab", "Shift+Tab" }` on all six hand-overs:
+        - the page's knob and the ring's knob, "Return confirms, Escape cancels.";
+        - a rename, "Return keeps the name, Escape cancels.", and a sample field, "Return keeps the
+          value, Escape cancels.";
+        - Browse Presets, a drum slot's Browse, a row of the sample browser and the envelope's
+          Menu and Preset, "To return to Avenger Control, press Return.".
+
+        The ring's Tab no longer moves on while a knob is held.
+      - **Docs:**
+        - keys.md: `capture`'s signature, "In a menu" with an example, Raises, and `menuOpen`;
+          `passedThrough`, with its Windows and macOS blocks.
+        - overlay.md: `trip:handOver` (signature, the `swallow` paragraph, the call's line, Cost,
+          the example, the capture-errors row, Raises) and `O:holdKeys` (signature, a bullet, the
+          example, the errors row, Raises).
+        - building-a-page.md: a paragraph.
+      - **Tests:**
+        - `capture_decision_tests` and the Mac tap's source test;
+        - the Windows hook's source test;
+        - `captures::tests` and `key_scope_tests`, through the real binding;
+        - `overlay_handover_tests`: every kind on both systems, said once per hand-over, every end
+          giving them back, another window in front, the raises;
+        - `overlay_mac_test2_tests`: the hold, a menu flag, recapture, ended, replaced and left;
+        - the Avenger tests: the ring's and the page's knob, the rename, Browse, and the captures
+          made.
+      - **Open, live:**
+        - on Windows: that Avenger's oscillator stays put on Tab in all three hand-overs, and the
+          sentence;
+        - on a Mac: the same through the event tap; a Tab with VoiceOver's modifiers held is
+          VoiceOver's and never reaches it.
 
 ## API rule: failures are typed, not sentences (2026-10-11, from the maintainer)
 
@@ -676,6 +721,111 @@ and to build it as soon as the usage allows.
       does not follow: an error stored in a table's field or an upvalue and handed on from another
       function, and one passed through a helper defined in another function.
 
+## The third Mac test of the Avenger page (2026-10-25)
+
+The third Mac test of the Avenger page (build 0f0b19b, Logic, VPS Avenger at 80 % on one 1920x1080
+display at backing scale 1.00), with the tester's notes and the avenger_control developer's second
+comparison report beside it (its points §1 to §8). Two findings: no knob's reset took from a value
+off its default — Volume 160 %, Pan -75, Transpose +24 and +12, Fine Tune -100, each read the same
+before and after the reset — and no expansion opened: over the grid the header's name region read
+`none`, never `blank`, so the browser's state was not read and nothing was clicked, the place path
+behind that gate never reached (§5). The same day's correction of the maintainer: no text
+recognition in the expansion browser below its header — the developer of the tool tried it at length
+— the lists are the preset database's and the places the tool's tables. The fix: the host's
+double-click and O.doubleClick on it (the overlay runtime 0.15.0), the 1,034 ms block of
+`window.focusChain()` (MW17, below), and vps-avenger 0.12.0:
+
+- [x] **T3-1. A real double-click in the host (§3).** **Built.** `host.input.click(x, y, { clicks = 2 })`:
+      on a Mac the pointer moved, a press and release with `kCGMouseEventClickState` 1, about 20 ms
+      apart, 60 ms, then a press and release with click state 2, the button the call names, made on
+      the host's `input-gesture` thread, the window at the point read before each press (the clicked
+      program's windows only) and the second half not sent where it changed (`covered`); on Windows
+      two `SendInput` pairs at the same point within the double-click time; the callback once after
+      the whole gesture, and one `[input] double-click …` line with the times measured. O.doubleClick
+      is that one call (the overlay runtime 0.15.0). Docs: input.md, overlay.md. **The Mac tester
+      confirms:** a Reset's `[input] double-click at … click states 1 and 2 …` line, press to release
+      about 20 ms and press to press about 80; whether Avenger takes the second press as a
+      double-click (one reset from a value off the default, T3-2); and that no real double-click is
+      cut (`— the second click not sent`, with both window numbers, would say a window of Avenger's
+      came over the point between the halves).
+- [x] **T3-2. A reset said against the tool's default (§7).** **Built.** The oscillator's controls and
+      the macro knobs (src/act.luau, `Act.resetAnswer`): the knob read before and after the
+      double-click against its default, the tool's (Volume 100 %, Pan, Transpose, Fine Tune and Random
+      Pitch 0, a macro's amount 0; tables/osc.luau `DEFAULTS`, tables/macros.luau `AMOUNT_DEFAULT`):
+      "…, reset"; "…, already at its default"; "…, not its default …; the reset is not confirmed";
+      "…, unchanged; the reset failed"; "… cannot be read now; whether it was reset is not
+      confirmed". One log line a reset with the three values; what is posted is what was read, never
+      the default. Tests: `avenger_osc_macros_tests.rs` (`a_reset_is_said_against_the_tools_default`).
+      **The Mac tester confirms**, each once from the ring and once from the page: Volume from about
+      160 %, then Reset level — "Volume 100 percent, reset"; Pan far left and far right, Reset pan —
+      "Pan 0, reset"; Transpose +24 and -24, Reset transpose — 0; Fine Tune +100 or -100, Reset fine
+      tune — 0; a macro knob from 40 — 0; and the log's `[avenger] [act] '…': before …, after …, its
+      default … (the tool's) — reset` lines.
+- [x] **T3-3. The expansion browser by the database and by place (§5, §6 and the maintainer's
+      correction).** **Built.** Nothing below the browser's header is read as text any more: the
+      grid's names, the categories and the preset rows are not asked (src/read/browser.luau), and
+      **Read Avenger's List is gone** — from the module, the page, the settings' answer and the
+      docs; the lists are the tool's four rosters. The state, in this order (`Br.state`): a view's
+      caption; the header's name, one of the catalog's or the roster's; a **picture test** of the
+      header's title band and the categories' scrollbar, pixels only, measured on the second test's
+      22 pictures of the grid (0.00 % lit in the band, 0 to 5 % in the bar) and 3 of an expansion
+      open (3.0 to 7.4 %, 26 to 36.5 %) — a lit band is an expansion open whatever its name reads;
+      the header `blank` with no title, or `blank` or `none` with no title and the bar dark, the
+      grid; and **Confirm Expansion View**, which now confirms the grid with no expansion open for
+      its window, view and zoom (the tool's `action_confirm_expansion_view`, AVGExpansionOpen = 0),
+      forgotten where a read says an expansion is open, at an Open's tile click, where the user's own
+      Browse Presets had Avenger's browser (`Bw.forgetPlaces`), and for another view or zoom — never
+      by time; Set Expansion View confirms it too. It settles only a header nothing is read in
+      (`blank` or `none`), never one a text is read in, which is an expansion open whatever was
+      confirmed (the review of 2026-10-25). `none` alone never says the grid.
+      The name's crop (X.NAME_TEXT) now ends at 54, above the grid's first row of tiles, whose dark
+      outlines made the crop's ink on 21 of the 22 pictures of the grid: there it reads `blank` again.
+      Open goes by its place always (`B.byPlace`), confirmed by the header's name; a title lit and
+      no name read, the one at the place clicked, marked as the database's. A category by the tool's
+      row and its scrollbar's ends (`Pg.category`), a preset by the tool's measured pages for its
+      category's size and its scrollbar clicks (`Pg.presetPlace`, `Pg.presetScroll`), its category
+      clicked first where this session's clicks did not leave it shown; Select and Load confirmed by
+      the preset's name read after them, another name said and where the lists stand forgotten; the
+      stars read at the rows this session's clicks placed. Correct open Expansion reads the header
+      only. Where nothing tells, the view list a Close may open is told by its pixels, never read
+      (`Br.listSeen`, below A10 part 3). The page key and every browser action log the gate's line
+      (`gate '<label>': window … at …, zoom …; view … (…); name crop …; picture: …; grid confirmed …;
+      state … from …; <the decision>`) — Set Expansion View, Close and FAV from the read
+      src/act.luau decides by (`Br.lastPart`), the page key as `gate 'the page key'` — and an Open
+      its path's (`path place … of …, clicked (x,y), the header confirms it`). Tests:
+      `avenger_browser_tests.rs` (31), `avenger_page_tests.rs`. **The Mac tester
+      confirms**, with Logic at 80 % and Calibrate ticked, the log and the calibration folder after:
+      1. the page key over the grid with nothing confirmed: `expansion: the header reads no name
+         (blank); title band 0.0 % lit, …` — the grid;
+      2. an expansion on the grid's first page opened from the page: its `gate 'Opening an
+         expansion': …; go on, by its place` and `path …, clicked (x,y), the header confirms it`
+         lines, and the page's heading the expansion Avenger opened; then Close;
+      3. one on a later page of Nyhdroe in 8 per Row: the `the grid's scrollbar clicked at …` lines,
+         and the header confirming it; then one the list puts elsewhere than Avenger — closed again
+         and said so;
+      4. where the header is not read over the grid (`state not read`): Confirm Expansion View, and
+         the next Open going on (`state the grid from confirmed`);
+      5. in an expansion of ten categories or more, a category of the first nine and one past them
+         (`the list of categories to its top|bottom first`), and whether Avenger shows it;
+      6. a preset of a category of twenty or more selected and one loaded (`… click(s) on the presets'
+         scrollbar`, `the name read is … — confirmed`), and one of another category from All;
+      7. FAV on, a star marked, FAV off; Correct open Expansion.
+      For each: what was heard, and whether Avenger shows what the page says.
+- [ ] **T3-4. Not measured, for the next Mac tests.** The picture test on a Retina capture, in the
+      views but 8 per Row, with the browser's search field open or the pointer over the header, and
+      with the shortest name ("PSY"); the categories' scrollbar points and the presets' measured pages
+      on this Avenger (the tool's tables, measured on the tool's), and how long a scrollbar click's
+      list takes to stand still (its change wait looks 2 s at most, with a still spell of 60 ms:
+      the `… clicked at … — the list moved | stood still` lines); whether a click on the category
+      shown takes its presets back to their top (the tool takes it so, and so does this module);
+      whether a single click on a row loads the preset (D16: Select's name watch says it); and an
+      expansion the user opens in Avenger with its name unreadable is taken for the one this
+      session opened there by its place until a read names another (Correct open Expansion reads
+      the header only). And the view list's pixel rule (`Br.listSeen`): a filled change of a list's
+      size over `Pp.VIEW_LIST` with nothing changed right of it, from x 115 — no picture of the view
+      list over the grid has been seen; the log's `the view list by its pixels — …` line after a
+      Close where nothing told says what it saw.
+
 ## The second Mac test of the Avenger page (2026-10-24)
 
 The second Mac test of the Avenger page (build acd8b8d, an M2 Max on macOS 26.6.1, Logic, VPS
@@ -927,32 +1077,38 @@ The avenger part, in the plan's order:
       where the browser reads closed. A view stored as set or confirmed and then changed in the
       settings dialog or reset is "as stored" from then on. **The Mac tester confirms:** the log's
       "the header reads '…' — … open" and "the header reads no name"; opening an expansion, loading
-      an expansion preset, Close, FAV and a star; Set and Confirm Expansion View.
+      an expansion preset, Close, FAV and a star; Set and Confirm Expansion View. The third Mac test
+      read the header `none` over the grid, its crop reaching the tiles' outlines; since then the
+      crop ends above them, the area and the columns are not read, and a picture test and the
+      user's word decide where the header does not (above, T3-3).
 - [x] **A10, part 3's last case: Close where nothing tells whether an expansion is open — the
       maintainer's decision.** **Built.** Where neither the header nor the area tells, Close is
       clicked as the tool clicks it (src/actions/browser.luau, `B.close_expansion`'s `unsure`), the
       browser read again after the change, and then the view list the click may have opened on the
-      grid is looked for where it is drawn (`Pp.VIEW_LIST`): read as text off one picture, seen
-      where two of its rows or more read as the tool's view names ("<n> per Row", List)
-      (`B.listAfterClose`). Seen, it is closed by a click on its field, as a left opener's popup is,
-      and read gone after a change wait: "no expansion was open; the view list the click opened is
-      closed again", the grid posted in the view stored; still read there, "…, and it is still
-      open". Not the drawn test armed on that click: where the click closes an expansion, the grid
-      redrawn under the list's region would most likely read to it as a popup that never goes.
+      grid is looked for where it is drawn (`Pp.VIEW_LIST`) (`B.listAfterClose`). **Since the
+      maintainer's correction of 2026-10-25 by its pixels, never as text** (`Br.listSeen`): its place
+      and the browser right of it, profiled off the picture before the click (src/act.luau's
+      `pictured`) and off one after it; seen where a filled change of a list's size came over its
+      place and nothing right of it changed — an expansion that closes changes the whole browser.
+      Seen, it is closed by a click on its field, as a left opener's popup is, and seen gone after a
+      change wait: "no expansion was open; the view list the click opened is closed again", the grid
+      posted in the view stored; still there, "…, and it is still open". Not the drawn test armed on
+      that click: where the click closes an expansion, the grid redrawn under the list's region
+      would read to it as a popup that never goes — which the browser right of it tells apart.
       Readings only, each bounded by a change wait; nothing clicked where the browser reads closed.
       Tests: `avenger_browser_tests.rs` (`close_where_nothing_tells_closes_the_view_list_its_click_opened`,
       and the nothing-tells case of `no_view_is_chosen_and_no_expansion_closed_where_the_header_says_otherwise`:
       the open expansion closed). **The Mac tester confirms:** with the header unreadable, Close on
-      the grid says no expansion was open and leaves no list open (the log's `the view list's place
-      reads …`).
-- [ ] **A10, part 4: one text region per row.** The grid's tile rows, the categories and the
-      presets each read as a region per row, so the host crops and enlarges them. Not done: 23 more
-      Vision requests a read on an Intel Mac, measured nowhere yet; the header now spares the area
-      read in most cases, and the core part's enlargement of large regions (above) does not read
-      the grid alone. Decide after the next Mac test's log.
+      the grid says no expansion was open and leaves no list open (the log's `the view list by its
+      pixels — …`).
+- [x] **A10, part 4: one text region per row.** The grid's tile rows, the categories and the
+      presets each read as a region per row, so the host crops and enlarges them. **Obsolete
+      (2026-10-25, the maintainer's correction after the third Mac test):** nothing below the
+      browser's header is read as text any more — the lists are the preset database's and the
+      places the tool's tables (above, T3-3).
 - [x] **A10, part 6: opening by position where the names are not read.** **Built.** Where the
       grid's words name no expansion, Open goes by place, as the tool does (`B.byPlace`): the page's
-      index into the list it was posted (the roster, or Avenger's own list), the view read or
+      index into the list it was posted (the roster; Avenger's own list is gone), the view read or
       stored, and the tool's page tables, ported into src/tables/pages.luau (its
       `_expansion_list/8/6/5/4/3_page_starts`, `_expansion_8_visible_start`,
       `_expansion_page_for_index`, `_click_expansion_page_scroll`, `expansion_cell_pos`,
@@ -970,7 +1126,8 @@ The avenger part, in the plan's order:
       `the_tools_page_tables_place_an_expansion_and_the_scrollbars_clicks`). **The Mac tester
       confirms:** with the grid's names unreadable (80 % at 1x), Open Expansion opens the one chosen
       on a later page of Complete; the log's `placed by its place …` and `the scrollbar clicked at
-      …`. Left: a category and a preset row by position (the plan's last bullet of part 6).
+      …`. The third Mac test never reached it (the state's gate refused first); since then every
+      Open goes by place, and a category and a preset row too (above, T3-3).
 - [x] **A11. The lists exactly as the tool offers them (finding 3).** Factory Standard, Complete
       (the tool's 124), and the tool's two personal rosters by their names, Nyhdroe and Joyman — the
       maintainer's decision of 2026-10-24, the one exception to naming a person; every other roster
@@ -981,7 +1138,10 @@ The avenger part, in the plan's order:
 - [x] **A12, its first half: a Reset after each knob.** Reset level, Reset pan, Reset transpose,
       Reset fine tune, Reset random pitch and Reset macro 1 to 3, the tool's separate buttons: a
       double-click (the right button for Pan and Random Pitch), then the read. **The Mac tester
-      confirms:** each resets its knob and says the value read.
+      confirms:** each resets its knob and says the value read. The third Mac test: from a value off
+      the default none did — two plain clicks, both of click state 1 — and "unchanged" did not say
+      whether one had been needed; the host's double-click and the answer by the default since
+      (above, T3-1 and T3-2), to be confirmed there.
 - [x] **A12, its second half: the knob held with Page Up and Page Down, Return confirming.**
       **Built (the maintainer's decision: exactly as avenger_control).** Return on Level, Pan,
       Transpose, Fine tune, Random pitch and Macro 1 to 3 runs the page's own gesture
@@ -8457,13 +8617,16 @@ tester's stage-1 instructions are a text of their own, not in the repository.
       bigram index for the search over the whole catalog.
 - [ ] **Which expansions the user has, in Avenger's order.** Not in the catalog, deliberately (the
       owner lists stay out): at an expansion's first and last preset there is no neighbour, and
-      Avenger goes on into the user's own next expansion. Partly done (slice 9): the page's Read
-      Avenger's List reads the list off Avenger's grid when the user asks, for the session
-      (`S.avengerList`); ◀ and ▶ do not use it yet — at an expansion's last preset the next one in
-      it would be the neighbour's expansion — and nothing reads it by itself. The user's own presets
-      and expansions are not in the catalog either: said as read, unless one stands out as like a
-      catalog name (then marked, as a new expansion's above); after Load and Save as, as read until
-      a step shows another name, as the tool skips its snap there.
+      Avenger goes on into the user's own next expansion. The part done in slice 9 — the page's
+      Read Avenger's List, which read the list off Avenger's grid for the session (`S.avengerList`)
+      — is **obsolete** (2026-10-25, the maintainer's correction after the third Mac test: the
+      grid's names read nothing at Avenger's sizes, the tool's developer found no recogniser that
+      does; the lists are the tool's four rosters of the preset database) and gone with it. Which
+      expansions the user has stays open: a roster of the user's own would do it, never a read of
+      the grid. The user's own presets and expansions are not in the catalog either: said as
+      read, unless one stands out as like a catalog name (then marked, as a new expansion's above);
+      after Load and Save as, as read until a step shows another name, as the tool skips its snap
+      there.
 - [ ] **The Preset read-out says what the recogniser read**, not the catalog's spelling: it is the
       runtime's OCR read-out, which has no hook to change its text, and Preset info, ◀ and ▶ are
       where the catalog's spelling is said. A general `format` for an OCR read-out would do it;
@@ -9194,6 +9357,9 @@ Built and tested against the scripted host only (`overlay_avenger_tests.rs`,
          the session` line at most once a search;
       5. All, then Go to Category: the category of the preset loaded.
       For each, what was heard, and whether the page came back showing what Avenger shows.
+      **Obsolete in part (2026-10-25):** the search a step at a time of step 2, its "is not in VPS
+      Avenger's list", and step 4 (Read Avenger's List, gone) — the browser goes by the database and
+      by place since the third Mac test, whose steps are T3-3's.
 - [ ] **For the Avenger developer, slice 9's browser** (each with its log lines and pictures): D13
       (GM9), whether the wheel moves the grid, the categories and the presets, how far per notch,
       smoothly or not (`[avenger] [browser] step …`), which way under natural scrolling (`… two
@@ -9207,7 +9373,9 @@ Built and tested against the scripted host only (`overlay_avenger_tests.rs`,
       order of expansions against the catalog's, from Read Avenger's List with a large library; D18,
       whether the rows show more than the name (counts, icons) — such a row is logged as "no name";
       D19, the time per step on the Intel Mac (each step's line), which decides whether a step far
-      from the name needs its text read at all.
+      from the name needs its text read at all. **D13, D14, D17, D18 and D19 obsolete (2026-10-25):**
+      no list is moved by the wheel or read as text any more, and Avenger's own list is not read
+      (T3-3); D15's columns are now where a change is watched, and D16 stands (T3-4).
 - [ ] **Residuals of slice 9's browser**: the regions — the browser's picture, the columns' text
       regions, the star column, the view list's region, the lists' wheel points and track ends, the
       grid's columns and the join of a two-line name — are starting values (D14, D15); whether 8 per
@@ -9221,7 +9389,9 @@ Built and tested against the scripted host only (`overlay_avenger_tests.rs`,
       keeps nothing (the list read again); a grid's rows are told apart by half its pitch (D14);
       without the preset database an opened expansion is not named (nothing scores it); the open
       expansion's heading is marked where only the database named it (Q4); the lists in the ring
-      stay stage 4's.
+      stay stage 4's. **Obsolete with the third Mac test (2026-10-25)** but the regions, the view
+      list's, the star column and the lists in the ring: nothing below the header is read as text,
+      no list is moved by the wheel, and Avenger's own list is gone (T3-3).
 - [x] **The page's Settings section and the port's close** (the plan's slice 10; module 0.9.0 on the
       runtime 0.10.0, built 2026-10-18, not run live). The tool's Windows-only Settings block made
       the page's section on both systems, after the macros: Correct open Expansion, Expansions List,
@@ -9852,6 +10022,16 @@ maintainer's German test instructions are a text of their own, not in the reposi
       asks as the VPS Avenger control tool does (MW5). With tracing on, a captured key
       held down while its callback brings a window of ours forward: its repeats swallowed (`tap:
       keycode … repeats, held since a capture took it; swallowed`), none reaching that window.
+      The third Mac test (2026-10-25) showed one more moment, now closed: between this
+      application's own request for the front (`app::activate_self`, a page's show) and either
+      answer, the window server may give it the front already, and a system-wide read went to this
+      process — `window.focusChain() blocked the pump for 1001 ms` on `accessibility could not
+      complete reading AXFocusedUIElement`, the page's keyboard 1,037 ms late, and the DAW put in the
+      quarantine for a read it never got. Since 2026-10-25 the three reads answer "not known" while
+      that request has no answer (`backend::ActivationAsked`, the third half of
+      `ax::keyboard_is_ours`): answered by the workspace's notice, AppKit's key window, another
+      application's focus notification or a key typed elsewhere, nothing timed. The log check
+      stays, now also right after a page's `the front asked for`.
 - [ ] **MW5: the front taken and handed over on a Mac** (built 2026-10-11, `backend/macos/front.rs`;
       `page-check` measures the mechanics on CI). This application takes the front with
       `activateIgnoringOtherApps:`, the VPS Avenger control tool's call, which objc2 marks deprecated

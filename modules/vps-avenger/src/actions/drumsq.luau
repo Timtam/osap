@@ -385,7 +385,7 @@ function Sq.length(o, trip, steps, label)
     end)
   end
 
-  -- 2 and 3: the double-click, and the change after it — not where its second click was not made.
+  -- 2 and 3: the double-click, and the change after it — not where the double-click was not made whole.
   local function afterDouble(okD, saidD)
     if not okD then
       release(held)

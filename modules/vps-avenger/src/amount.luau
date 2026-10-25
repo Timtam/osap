@@ -35,8 +35,11 @@
 -- From the ring the same, with the ring's words: the sentence behind the screen reader, and after
 -- Return what was read ("Volume 100 percent", "…, unchanged", "Volume cannot be read now"), after
 -- Escape the knob let go ("Volume 150 percent, unchanged" where nothing moved, "Volume let go, not
--- read" where the keys moved it). The overlay's other keys work meanwhile: Tab moves on, and a
--- press of another control says it is still working on the last one (ring.luau).
+-- read" where the keys moved it). The overlay's other keys work meanwhile, and a press of another
+-- control says it is still working on the last one (ring.luau) — but Tab and Shift+Tab: they do
+-- nothing while the knob is held, from the page and from the ring alike, as every hand-over of the
+-- module's swallows them (Act.SWALLOWED: Avenger on Windows switches its oscillators on Tab), and the
+-- first of them says "Return confirms, Escape cancels." once (Am.ENDS).
 --
 -- EVERY END lets go of the button exactly once (`letGo`): Return and Escape at once, in their key's
 -- handler; the page key, another window, the page closed, the plug-in's window gone, outranked and
@@ -81,6 +84,9 @@ local E = nil -- what actions.luau hands over (Am.start)
 
 -- The keys the hand-over captures: none of them reaches Avenger or the DAW.
 Am.KEYS = { "PageUp", "PageDown", "Return", "Escape" }
+-- What the hand-over says once, at the first Tab or Shift+Tab it swallows (Act.swallow): the
+-- maintainer's words of 2026-10-25.
+Am.ENDS = "Return confirms, Escape cancels."
 -- The page's words for a hand-over refused, as the renames say it.
 Am.NO_KEYBOARD = "the keyboard cannot be handed to VPS Avenger now"
 -- Where the tool leaves the page's focus when the strip shows no oscillator selected.
@@ -588,7 +594,7 @@ function Am.run(o, trip, spec)
     inFront = function() return trip:inFront() end,
     done = function(result) trip:done(result) end,
     keys = function(onKey, onEnd)
-      return trip:handOver({ kind = "keys", keys = Am.KEYS,
+      return trip:handOver({ kind = "keys", keys = Am.KEYS, swallow = Act.swallow(Am.ENDS),
         onKey = function(_, _, key) return onKey(key) end,
         onEnd = function(_, _, how, _, err) onEnd(how, err) end })
     end,
@@ -635,7 +641,7 @@ function Am.hold(o, spec, env)
     inFront = here,
     done = finish,
     keys = function(onKey, onEnd)
-      return o:holdKeys({ keys = Am.KEYS,
+      return o:holdKeys({ keys = Am.KEYS, swallow = Act.swallow(Am.ENDS),
         -- A key where the overlay is no longer where the press began — the runtime ends the hold on
         -- another window at its recheck — ends the gesture as a give-up does: let go, nothing said.
         onKey = function(_, key)

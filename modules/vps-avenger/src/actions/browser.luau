@@ -1,75 +1,58 @@
 -- The expansion browser's actions (the plan's slice 9), for the page's trips: by the avenger_control
--- tool's names and arguments (its actions.py), the browser read off a picture of it
--- (src/read/browser.luau) before every click and after it, and every click on the words READ — the
--- middle of a tile's or a row's words, a row's star at its own height — never on the tool's table
--- point for an index. The tool clicked its tables' points for the page it believed the grid on, and
--- scrolled by its tables measured for one roster and one set of category sizes; it then wrote the
--- state it assumed: the view chosen, the expansion opened, the first category selected, the preset
--- loaded (its name taken from the database). Here:
+-- tool's names and arguments (its actions.py), and since the maintainer's decision of 2026-10-25 as
+-- the tool goes through the browser — every expansion, category and preset by its PLACE: the preset
+-- database's lists (modules/vps-avenger-presets, the roster's order, an expansion's categories and
+-- presets) and the tool's page and scroll tables (src/tables/pages.luau). Nothing below the browser's
+-- header is read as text: the grid's names, the categories and the preset rows read nothing at
+-- Avenger's sizes, as the tool's developer found. What a click did is read where it can be: the
+-- header's name after an Open, the preset's name after Select and Load, a star's pixels after Mark,
+-- FAV's pixels, the header and a picture test of its title band after Close, and where nothing told
+-- before Close, the view list's pixels (src/read/browser.luau).
+-- The tool wrote the state it assumed after every click; here only what was read is posted, and
+-- what this session's own clicks did that nothing shows — the category clicked, the presets' page
+-- scrolled to, the grid's page — is kept as facts by window (state.luau, S.browserAt) and forgotten
+-- where a read says otherwise.
 --
 --   set_expansion_view {view}   through src/act.luau: the view field opened with the LEFT button, the
 --                         view's row chosen in its painted list (popups.luau, Pp.VIEW_LIST), and the
 --                         view stored as set once the list took it — the tool's AVGExpansionView —
---                         since this Avenger draws no view's label to read (src/read/browser.luau,
---                         Br.view); nothing clicked where an expansion reads open — the same point
---                         would close it — or where nothing tells whether one is, nor where a view's
---                         label reads the one asked
---   confirm_expansion_view {view}   no trip: the view stored as confirmed (the tool's
---                         action_confirm_expansion_view), nothing clicked
+--                         and the grid confirmed in this window for it, as the tool's action sets
+--                         AVGExpansionOpen to 0; nothing clicked where an expansion reads open — the
+--                         same point would close it — or where nothing tells whether one is, nor
+--                         where a view's label reads the one asked
+--   confirm_expansion_view {view}   no trip: the view stored as confirmed and the grid confirmed in
+--                         this window for that view and its zoom (the tool's
+--                         action_confirm_expansion_view: AVGExpansionOpen = 0), nothing clicked
 --   close_expansion       through src/act.luau: the field clicked where the header reads an expansion
 --                         open, and where nothing tells, as the tool clicked it whatever was shown —
 --                         never where the browser reads closed, where that click opens the view list;
---                         then the header read again, and where nothing told, the view list looked for
---                         and closed again where the click opened it (B.listAfterClose)
+--                         then the header read again, and where nothing told, the view list told by
+--                         its pixels and closed again where the click opened it (B.listAfterClose)
 --   toggle_expansion_favorite_view {enabled}   through src/act.luau: FAV clicked, its pixels read
---                         before and after, and with FAV on the rows' stars
---   open_expansion {index, page_start, visible_index}   the grid read; the name looked for in it, the
---                         list moved a step at a time where it is not there (B.seek); its words
---                         clicked; then the columns read, and the expansion they list scored (the
---                         tool's page position is only the first direction to look in). Where the
---                         grid's names are not read at all, by its place, as the tool opens it: the
---                         page's index, the view and the tool's page tables, confirmed by the
---                         header's name after the click (B.byPlace)
---   select_expansion_category {index, total}   the categories read and looked for as the grid is, the
---                         row clicked, then the preset rows read and placed in the database's lists
---   select_all_expansion_presets   no click: the name and the rows read (the tool read the name)
+--                         before and after, and with FAV on the stars of the rows placed
+--   open_expansion {index, …}   by its place (B.byPlace): the page's index into the roster it was
+--                         posted, the view read or stored and the tool's page tables — the grid taken
+--                         to the page, the tile clicked at the tool's point — CONFIRMED BY THE
+--                         HEADER'S NAME after the click; another name is closed again
+--   select_expansion_category {index, total}   the category's scrollbar end and its row by the tool's
+--                         table (Pg.category), the row clicked, the presets' change watched for
+--   select_all_expansion_presets   no click: the name read (the tool read the name)
 --   go_to_loaded_preset_category   no trip: the database's category for the name last read, as the
 --                         tool's, marked as the database's on the page (B.goToCategory)
 --   select_expansion_preset, load_expansion_preset, mark_expansion_preset_favorite {preset_index, …}
---                         the rows read; another category's, the target's category found and clicked
---                         first; the row looked for; then a click, a double-click, or a click on its
---                         star — the name watched after the first two, the star read after the third
---   read_expansion_list   the port's own: Avenger's grid read from its top to its end, kept for the
---                         session (S.avengerList) and shown in place of the database's roster
+--                         its category clicked first where this session's clicks did not leave it
+--                         shown, the presets' scrollbar clicked to its page by the tool's measured
+--                         table (Pg.presetPlace, Pg.presetScroll), then a click, a double-click, or a
+--                         click on its star at the tool's row — the preset's name watched after the
+--                         first two and confirming it, the star read after the third
 --   align_open_expansion  Correct open Expansion (the plan's slice 10): no click — the name and ONE
---                         picture of the caption, the header's name and the columns read with no
---                         expansion expected, so the one the page had cannot score first; what that
---                         does not settle is "cannot be told now" (the tool read twice, 0.45 s apart,
---                         over its roster)
+--                         picture of the header read with no expansion expected; what it does not
+--                         settle is "cannot be told now" (the tool read the area twice, 0.45 s apart)
 --
--- MOVING A LIST (B.step, B.seek). The maintainer's decision (TODO.md, stage 4): the lists are read and
--- clicked by the word and moved by the wheel, measured. A step is one wheel notch at the list's
--- middle, then a change wait from the picture last read, watching the list's top and bottom quarter
--- bands — away from the pointer in its middle, whose hover over a tile is not the list moving — with
--- a still spell of SETTLE, so a list that scrolls smoothly is answered once it stands still. Where a
--- notch moves nothing while the way is not known yet, one click on the scrollbar's track toward the
--- step is tried, the tool's measured way, and whichever moved the list is kept for the session
--- (`means`); where both move nothing, the list has stopped moving that way. Only where the list's
--- order is known — Avenger's list once read, an expansion's categories and presets; never the
--- roster, whose order against Avenger's nobody has measured (TODO.md, D17) — do two steps running
--- whose names went the other way turn that list's wheel round for the session, once a search (a
--- Mac's natural scrolling may reverse an injected wheel: nobody has measured it). A search reads
--- after every step until the name is read or the list stops, then goes the other way from where it
--- is. Not read at either end, the name is said not to be in the list only where the list moved and
--- the name's place in an order known lies away from the places read; otherwise it is a name that
--- cannot be read now, and a list that did not move is said as that. No timer decides anything: every
--- answer is a change wait's, bounded by STEP_WITHIN, and the search by GUARD steps a way, which only
--- a picture that never stands still reaches.
---
--- Nothing is taken for done: what the browser shows after a click is what is posted, and where it was
--- not read it is said as that. The database names an open expansion by what its columns list and
--- places the rows in its lists, and says so ("from the database"); it never decides that a click did
--- something.
+-- Every scrollbar click is followed by a change wait on the list's top and bottom quarter bands, at
+-- most STEP_WITHIN, with a still spell of SETTLE: a click at a point that moved nothing is not made
+-- again there (the list stands at that end). No timer decides anything; the waits are bounds on
+-- looking.
 
 local H = host.include("src/header.luau")
 local P = host.include("src/read/picture.luau")
@@ -82,8 +65,6 @@ local Drums = host.include("src/actions/drums.luau")
 local Act = host.include("src/act.luau")
 local Pp = host.include("src/popups.luau")
 local Pg = host.include("src/tables/pages.luau")
--- The project's reading of what a recogniser makes of Avenger's text: for the log.
-local R = host.include("src/read/ocr.luau")
 
 local B = {}
 
@@ -93,15 +74,14 @@ local function log(fmt, ...)
   host.log.info(("[avenger] [browser] " .. fmt):format(...))
 end
 
--- How long a step's change wait looks for the list to move, at most — the longest one change wait may
--- wait (docs/api/screen.md) — and how long it must have stood still to count: one or two of Avenger's
--- frames, the host's still spell (docs/api/screen.md, `settle`). Starting values (TODO.md, D13).
+-- How long a scrollbar click's change wait looks for the list to move, at most — the longest one
+-- change wait may wait (docs/api/screen.md) — and how long it must have stood still to count: one or
+-- two of Avenger's frames, the host's still spell (docs/api/screen.md, `settle`). Starting values
+-- (TODO.md, the third Mac test's T3-4).
 B.STEP_WITHIN = 2000
 B.SETTLE = 60
 -- How long a click's change is looked for: as src/act.luau's.
 local CHANGE_WITHIN = 2000
--- Steps a way a search takes at most: a bound on looking, as MENU_LOOK_MS is the runtime's.
-B.GUARD = 256
 
 -- The page's word for "every category" (the tool's _ALL_PRESET_CATEGORY).
 B.ALL = "__all__"
@@ -114,11 +94,17 @@ local VIEW_UNREAD = "whether an expansion is open in VPS Avenger cannot be read 
 -- Every value of the browser's (state.luau's): a read that shows the grid, or another expansion,
 -- says each of them.
 local KEYS = { "expansionView", "expansionViewFrom", "expansionOpen", "selectedExpansion", "lists", "loadedIndex",
-  "favoriteView", "favoriteStates", "categoryShown", "pageCategory", "selectedFromDatabase" }
+  "favoriteView", "favoriteStates", "pageCategory", "selectedFromDatabase" }
 
 local function whole(v)
   local n = tonumber(v)
   return n and n == math.floor(n) and n or nil
+end
+
+-- The window the page was shown beside, by its id: what the browser's facts are kept by.
+local function windowId()
+  local w = E.plugin()
+  return w and w.id
 end
 
 -- ── Through src/act.luau ─────────────────────────────────────────────────────
@@ -132,6 +118,22 @@ local function viewWords(view, from)
 end
 B.viewWords = viewWords
 
+-- A `decide` of src/act.luau's for the browser, with the gate's line (Br.gateLine) of the read it
+-- decides by — the `browser` part's (Br.part, Br.lastPart) — and its decision: the click's `gate`
+-- words, or what it refuses with.
+local function gated(label, decide)
+  return function(vb)
+    local click, why, focus = decide(vb)
+    local g = Br.lastPart
+    Br.lastPart = nil
+    if g then
+      Br.gateLine(label, g, click and ("go on, " .. (click.gate or "clicked at its point")) or ("nothing clicked — "
+        .. tostring(why)))
+    end
+    return click, why, focus
+  end
+end
+
 function B.set_expansion_view(args, label)
   local view = args.view
   local at = type(view) == "string" and X.viewMenuPoint(view)
@@ -139,53 +141,78 @@ function B.set_expansion_view(args, label)
   return {
     label = label,
     part = "browser",
-    fields = { "area" },
-    decide = function(vb)
+    decide = gated(label, function(vb)
       if vb.expansionOpen == true then return nil, OPEN_NOW end
       if vb.expansionOpen == nil then return nil, VIEW_UNREAD end
       -- A view's label read as the one asked; a view stored is clicked all the same, as the tool did.
       if vb.expansionView == view and vb.expansionViewFrom == nil then return nil, "unchanged, Expansion View " .. view end
-      return { at = X.VIEW, menu = { button = "left", item = at, retries = 3, read = false } }
-    end,
+      return { at = X.VIEW, menu = { button = "left", item = at, retries = 3, read = false },
+        gate = "its field opened with the left button and " .. view .. " chosen in its list" }
+    end),
     answer = function(_, _, how)
       if how ~= "chosen" then return { error = "the view was not chosen" } end
       Br.storeView(view, "set")
+      -- The grid shows in the view chosen, no expansion open: the tool's AVGExpansionOpen = 0.
+      local id = windowId()
+      local v = S.values(id)
+      S.confirmGrid(id, view, v and v.zoom, "set")
       return { part = { keys = { "expansionView", "expansionViewFrom" }, values = { expansionView = view,
         expansionViewFrom = "set" } }, said = viewWords(view, "set") }
     end,
   }
 end
 
--- confirm_expansion_view {view}: the page's Confirm Expansion View — no trip, no click.
-function B.confirmView(args)
+-- confirm_expansion_view {view}: the page's Confirm Expansion View — no trip, no click. The view
+-- stored as confirmed and, for window `id` at zoom `zoom`, the grid confirmed with it (S.confirmGrid):
+-- the user's word over what was read before, as the tool's action_confirm_expansion_view sets
+-- AVGExpansionView, AVGExpansionOpen = 0 and AVGSelectedExpansion = "". The part to post — { keys,
+-- values }, every open expansion's value gone (state.luau, S.part) — or nil and why.
+function B.confirmView(args, id, zoom)
   local view = args.view
   if not (type(view) == "string" and X.viewMenuPoint(view)) then
     return nil, tostring(view) .. " is not one of VPS Avenger's views"
   end
+  if not id then return nil, "the page was not opened from VPS Avenger; press the page key there" end
   Br.storeView(view, "confirmed")
-  return { expansionView = view, expansionViewFrom = "confirmed" }
+  -- What this session's clicks left there first, a confirmation before this one with it.
+  B.forgetPlaces(id, "Confirm Expansion View")
+  S.confirmGrid(id, view, zoom, "confirmed")
+  log("the grid confirmed in window %s for %s at %s %%", tostring(id), view, tostring(zoom))
+  return { keys = KEYS, values = { expansionView = view, expansionViewFrom = "confirmed", expansionOpen = false,
+    selectedExpansion = "" } }
 end
 
 -- Close Expansion. With the grid shown, its point opens the view list instead, so where the browser
 -- reads closed nothing is clicked; where it reads open, or where nothing tells — the header holds
--- something no name is read in, and the area settles nothing — it is clicked, as the tool clicks it
--- whatever is shown (the maintainer's decision of 2026-10-24), and the browser read again after the
--- change. Where nothing told, `unsure()` says so, and the trip looks for the view list the click may
--- have opened (B.listAfterClose).
+-- something no name is read in, and the picture test settles nothing — it is clicked, as the tool
+-- clicks it whatever is shown (the maintainer's decision of 2026-10-24), and the browser read again
+-- after the change. Where nothing told, `unsure()` says so: the view list's place and the browser
+-- right of it are profiled off the picture before the click (`pictured`, Br.listPlace), and the
+-- trip looks for the view list the click may have opened by its pixels (B.listAfterClose, with
+-- `listBefore()`).
 function B.close_expansion(_, label, known)
-  local unsure = false
+  local unsure, listBefore = false, nil
   return {
     label = label,
     part = "browser",
-    fields = { "area" },
     expected = known and known.selectedExpansion or nil,
-    decide = function(vb)
+    decide = gated(label, function(vb)
       if vb.expansionOpen == false then return nil, NONE_OPEN end
       unsure = vb.expansionOpen ~= true
       if unsure then log("'%s': nothing tells whether an expansion is open — clicked as the tool clicks it", label) end
-      return { at = X.CLOSE }
+      -- The grid's page stays as it was, as the tool keeps AVGExpansionPageStart; an open
+      -- expansion's lists go with it.
+      S.forgetBrowserAt(windowId(), "Close Expansion")
+      return { at = X.CLOSE, gate = unsure and "clicked at its point as the tool clicks it — nothing tells" or nil }
+    end),
+    pictured = function(snap, pl)
+      if not unsure then return end
+      local p, why = Br.listPlace(snap, pl)
+      listBefore = p
+      if not p then log("'%s': the view list's place not profiled before the click — %s", label, tostring(why)) end
     end,
     unsure = function() return unsure end,
+    listBefore = function() return listBefore end,
     watch = function() return { X.VIEW_TEXT, X.NAME_TEXT, X.AREA } end,
     -- Where nothing told, what changed is the answer: a list drawn over the grid reads as nothing
     -- settled, and is no reason to look on.
@@ -219,12 +246,12 @@ function B.toggle_expansion_favorite_view(args, label, known)
     part = "browser",
     fields = { "presets" },
     expected = known and known.selectedExpansion or nil,
-    decide = function(vb)
+    decide = gated(label, function(vb)
       if vb.expansionOpen == false then return nil, NONE_OPEN end
       if vb.expansionOpen ~= true then return nil, VIEW_UNREAD end
       if want ~= nil and vb.favoriteView == want then return nil, "unchanged, FAV " .. (want and "ON" or "OFF") end
       return { at = X.FAVORITE_VIEW }
-    end,
+    end),
     -- FAV's box, and the star column, which comes and goes with it.
     watch = function() return { Drums.box(X.FAVORITE_VIEW, X.FAVORITE_VIEW_STATE), X.STAR_COLUMN } end,
     same = function(vb, va) return va.favoriteView ~= nil and va.favoriteView == vb.favoriteView end,
@@ -240,8 +267,8 @@ end
 
 -- ── Pictures and change waits ────────────────────────────────────────────────
 
--- Where the browser is on overlay `o` now: { pl = the placer, region = its picture's rectangle },
--- or nil and the page's error.
+-- Where the browser is on overlay `o` now: { pl = the placer, region = its picture's rectangle,
+-- window = the plug-in window's id }, or nil and the page's error.
 local function placed(o)
   local origin = o:origin()
   local k = origin and H.factor(origin)
@@ -249,7 +276,7 @@ local function placed(o)
   local pl = P.placer(origin, k, (H.zoom(origin)))
   local region = Open.region(pl, X.BROWSER)
   if not region then return nil, "that part of VPS Avenger is not on the screen" end
-  return { pl = pl, region = region }
+  return { pl = pl, region = region, window = windowId() }
 end
 
 -- One picture of the browser, waited for: the snapshot, or nil and the page's error.
@@ -260,103 +287,13 @@ local function picture(ctx)
   return nil, "VPS Avenger cannot be read now"
 end
 
--- ── The view list after Close (A10, part 3) ──────────────────────────────────
--- Where nothing told whether an expansion was open, Close was clicked as the tool clicks it; with
--- the grid shown that click opened the view list (popups.luau, Pp.VIEW_LIST). It is looked for
--- where it is drawn, read as text off one picture — the tool's view names, each row "<n> per Row"
--- but List — and seen where two rows or more read so: words of the list itself, which the grid's
--- tiles, a fifth of their height, do not make. Seen, it is closed as a left opener's popup is, by a
--- click on its field (main.luau, closeLeftOpen), and read again after a change wait: gone, no
--- expansion was open, and the grid is posted in the view stored; still read there, said so. Not
--- seen, the result of the click stands. Readings only, every one bounded by a change wait's: no
--- timer decides anything.
-
--- How many of the view list's rows reading `reading` holds.
-local function listRows(reading)
-  if not (reading and reading.status == "text") then return 0 end
-  local text = string.lower(tostring(reading.text or ""))
-  local n = 0
-  for _ in string.gmatch(text, "%d%s*per%s*row") do n += 1 end
-  if string.find(text, "%f[%a]list%f[%A]") then n += 1 end
-  return n
-end
-
--- The view list's place read off a picture, waited for: its rows read, or nil and why, and the
--- picture (released by the caller; nil where none was taken).
-local function readList(ctx)
-  local r = Open.region(ctx.pl, Pp.VIEW_LIST.rect)
-  if not r then return nil, "its place is not on the screen" end
-  local ok, snap, why = pcall(host.screen.snapshot, { region = r })
-  if not (ok and snap) then return nil, "no picture of it: " .. tostring(ok and why or snap) end
-  local okR, reading = pcall(host.ocr.recognize, { name = "view list", region = r }, { snapshot = snap, lang = H.lang() })
-  if not okR then
-    snap:release()
-    return nil, "its read failed: " .. tostring(reading)
-  end
-  return listRows(reading), reading, snap, r
-end
-
--- After Close where nothing told (B.close_expansion's `unsure`): `result` the click's, as src/act.luau
--- answered it; the trip done with it, or with what the view list says.
-function B.listAfterClose(o, trip, result, label)
-  local values = result.part and result.part.values
-  if values and values.expansionOpen == true then return trip:done(result) end
-  local ctx = placed(o)
-  if not ctx then return trip:done(result) end
-  local rows, reading, snap, r = readList(ctx)
-  if not trip:inFront() then
-    if snap then snap:release() end
-    return
-  end
-  if not rows then
-    log("'%s': the view list not looked for — %s", label, tostring(reading))
-    return trip:done(result)
-  end
-  log("'%s': the view list's place reads %s — %d of its rows", label, reading.status == "text"
-    and ("'" .. R.forLog(reading.text) .. "'") or reading.status, rows)
-  if rows < 2 then
-    snap:release()
-    return trip:done(result)
-  end
-  log("'%s': the click opened the view list — no expansion was open; its field clicked again to close it", label)
-  local ok, said = E.ring.clickAt(o, label, X.VIEW, nil, true)
-  if not ok then
-    snap:release()
-    return trip:done({ sentence = said })
-  end
-  local asked, err = pcall(host.screen.snapshot, { region = r, change = { from = snap, timeout = CHANGE_WITHIN,
-    tolerance = 16, minPixels = 4, settle = B.SETTLE } }, function(s)
-    snap:release()
-    if not trip:inFront() then
-      if s then s:release() end
-      return
-    end
-    if not s then
-      log("'%s': no picture after the field's click", label)
-      return trip:done({ error = "the click opened the view list, and whether it closed again cannot be read now" })
-    end
-    local okR, again = pcall(host.ocr.recognize, { name = "view list", region = r }, { snapshot = s, lang = H.lang() })
-    s:release()
-    if not trip:inFront() then return end
-    if not okR then
-      log("'%s': the view list's place could not be read after the field's click: %s", label, tostring(again))
-      return trip:done({ error = "the click opened the view list, and whether it closed again cannot be read now" })
-    end
-    local left = listRows(again)
-    if left >= 2 then
-      log("'%s': the view list still reads %d of its rows after its field's click", label, left)
-      return trip:done({ error = "the click opened the view list, and it is still open" })
-    end
-    local view, how = Br.view()
-    log("'%s': the view list has gone; the grid in the view %s (%s)", label, tostring(view), tostring(how))
-    trip:done({ part = { keys = KEYS, values = { expansionOpen = false, selectedExpansion = "", expansionView = view,
-      expansionViewFrom = how } }, note = "no expansion was open; the view list the click opened is closed again" })
-  end)
-  if not asked then
-    snap:release()
-    log("'%s': no change wait after the field's click: %s", label, tostring(err))
-    trip:done({ error = "the click opened the view list, and whether it closed again cannot be read now" })
-  end
+-- The header read off picture `s` as text, the picture test, and the state they say with the
+-- expansion `expected` (Br.state): the state, its words, the readings and the test.
+local function stateOf(ctx, s, expected)
+  local byName = Br.read(s, ctx.pl)
+  local look = Br.look(s, ctx.pl)
+  local st, words = Br.state(byName, look, { window = ctx.window, zoom = ctx.pl.zoom, expected = expected })
+  return st, words, byName, look
 end
 
 -- Table rectangles `rects` on screen, cut to the browser's picture.
@@ -425,220 +362,124 @@ local function lookOn(trip, ctx, from, rects, read, taken, next, keep)
   round(from)
 end
 
--- ── Moving a list ────────────────────────────────────────────────────────────
+-- ── The view list after Close (A10, part 3) ──────────────────────────────────
+-- Where nothing told whether an expansion was open, Close was clicked as the tool clicks it; with
+-- the grid shown that click opened the view list (popups.luau, Pp.VIEW_LIST). Nothing there is read
+-- as text (the maintainer's decision of 2026-10-25): the list is told by its PIXELS
+-- (read/browser.luau, Br.listSeen) — its place and the browser right of it, profiled off the
+-- picture before the click (B.close_expansion's `pictured`) and off one after it, seen where a
+-- filled change of a list's size came over its place and nothing right of it changed. Seen, it is
+-- closed as a left opener's popup is, by a click on its field (main.luau, closeLeftOpen), and
+-- looked at again after a change wait on its place: gone, no expansion was open, and the grid is
+-- posted in the view stored; still there, said so. Not seen, the result of the click stands.
+-- Readings only, every one bounded by a change wait's: no timer decides anything.
 
--- How each list moves this session, once seen: "wheel" or "track"; nil while not known. And each
--- list's wheel, 1 or -1, turned round where the names read showed it moving the other way.
-local means = {}
-local sign = { grid = 1, categories = 1, presets = 1 }
--- Where the grid was last put by place (B.byPlace), by window id: { view, page, count }; forgotten
--- where a step moves it by its words, and where the expansion it opened is not confirmed.
-local placedAt = {}
-
-local function placeKey()
-  local w = E.plugin()
-  return w and w.id
+-- After Close where nothing told (B.close_expansion's `unsure`): `result` the click's, as src/act.luau
+-- answered it, and `before` the profiles of the list's place before the click (its `listBefore()`);
+-- the trip done with it, or with what the view list's pixels say.
+function B.listAfterClose(o, trip, result, label, before)
+  local values = result.part and result.part.values
+  if values and values.expansionOpen == true then return trip:done(result) end
+  if not before then
+    log("'%s': the view list not looked for — its place was not profiled before the click", label)
+    return trip:done(result)
+  end
+  local ctx = placed(o)
+  if not ctx then return trip:done(result) end
+  local snap = picture(ctx)
+  if not trip:inFront() then
+    if snap then snap:release() end
+    return
+  end
+  if not snap then
+    log("'%s': the view list not looked for — no picture after the click", label)
+    return trip:done(result)
+  end
+  local now, why = Br.listPlace(snap, ctx.pl)
+  if not trip:inFront() then
+    snap:release()
+    return
+  end
+  local seen, words = Br.listSeen(before, now, ctx.pl)
+  log("'%s': the view list by its pixels — %s", label, now and words or ("its place not profiled: " .. tostring(why)))
+  if seen ~= "list" then
+    snap:release()
+    return trip:done(result)
+  end
+  log("'%s': the click opened the view list — no expansion was open; its field clicked again to close it", label)
+  local ok, said = E.ring.clickAt(o, label, X.VIEW, nil, true)
+  if not ok then
+    snap:release()
+    return trip:done({ sentence = said })
+  end
+  local unread = "the click opened the view list, and whether it closed again cannot be read now"
+  waitFrom(trip, ctx, snap, onScreen(ctx, { Pp.VIEW_LIST.rect }), CHANGE_WITHIN, B.SETTLE, function(s)
+    if not s then
+      log("'%s': no picture after the field's click", label)
+      return trip:done({ error = unread })
+    end
+    local again, whyA = Br.listPlace(s, ctx.pl)
+    s:release()
+    if not trip:inFront() then return end
+    local left, wordsA = Br.listSeen(before, again, ctx.pl)
+    log("'%s': after its field's click, %s", label, again and wordsA or ("its place not profiled: " .. tostring(whyA)))
+    if left == nil then return trip:done({ error = unread }) end
+    if left == "list" then return trip:done({ error = "the click opened the view list, and it is still open" }) end
+    local view, how = Br.view()
+    log("'%s': the view list has gone; the grid in the view %s (%s)", label, tostring(view), tostring(how))
+    trip:done({ part = { keys = KEYS, values = { expansionOpen = false, selectedExpansion = "", expansionView = view,
+      expansionViewFrom = how } }, note = "no expansion was open; the view list the click opened is closed again" })
+  end)
 end
-local LIST_WORDS = { grid = "grid of expansions", categories = "list of categories", presets = "list of presets" }
 
--- The top and bottom quarter of list `list`'s region, the bands a step watches.
+-- ── Scrollbars ───────────────────────────────────────────────────────────────
+
+-- The top and bottom quarter of list `list`'s region, the bands a scrollbar click's change is
+-- watched in — away from the pointer in the list's middle, whose hover is not the list moving.
 local function bands(list)
   local r = X.LISTS[list].rect
   local q = (r[4] - r[2]) / 4
   return { { r[1], r[2], r[3], r[2] + q }, { r[1], r[4] - q, r[3], r[4] } }
 end
 
--- One step of list `list` ("grid", "categories", "presets") toward `dir` ("down": toward later entries;
--- "up"), from picture `from`, which it takes over: the wheel, or the track where the wheel moved
--- nothing (above). `done(picture or nil, moved, sentence?)` with the picture after it — the one the
--- list stood still in — or nil where none came; with the sentence where its point could not be
--- clicked. Nothing where the trip ended meanwhile.
-function B.step(o, trip, ctx, list, dir, from, label, done)
-  local L = X.LISTS[list]
-  if list == "grid" then
-    local key = placeKey()
-    if key then placedAt[key] = nil end
-  end
+local LIST_WORDS = { grid = "the grid's scrollbar", categories = "the categories' scrollbar",
+  presets = "the presets' scrollbar" }
+
+-- Clicks `clicks` (table points, the tool's) on list `list`'s scrollbar in turn, from picture `pic`
+-- (taken over), each followed by a change wait on the list's bands: a click at a point that moved
+-- nothing is not made again at that point, as the list stands at that end. `done(picture or nil,
+-- sentence?)` with the last picture — the caller's — or nil where none came; with the sentence where
+-- a point could not be clicked. Nothing where the trip ended meanwhile.
+local function clickSeries(o, trip, ctx, list, pic, clicks, label, done)
   local watch = onScreen(ctx, bands(list))
-  local t0 = host.now()
-  local function track(pic, after)
-    local at = { L.track.x, dir == "down" and L.track.down or L.track.up }
-    local ok, said = E.ring.clickAt(o, label, at, nil, true)
+  local i, still = 0, nil
+  local function step()
+    i += 1
+    while clicks[i] and still and clicks[i][1] == still[1] and clicks[i][2] == still[2] do i += 1 end
+    local c = clicks[i]
+    if not c then return done(pic) end
+    local ok, said = E.ring.clickAt(o, label, c, nil, true)
     if not ok then
       pic:release()
-      return done(nil, false, said)
+      return done(nil, said)
     end
-    waitFrom(trip, ctx, pic, watch, B.STEP_WITHIN, B.SETTLE, after)
-  end
-  local function said(s, moved, how)
-    log("step %s in the %s: %s, %d ms", dir, LIST_WORDS[list], moved and ("moved by the " .. how) or how,
-      host.now() - t0)
-    done(s, moved)
-  end
-  if means[list] == "track" then
-    return track(from, function(s, changed)
-      if not s then return done(nil, false) end
-      said(s, changed, changed and "track" or "unchanged by the track — at its end")
-    end)
-  end
-  local ok, why = E.ring.wheelAt(o, label, L.wheel, (dir == "down" and -1 or 1) * sign[list], true)
-  if not ok then
-    from:release()
-    return done(nil, false, why)
-  end
-  waitFrom(trip, ctx, from, watch, B.STEP_WITHIN, B.SETTLE, function(s, changed)
-    if not s then return done(nil, false) end
-    if changed then
-      if means[list] == nil then
-        means[list] = "wheel"
-        log("the %s moves by the wheel — the wheel from here on", LIST_WORDS[list])
-      end
-      return said(s, true, "wheel")
-    end
-    if means[list] == "wheel" then return said(s, false, "unchanged by the wheel — at its end") end
-    track(s, function(s2, changed2)
-      if not s2 then return done(nil, false) end
-      if changed2 then
-        means[list] = "track"
-        log("the wheel moved nothing in the %s; its scrollbar's track did — the track from here on", LIST_WORDS[list])
-        return said(s2, true, "track")
-      end
-      said(s2, false, "unchanged by the wheel and the track — at its end")
-    end)
-  end)
-end
-
--- An entry found by its name in list `spec.list`, moved a step at a time where it is not read: `spec`
--- = { list, label, pic = the picture read last (taken over), entries = what it read, read(s) ->
--- entries | nil (s a picture after a step; nil: not read), match(entry) -> boolean, place(entry) ->
--- its place in the list's order or nil, target = the place looked for, or nil, ordered = true where
--- that order is Avenger's own (read at any time while the search runs), hint = "down" | "up" | nil,
--- said = a sentence said, behind the screen reader, at the first step, onFound(entry, picture,
--- entries), onNotFound(word, picture or nil, sentence?) }. `word`, both ends reached: "absent" (the list
--- moved, and the target's place is not in an order known or lies away from the places read — more
--- than one place beyond them), "missed" (the list moved, and the order puts the target among the
--- places read or next to them: a name not read), "still" (the list moved neither way); or "guard"
--- (GUARD steps a way), "unread", "refused" (with the sentence of the point refused). The direction:
--- toward the target's place against the places read; where none is read, the hint; else down. In an
--- order known, two steps running whose places went the other way turn the list's wheel round for the
--- session, once a search, and the search starts again from where the list is.
-function B.seek(o, trip, ctx, spec)
-  local pic, entries = spec.pic, spec.entries
-  local dir, turned, steps, told = nil, false, 0, false
-  local moved, contrary, flipped = false, 0, false
-  local seenLo, seenHi = nil, nil
-  local function find(list)
-    for _, e in ipairs(list) do
-      if spec.match(e) then return e end
-    end
-    return nil
-  end
-  local function span(list)
-    local lo, hi = nil, nil
-    for _, e in ipairs(list) do
-      local p = spec.place(e)
-      if p then
-        lo = lo and math.min(lo, p) or p
-        hi = hi and math.max(hi, p) or p
-      end
-    end
-    return lo, hi
-  end
-  -- The places read so far, over the whole walk.
-  local function saw(list)
-    local lo, hi = span(list)
-    if lo then
-      seenLo = seenLo and math.min(seenLo, lo) or lo
-      seenHi = seenHi and math.max(seenHi, hi) or hi
-    end
-  end
-  saw(entries)
-  -- Why the target was not read once both ends were reached.
-  local function ended()
-    if not moved then return "still" end
-    local t = spec.target
-    if spec.ordered and t and seenLo and t >= seenLo - 1 and t <= seenHi + 1 then return "missed" end
-    return "absent"
-  end
-  local go
-  go = function()
-    local e = find(entries)
-    if e then return spec.onFound(e, pic, entries) end
-    if dir == nil then
-      local lo, hi = span(entries)
-      local why
-      if spec.target and lo and spec.target > hi then
-        dir, why = "down", string.format("its place %d lies after the %d to %d read", spec.target, lo, hi)
-      elseif spec.target and lo and spec.target < lo then
-        dir, why = "up", string.format("its place %d lies before the %d to %d read", spec.target, lo, hi)
-      elseif spec.hint then
-        dir, why = spec.hint, "the first place to look"
-      else
-        dir, why = "down", "nothing to go by"
-      end
-      log("'%s': not read in the %s — looking %s (%s)", spec.label, LIST_WORDS[spec.list], dir, why)
-    end
-    if steps >= B.GUARD then
-      log("'%s': still moving after %d steps — nothing more was looked at", spec.label, B.GUARD)
-      return spec.onNotFound("guard", pic)
-    end
-    if spec.said and not told then
-      told = true
-      host.speech.output(spec.said, { interrupt = false })
-    end
-    steps += 1
-    local before = span(entries)
-    B.step(o, trip, ctx, spec.list, dir, pic, spec.label, function(s, didMove, sentence)
+    waitFrom(trip, ctx, pic, watch, B.STEP_WITHIN, B.SETTLE, function(s, changed)
+      if not s then return done(nil) end
       pic = s
-      if sentence then return spec.onNotFound("refused", nil, sentence) end
-      if not s then return spec.onNotFound("unread", nil) end
-      if not didMove then
-        if turned then return spec.onNotFound(ended(), pic) end
-        turned, steps = true, 0
-        dir = dir == "down" and "up" or "down"
-        log("'%s': the %s moves no further — looking %s", spec.label, LIST_WORDS[spec.list], dir)
-        return go()
-      end
-      moved = true
-      local next = spec.read(s)
-      if not trip:inFront() then
-        s:release()
-        return
-      end
-      if not next then return spec.onNotFound("unread", s) end
-      saw(next)
-      entries = next
-      local after = span(next)
-      -- The wheel turned round only by an order known, and only by two steps running that went the
-      -- other way: one misread row placed far off is not the list moving back.
-      if spec.ordered and means[spec.list] == "wheel" and before and after and after ~= before then
-        contrary = (dir == "down") ~= (after > before) and contrary + 1 or 0
-        if contrary >= 2 and flipped then
-          contrary = 0
-          log("'%s': the places read in the %s went the other way again — the wheel not turned round twice in one "
-            .. "search", spec.label, LIST_WORDS[spec.list])
-        elseif contrary >= 2 then
-          flipped, contrary = true, 0
-          sign[spec.list] = -sign[spec.list]
-          log("'%s': the wheel moved the %s %s two steps running, where it was turned %s (the places read %d, then %d) — "
-            .. "turned round for the session, and the search started again from here", spec.label, LIST_WORDS[spec.list],
-            dir == "down" and "up" or "down", dir, before, after)
-          -- The ends met so far were met the other way round: the walk starts again from here.
-          dir, turned, steps = nil, false, 0
-        end
-      end
-      go()
+      still = (not changed) and c or nil
+      log("'%s': %s clicked at %.1f — the list %s", label, LIST_WORDS[list], c[2], changed and "moved" or "stood still")
+      step()
     end)
   end
-  go()
+  step()
 end
 
 -- ── What the reads say ───────────────────────────────────────────────────────
 
 -- The values a read of the browser says, from its state `st` (Br.state's): the grid — every open
--- expansion's value gone; an expansion open — the one the read names, with its lists from the database
--- where it is another than the one `known` had (marked as named by the database), or none. And the
--- keys they are posted under.
+-- expansion's value gone; an expansion open — the one the read names, with its lists from the
+-- database where it is another than the one `known` had (marked where only its place named it), or
+-- none. And the keys they are posted under.
 local function partOf(st, known)
   local v = {}
   if not st then return nil end
@@ -654,7 +495,7 @@ local function partOf(st, known)
   if st.name then
     local ok, lists = pcall(DB.lists, st.name)
     if ok and lists then v.lists = lists end
-    v.selectedFromDatabase = true
+    v.selectedFromDatabase = st.byPlace or nil
   end
   return { keys = KEYS, values = v }
 end
@@ -685,58 +526,17 @@ local function loadedIn(name, e)
   return nil
 end
 
--- The preset rows of reading `r` placed in `lists`, with their stars off picture `s` where FAV reads
--- on (`fav`); and the category they read as.
-local function presetRows(s, pl, r, lists, fav, marks)
-  local lines = Br.lines(Br.rows(r), lists.presets, lists.presetCategories, "preset rows")
-  if fav then Br.stars(s, pl, lines, marks) end
-  return lines, Br.categoryOf(lines, lists.presetCategories)
-end
-
--- The words for a search that did not find `name` in VPS Avenger's `list` ("list", "list of
--- categories", "list of <category>"), by B.seek's word: "is not in" only for a list that moved and
--- an order that does not put the name where the list was read; a name not read where it should have
--- been, or in a list that did not move, is said as not read.
-local function notFound(word, name, list)
-  if word == "guard" then return name .. " cannot be found now" end
-  if word == "unread" then return "VPS Avenger's browser cannot be read now" end
-  if word == "still" then return name .. " was not read, and VPS Avenger's " .. list .. " did not move" end
-  if word == "missed" then return name .. " cannot be read in VPS Avenger's " .. list .. " now" end
-  return name .. " is not in VPS Avenger's " .. list
-end
-
--- The stars read in `lines` over the ones `known` read with FAV on in the same expansion.
-local function starsOver(lines, known, expansion)
+-- The stars read in `rows` over the ones `known` read with FAV on in the same expansion.
+local function starsOver(rows, known, expansion)
   local before = known.selectedExpansion == expansion and known.favoriteView and known.favoriteStates or nil
-  return Br.starStates(lines, before)
-end
-
--- The calibration picture of the grid in view `view`, marked at every tile's point and where a step
--- turns the wheel and clicks the track.
-local function gridPicture(s, ctx, view, tiles)
-  local marks = {}
-  for _, t in ipairs(tiles) do marks[#marks + 1] = { x = t.x, y = t.y } end
-  local L = X.LISTS.grid
-  for _, p in ipairs({ L.wheel, { L.track.x, L.track.up }, { L.track.x, L.track.down } }) do
-    local x, y = ctx.pl:point(p[1], p[2])
-    marks[#marks + 1] = { x = x, y = y }
-  end
-  Br.picture(string.format("browser-grid-%s-%dpct", (string.gsub(string.lower(view), " ", "-")), ctx.pl.zoom or 0), s,
-    ctx.region, marks)
-end
-
--- The calibration picture of an open expansion, marked at the rows, the stars and FAV.
-local function openPicture(s, ctx, lines, marks)
-  local list = table.clone(marks or {})
-  for _, e in ipairs(lines or {}) do list[#list + 1] = { x = e.x, y = e.y } end
-  Br.picture(string.format("browser-open-%dpct", ctx.pl.zoom or 0), s, ctx.region, list)
+  return Br.starStates(rows, before)
 end
 
 -- ── The trips ────────────────────────────────────────────────────────────────
 
--- The first look of a trip: the browser pictured and read for `which` (Br.read's names), its state
+-- The first look of a trip: the browser pictured, its header read and its picture tested, its state
 -- with `expected`; the picture held. nil where the trip ended or is done (`trip:done` called).
-local function look(o, trip, which, expected, label)
+local function look(o, trip, expected)
   local ctx, why = placed(o)
   if not ctx then
     trip:done({ error = why })
@@ -752,30 +552,19 @@ local function look(o, trip, which, expected, label)
     snap:release()
     return nil
   end
-  local byName = Br.read(snap, ctx.pl, which)
+  local st, words, byName, test = stateOf(ctx, snap, expected)
   if not trip:inFront() then
     snap:release()
     return nil
   end
-  local st, words = Br.state(byName, expected)
-  log("'%s': %s", label, words)
-  ctx.snap, ctx.byName, ctx.st = snap, byName, st
+  ctx.snap, ctx.byName, ctx.st, ctx.look, ctx.words = snap, byName, st, test, words
   return ctx
 end
 
--- An expansion of Avenger's own list's that a read of the grid does not have (`tiles`), or nil.
-local function foreign(tiles)
-  if not S.avengerList then return nil end
-  local names = Br.names()
-  for _, t in ipairs(tiles) do
-    if t.how ~= "as read" and not names.own[t.key] then return t.name end
-  end
-  return nil
-end
-
-local function droppedWords(name)
-  return "VPS Avenger lists " .. name .. ", which this session's list does not have; the database's list is shown "
-    .. "again — read Avenger's list again"
+-- The gate's line, once a trip (read/browser.luau, Br.gateLine): what the browser's actions decide
+-- by, and `decision`, the action's.
+local function gate(ctx, label, decision)
+  Br.gateLine(label, ctx, decision)
 end
 
 -- The name the page means by `args.index` in the list of expansions it was last posted (page.luau),
@@ -788,19 +577,37 @@ function B.openArg(args)
   return name
 end
 
--- ── Opening by place (A10, part 6) ───────────────────────────────────────────
--- Where the grid's names are not read — five pixels tall at 80 % on a 1x display — the expansion
--- is opened as the tool opens it: by its place in the list chosen (the page's index into the list it
--- was posted, the roster or Avenger's own), the view stored or read, and the tool's page tables
--- (src/tables/pages.luau): the grid taken to the expansion's page by the tool's clicks on its
--- scrollbar, each followed by a change wait on the grid — a click that moves nothing leaves the grid
--- where that point puts it, and is not made again — and the tile clicked at the tool's point.
--- CONFIRMED BY THE HEADER'S NAME after the click: the one asked, it is open; another, it is closed
--- again and said so; none read, said as the names-read path says it. Where the grid's page is not
--- known — none of this session's clicks placed it in this window and view — it is taken to its top
--- first, by the tool's clicks for its first page from its last; then the page placed is kept, as the
--- tool kept AVGExpansionPageStart, and forgotten where the grid is moved by its words (B.step) and
--- where the header does not confirm the expansion asked (B.open's `opened`).
+-- Where the grid was last put by place (B.byPlace), by window id: { view, page, count }; forgotten
+-- where the expansion it opened is not confirmed, and where the user's own Browse Presets had
+-- Avenger's browser (B.forgetPlaces).
+local placedAt = {}
+
+-- What this session's clicks left where in window `id` — the grid's page, the open expansion's
+-- lists — forgotten, and with them the grid's confirmation there (state.luau, S.forgetGrid): the
+-- user's own browsing in Avenger's browser may have opened an expansion, which nothing then read
+-- would contradict where the header reads no name. Why in the log.
+function B.forgetPlaces(id, why)
+  if not id then return end
+  if placedAt[id] then
+    placedAt[id] = nil
+    log("the grid's page is forgotten: %s", tostring(why))
+  end
+  S.forgetBrowserAt(id, why)
+  S.forgetGrid(id, why)
+end
+
+-- ── Opening an expansion ─────────────────────────────────────────────────────
+-- As the tool opens it: by its place in the list chosen (the page's index into the roster it was
+-- posted), the view stored or read, and the tool's page tables (src/tables/pages.luau): the grid
+-- taken to the expansion's page by the tool's clicks on its scrollbar, each followed by a change
+-- wait on the grid — a click that moves nothing leaves the grid where that point puts it, and is not
+-- made again — and the tile clicked at the tool's point. CONFIRMED BY THE HEADER'S NAME after the
+-- click: the one asked, it is open; another, it is closed again and said so; an expansion open whose
+-- name the header does not read — its title band lit — the one at the place clicked, marked as the
+-- database's (its place in the database's list named it). Where the grid's page is not known — none
+-- of this session's clicks placed it in this window and view — it is taken to its top first, by the
+-- tool's clicks for its first page from its last; then the page placed is kept, as the tool kept
+-- AVGExpansionPageStart, and forgotten where the header does not confirm the expansion asked.
 function B.byPlace(o, trip, ctx, spec)
   local name, view, label, index, list = spec.name, spec.view, spec.label, spec.index, spec.list
   local pic = ctx.snap
@@ -810,117 +617,78 @@ function B.byPlace(o, trip, ctx, spec)
     pic:release()
     log("'%s': %s cannot be placed by its place %s of %d in the view %s — nothing clicked", label, name, tostring(index),
       list and #list or 0, view)
-    return spec.finish({ part = spec.part, error = "the names in VPS Avenger's browser cannot be read now, and "
-      .. name .. " cannot be placed in it by its place" })
+    return spec.finish({ part = spec.part, error = name .. " cannot be placed in VPS Avenger's browser by its place" },
+      "nothing clicked — no place for it")
   end
-  local key = placeKey()
+  local key = ctx.window
   local was = key and placedAt[key]
   local from = (was and was.view == view and was.count == p.count) and was.page or nil
+  local unknown = from == nil and p.count > 1
   local clicks = {}
   -- A grid of one page does not scroll: it stands at its top.
-  if from == nil and p.count > 1 then
+  if unknown then
     for _, c in ipairs(Pg.scroll(view, p.count - 1, 0, p.count)) do clicks[#clicks + 1] = c end
   end
   from = from or 0
   if p.page ~= from then
     for _, c in ipairs(Pg.scroll(view, from, p.page, p.count)) do clicks[#clicks + 1] = c end
   end
-  log("'%s': the names are not read — %s placed by its place %d of %d in the list chosen: page %d of %d, tile %d, in "
-    .. "the view %s; %d click(s) on the scrollbar first%s", label, name, index + 1, #list, p.page + 1, p.count,
-    p.visible + 1, view, #clicks, (was == nil and p.count > 1) and " (the grid's page not known: its top first)" or "")
+  spec.path = string.format("place %d of %d in the list chosen (page %d of %d, tile %d, %s)", index + 1, #list,
+    p.page + 1, p.count, p.visible + 1, view)
+  log("'%s': %s placed by its place %d of %d in the list chosen: page %d of %d, tile %d, in the view %s; %d click(s) on "
+    .. "the scrollbar first%s", label, name, index + 1, #list, p.page + 1, p.count, p.visible + 1, view, #clicks,
+    unknown and " (the grid's page not known: its top first)" or "")
   if #clicks > 0 and spec.said then host.speech.output(spec.said, { interrupt = false }) end
-  local watch = onScreen(ctx, bands("grid"))
-  local i = 0
-  local still = nil -- the point a click at which moved nothing: its repeats are not made
-  local function step()
-    i += 1
-    while clicks[i] and still and clicks[i][2] == still do i += 1 end
-    local c = clicks[i]
-    if not c then
-      if key then placedAt[key] = { view = view, page = p.page, count = p.count } end
-      return spec.click(at, pic)
-    end
-    local ok, said = E.ring.clickAt(o, label, c, nil, true)
-    if not ok then
-      pic:release()
-      if key then placedAt[key] = nil end
-      return spec.finish({ sentence = said })
-    end
-    waitFrom(trip, ctx, pic, watch, B.STEP_WITHIN, B.SETTLE, function(s, changed)
-      if not s then
-        if key then placedAt[key] = nil end
-        return spec.finish({ error = "VPS Avenger's browser cannot be read now" })
-      end
-      pic = s
-      still = (not changed) and c[2] or nil
-      log("'%s': the scrollbar clicked at %.1f — the grid %s", label, c[2], changed and "moved" or "stood still")
-      step()
-    end)
-  end
-  step()
+  if key then placedAt[key] = nil end
+  clickSeries(o, trip, ctx, "grid", pic, clicks, label, function(s, sentence)
+    if sentence then return spec.finish({ sentence = sentence }, "a scrollbar click refused") end
+    if not s then return spec.finish({ error = "VPS Avenger's browser cannot be read now" }, "no picture after a scrollbar click") end
+    if key then placedAt[key] = { view = view, page = p.page, count = p.count } end
+    spec.click(at, s)
+  end)
 end
 
 -- open_expansion: in trip `trip`'s act on overlay `o`, a handler where reads wait, and `trip:inFront()`
 -- after every wait — false has ended the trip, and its give-up says the rest.
 function B.open(o, trip, args, name, label, known)
-  local ctx = look(o, trip, { "caption", "name", "area" }, known.selectedExpansion, label)
+  local ctx = look(o, trip, known.selectedExpansion)
   if not ctx then return end
   local st, pl = ctx.st, ctx.pl
   local function refuse(why, part)
     ctx.snap:release()
-    log("'%s': nothing clicked — %s", label, why)
+    gate(ctx, label, "nothing clicked — " .. why)
     trip:done({ part = part, error = why })
   end
   if not st then return refuse(VIEW_UNREAD) end
   if st.open then return refuse(OPEN_NOW, partOf(st, known)) end
-  -- The view the words are placed by is the one its label reads now, or else the one stored — set
-  -- from the page or confirmed there (read/browser.luau, Br.view): a grid in another view would split
-  -- its names across the wrong columns, which is why the page says how the view came to be.
+  -- The view the place is placed by is the one its label reads now, or else the one stored — set
+  -- from the page or confirmed there (read/browser.luau, Br.view): a grid in another view puts the
+  -- expansion elsewhere, which is why the page says how the view came to be.
   local view = st.view
   if not view then return refuse(VIEW_UNREAD, partOf(st, known)) end
-  local tiles = Br.tiles(ctx.byName["browser area"], view, pl)
-  local dropped = nil
-  local spec = nil
-  local function dropOn(list)
-    local x = foreign(list)
-    if x then
-      dropped = x
-      S.dropAvengerList()
-      -- The order the search goes by is no longer Avenger's own.
-      if spec then spec.ordered = false end
-      log("'%s': the grid shows %s, which Avenger's list read this session does not have — the list dropped", label, x)
-    end
-  end
-  dropOn(tiles)
-  -- The order the search goes by: Avenger's own list where it was read — an order known — else the
-  -- list shown, the roster, which only says which way to look first: how Avenger orders the
-  -- expansions against the catalog nobody has measured (TODO.md, D17).
-  local order = {}
-  local ordered = S.avengerList ~= nil
-  local own = (S.avengerList and S.avengerList.names) or E.shown() or {}
-  for i, n in ipairs(own) do
-    local f = DB.fold(n)
-    if order[f] == nil then order[f] = i end
-  end
-  local key = DB.fold(name)
-  local start = whole(args.page_start)
-  log("'%s': the tool's place, page start %s, tile %s — the first place to look is the grid as it stands", label,
+  gate(ctx, label, "go on, by its place")
+  log("'%s': the page's place, page start %s, tile %s — the tool's tables place it again", label,
     tostring(args.page_start), tostring(args.visible_index))
-  local function finish(result)
-    if dropped then
-      if result.error or result.note then
-        log("'%s': %s", label, droppedWords(dropped))
-      else
-        result.note = droppedWords(dropped)
-      end
-    end
+  local spec = { name = name, view = view, label = label, index = whole(args.index), list = E.shown(),
+    part = partOf(st, known), said = "Looking for " .. name .. " in VPS Avenger's list by its place." }
+  local function finish(result, what)
+    log("'%s': path %s, %s", label, spec.path or "none", what)
     trip:done(result)
   end
+  spec.finish = finish
+  local clicked = "nothing clicked"
 
-  -- Whether the expansion is opened by its place (B.byPlace): its header confirms it.
-  local byPlace = false
-  -- Opened by place, another than the one asked, as its header reads `other`: Close clicked, and the
-  -- browser read again after the change.
+  -- Not confirmed as the one asked — another named, the grid still shown or nothing read: the grid's
+  -- page may not be the one this session placed it at (the user may have scrolled it), so it is not
+  -- kept, and the next Open takes the grid to its top first rather than click the same wrong tile.
+  local function unconfirmed()
+    local k = ctx.window
+    if k and placedAt[k] then
+      placedAt[k] = nil
+      log("'%s': the place is not confirmed — the grid's page is forgotten", label)
+    end
+  end
+  -- The header reads `other`: Close clicked, and the browser read again after the change.
   local function closeAgain(other)
     log("'%s': the header reads %s, not %s — the place was another's; closed again", label, other, name)
     local words = "VPS Avenger opened " .. other .. " where " .. name .. " lies by its place in the list chosen"
@@ -930,181 +698,87 @@ function B.open(o, trip, args, name, label, known)
       if before then before:release() end
       return
     end
-    if not before then return finish({ error = words .. ", and it could not be closed again" }) end
+    if not before then return finish({ error = words .. ", and it could not be closed again" }, clicked .. ", " .. other
+      .. " in the header") end
     local ok, said = E.ring.clickAt(o, label, X.CLOSE, nil, true)
     if not ok then
       before:release()
-      return finish({ sentence = said })
+      return finish({ sentence = said }, clicked .. ", " .. other .. " in the header, Close refused")
     end
-    lookOn(trip, ctx2, before, { X.VIEW_TEXT, X.NAME_TEXT, X.AREA }, function(s) return Br.state(Br.read(s, pl,
-      { "caption", "name" }), nil) end, function(st3) return st3 ~= nil and st3.open == false end, function(st3)
-      if st3 and st3.open == false then
-        return finish({ part = partOf(st3, known), error = words .. "; it was closed again" })
-      end
-      finish({ error = words .. ", and it is still open" })
-    end)
+    lookOn(trip, ctx2, before, { X.VIEW_TEXT, X.NAME_TEXT, X.AREA }, function(s) return (stateOf(ctx2, s, nil)) end,
+      function(st3) return st3 ~= nil and st3.open == false end, function(st3)
+        if st3 and st3.open == false then
+          return finish({ part = partOf(st3, known), error = words .. "; it was closed again" }, clicked .. ", " .. other
+            .. " in the header, closed again")
+        end
+        finish({ error = words .. ", and it is still open" }, clicked .. ", " .. other .. " in the header, still open")
+      end)
   end
-  -- After the click: the caption, the header's name and the columns read, FAV, and the expansion the
-  -- header names — or, where it names none, the one the columns list.
+  -- After the click: the header read and its picture tested, FAV where an expansion reads open.
   local function readOpen(s)
-    local byName = Br.read(s, pl, { "caption", "name", "categories", "presets" })
-    local st2, words = Br.state(byName, name)
+    local st2, words = stateOf(ctx, s, nil)
     log("'%s': after the click, %s", label, words)
     local r = { st = st2 }
     if st2 and st2.open then
       local marks = {}
       r.fav = Br.fav(s, pl, marks)
-      local ok, lists = pcall(DB.lists, st2.name or name)
-      if st2.name and ok and lists then
-        r.lists = lists
-        r.lines, r.category = presetRows(s, pl, byName["presets"], lists, r.fav, marks)
-      end
-      openPicture(s, ctx, r.lines, marks)
+      Br.picture(string.format("browser-open-%dpct", pl.zoom or 0), s, ctx.region, marks)
     end
     return r
   end
   local function opened(r, changed)
     local st2 = r and r.st
-    -- Opened by its place, and not confirmed as the one asked — another named, none, the grid still
-    -- shown or nothing read: the grid's page may not be the one this session placed it at (the user
-    -- may have scrolled it), so it is not kept, and the next Open by place takes the grid to its top
-    -- first rather than click the same wrong tile again.
-    if byPlace and not (st2 and st2.open and st2.name == name) then
-      local k = placeKey()
-      if k and placedAt[k] then
-        placedAt[k] = nil
-        log("'%s': the place is not confirmed — the grid's page is forgotten", label)
-      end
-    end
-    if not st2 then return finish({ error = "VPS Avenger's browser cannot be read now" }) end
-    -- Opened by its place, and the header names another: closed again, and said so.
-    if byPlace and st2.open and st2.name and st2.score == nil and st2.name ~= name then
-      return closeAgain(st2.name)
-    end
+    if not (st2 and st2.open and st2.name == name) then unconfirmed() end
+    if not st2 then return finish({ error = "VPS Avenger's browser cannot be read now" }, clicked .. ", nothing read after") end
+    if st2.open and st2.name and st2.name ~= name then return closeAgain(st2.name) end
     if st2.open == false then
       log("'%s': the grid still shown (%s)", label, changed and "the picture changed" or "unchanged")
-      return finish({ part = partOf(st2, known), error = "nothing VPS Avenger shows changed" })
+      return finish({ part = partOf(st2, known), error = "nothing VPS Avenger shows changed" }, clicked
+        .. ", the grid still shown")
     end
+    local okL, lists = pcall(DB.lists, name)
+    local v = { expansionOpen = true, selectedExpansion = name, lists = okL and lists or nil, favoriteView = r.fav,
+      loadedIndex = loadedIn(E.ring.lastName(), name) }
+    -- What this session's click opened, kept for the reads after it (Br.state): its lists' places
+    -- not known yet — nothing below the header is read — so its first category's or preset's action
+    -- clicks the category first.
+    S.setBrowserAt(ctx.window, { expansion = name })
     if not st2.name then
-      return finish({ part = partOf(st2, known), error = DB.present and "VPS Avenger shows an expansion open; which one "
-        .. "cannot be read now" or ("VPS Avenger shows an expansion open where " .. name .. " was clicked; which one "
-        .. "cannot be read without the preset database") })
+      v.selectedFromDatabase = true
+      return finish({ part = { keys = KEYS, values = v }, focus = "open-expansion-name", note = "VPS Avenger shows an "
+        .. "expansion open where " .. name .. " lies by its place in the list chosen; its name cannot be read in the "
+        .. "header now" }, clicked .. ", an expansion open, its name not read in the header")
     end
-    local v = { expansionOpen = true, selectedExpansion = st2.name, lists = r.lists, favoriteView = r.fav,
-      categoryShown = r.category, pageCategory = r.category, loadedIndex = loadedIn(E.ring.lastName(), st2.name) }
-    if r.fav and r.lines then v.favoriteStates = Br.starStates(r.lines) end
-    if st2.name ~= name then
-      v.selectedFromDatabase = st2.score ~= nil or nil
-      return finish({ part = { keys = KEYS, values = v }, error = "VPS Avenger opened " .. st2.name
-        .. (st2.score ~= nil and ", by the presets it lists (from the database)" or ", as its header reads") })
-    end
-    -- Opened by its place and named by what it lists, not by its header: marked so on the page.
-    if byPlace and st2.score ~= nil then v.selectedFromDatabase = true end
-    finish({ part = { keys = KEYS, values = v }, focus = "open-expansion-name" })
+    finish({ part = { keys = KEYS, values = v }, focus = "open-expansion-name" }, clicked .. ", the header confirms it")
   end
-  local function click(t, pic)
-    log("'%s': clicking '%s' at (%d,%d), %s", label, t.name, t.x, t.y, t.where
-      or string.format("the middle of its words (read '%s', %s)", tostring(t.read), tostring(t.how)))
-    local ok, said = E.ring.clickPoint(o, label, t.x, t.y, nil, true)
+  spec.click = function(at, pic)
+    local x, y = pl:point(at[1], at[2])
+    log("'%s': clicking %s at (%d,%d), the tool's point for its place", label, name, x, y)
+    S.forgetGrid(ctx.window, "Open clicks a tile")
+    S.forgetBrowserAt(ctx.window, "Open clicks a tile")
+    local ok, said = E.ring.clickPoint(o, label, x, y, nil, true)
     if not ok then
       pic:release()
-      return finish({ sentence = said })
+      return finish({ sentence = said }, "the tile's click refused")
     end
-    lookOn(trip, ctx, pic, { X.VIEW_TEXT, X.NAME_TEXT, X.AREA }, readOpen, function(r) return r.st ~= nil and r.st.open == true end,
-      opened)
+    clicked = string.format("clicked (%d,%d)", x, y)
+    Br.picture(string.format("browser-grid-%s-%dpct", (string.gsub(string.lower(view), " ", "-")), pl.zoom or 0), pic,
+      ctx.region, { { x = x, y = y } })
+    lookOn(trip, ctx, pic, { X.VIEW_TEXT, X.NAME_TEXT, X.AREA }, readOpen, function(r2)
+      return r2.st ~= nil and r2.st.open == true
+    end, opened)
   end
-  gridPicture(ctx.snap, ctx, view, tiles)
-  if Br.named(tiles) == 0 then
-    byPlace = true
-    return B.byPlace(o, trip, ctx, { name = name, view = view, label = label, index = whole(args.index), list = E.shown(),
-      part = partOf(st, known), said = "Looking for " .. name .. " in VPS Avenger's list by its place.", finish = finish,
-      click = function(at, pic)
-        local x, y = pl:point(at[1], at[2])
-        click({ name = name, x = x, y = y, where = "the tool's point for its place" }, pic)
-      end })
-  end
-  spec = {
-    list = "grid",
-    label = label,
-    pic = ctx.snap,
-    entries = tiles,
-    read = function(s)
-      local b = Br.read(s, pl, { "area" })
-      local t = Br.tiles(b["browser area"], view, pl)
-      dropOn(t)
-      return t
-    end,
-    match = function(t) return t.key == key end,
-    place = function(t) return order[t.key] end,
-    target = order[key],
-    ordered = ordered,
-    hint = start and (start > 0 and "down" or "up") or nil,
-    said = "Looking for " .. name .. " in VPS Avenger's list.",
-    onFound = click,
-    onNotFound = function(word, pic, sentence)
-      if pic then pic:release() end
-      if sentence then return finish({ sentence = sentence }) end
-      -- The name is one of Avenger's own list, still held: it is there, and was not read.
-      if word == "absent" and spec.ordered then word = "missed" end
-      log("'%s': %s not found (%s) — nothing clicked", label, name, word)
-      finish({ error = notFound(word, name, "list") })
-    end,
-  }
-  B.seek(o, trip, ctx, spec)
+  B.byPlace(o, trip, ctx, spec)
 end
 
--- Category `target` (its place in `lists.categories`, from 1) found in Avenger's list of categories
--- from picture `pic` (taken over) and its categories read, `cats`, and clicked; then `next(byName,
--- changed, s)` with the picture after the click — held, the caller's — read for the caption and the
--- columns, looked on from while its preset rows do not read as the target's.
-local function chooseCategory(o, trip, ctx, label, lists, target, pic, cats, next, onFail)
-  local name = lists.categories[target]
-  B.seek(o, trip, ctx, {
-    list = "categories",
-    label = label,
-    pic = pic,
-    entries = Br.placed(cats),
-    read = function(s)
-      local b = Br.read(s, ctx.pl, { "categories" })
-      return Br.placed(Br.lines(Br.rows(b["categories"]), lists.categories, nil, "categories"))
-    end,
-    match = function(e) return e.index == target end,
-    place = function(e) return e.index end,
-    target = target,
-    ordered = true,
-    onFound = function(e, s)
-      log("'%s': clicking '%s' at (%d,%d), the middle of its words (read '%s', %s)", label, e.name, e.x, e.y, e.read, e.how)
-      local ok, said = E.ring.clickPoint(o, label, e.x, e.y, nil, true)
-      if not ok then
-        s:release()
-        return onFail({ sentence = said })
-      end
-      lookOn(trip, ctx, s, { X.CATEGORY_TEXT, X.PRESET_TEXT }, function(s2)
-        local b = Br.read(s2, ctx.pl, { "caption", "name", "categories", "presets" })
-        local _, c = presetRows(s2, ctx.pl, b["presets"], lists, false)
-        return { byName = b, category = c }
-      end, function(r) return r.category == name end, function(r, changed, s2)
-        if not r then return onFail({ error = "the presets VPS Avenger lists cannot be read now" }) end
-        next(r.byName, changed, s2)
-      end, true)
-    end,
-    onNotFound = function(word, s, sentence)
-      if s then s:release() end
-      if sentence then return onFail({ sentence = sentence }) end
-      log("'%s': %s not found among the categories (%s) — nothing clicked", label, name, word)
-      onFail({ error = notFound(word, name, "list of categories") })
-    end,
-  })
-end
+-- ── An open expansion's lists ────────────────────────────────────────────────
 
 -- Why nothing is done in an open expansion, from the first look's state `st`: nil where the
 -- expansion `expansion` (the one known open) reads open, or an expansion reads open and is not named.
 local function notOpen(st, expansion)
   if not st then return VIEW_UNREAD end
   if st.open ~= true then return NONE_OPEN end
-  if st.name and st.name ~= expansion then
-    return "VPS Avenger shows another expansion, " .. st.name .. ", by the presets it lists (from the database)"
-  end
+  if st.name and st.name ~= expansion then return "VPS Avenger shows another expansion, " .. st.name end
   return nil
 end
 
@@ -1119,44 +793,94 @@ function B.categoryArg(args, known)
   return i + 1
 end
 
--- select_expansion_category, as B.open: the categories read, the target looked for and clicked, then
--- the preset rows read and placed, which say whether VPS Avenger took it.
+-- The presets of category `cat` in `lists`: their places in the expansion's list (from 1), in its
+-- order — the order Avenger lists a category's presets in, as the tool counts them.
+local function membersOf(lists, cat)
+  local out = {}
+  for i, c in ipairs(lists.presetCategories) do
+    if c == cat then out[#out + 1] = i end
+  end
+  return out
+end
+
+-- Category `cat` of `lists` (the expansion `expansion`'s) clicked, from picture `pic` (taken over):
+-- the categories' scrollbar first clicked to the end that shows it where this session's clicks did
+-- not leave it there (Pg.category, Pg.categoryScroll), then its row; a change wait on the two lists
+-- after it. `done(picture or nil, changed, sentence?)` — the picture the caller's — and the facts
+-- (S.browserAt) say the category clicked and its presets at their top, as the tool takes them after
+-- a category's click.
+local function clickCategory(o, trip, ctx, label, expansion, lists, cat, pic, done)
+  local ci = table.find(lists.categories, cat)
+  local place = ci and Pg.category(ci - 1, #lists.categories)
+  if not place then
+    pic:release()
+    return done(nil, false, nil, cat .. " is not one of " .. expansion .. "'s categories in the database")
+  end
+  local at = S.browserAt(ctx.window)
+  if not (at and at.expansion == expansion) then at = { expansion = expansion } end
+  local clicks = (place.at and at.categories ~= place.at) and Pg.categoryScroll(place.at) or {}
+  if #clicks > 0 then
+    log("'%s': the list of categories to its %s first, for %s, the %d of %d", label, place.at, cat, ci, #lists.categories)
+  end
+  clickSeries(o, trip, ctx, "categories", pic, clicks, label, function(s, sentence)
+    if sentence then return done(nil, false, sentence) end
+    if not s then return done(nil, false) end
+    if place.at then at.categories = place.at end
+    local x, y = ctx.pl:point(place.point[1], place.point[2])
+    log("'%s': clicking %s at (%d,%d), the tool's row %d of the categories", label, cat, x, y, place.row + 1)
+    local ok, said = E.ring.clickPoint(o, label, x, y, nil, true)
+    if not ok then
+      s:release()
+      return done(nil, false, said)
+    end
+    at.category, at.presets = cat, { page = 0, first = 0, final = false }
+    S.setBrowserAt(ctx.window, at)
+    waitFrom(trip, ctx, s, onScreen(ctx, { X.CATEGORY_TEXT, X.PRESET_TEXT }), CHANGE_WITHIN, B.SETTLE, function(s2, changed)
+      done(s2, changed)
+    end)
+  end)
+end
+
+-- select_expansion_category: the category clicked by its place (clickCategory), then FAV and, with
+-- FAV on, the stars of its first page's rows. Nothing reads which presets Avenger lists: the change
+-- after the click is all there is, and the category is the page's from then on.
 function B.category(o, trip, target, label, known)
   local lists, expansion = known.lists, known.selectedExpansion
   local name = lists.categories[target]
-  local ctx = look(o, trip, { "caption", "name", "categories", "presets" }, expansion, label)
+  local ctx = look(o, trip, expansion)
   if not ctx then return end
   local why = notOpen(ctx.st, expansion)
   if why then
     ctx.snap:release()
-    log("'%s': nothing clicked — %s", label, why)
+    gate(ctx, label, "nothing clicked — " .. why)
     return trip:done({ part = partOf(ctx.st, known), error = why })
   end
-  local cats = Br.lines(Br.rows(ctx.byName["categories"]), lists.categories, nil, "categories")
-  if #Br.placed(cats) == 0 then
-    ctx.snap:release()
-    return trip:done({ error = "the categories in VPS Avenger's browser cannot be read now" })
-  end
-  chooseCategory(o, trip, ctx, label, lists, target, ctx.snap, cats, function(byName, changed, s)
+  gate(ctx, label, "go on, by its place")
+  local was = S.browserAt(ctx.window)
+  local shownBefore = was and was.expansion == expansion and was.category == name
+  clickCategory(o, trip, ctx, label, expansion, lists, name, ctx.snap, function(s, changed, sentence, refusal)
+    if sentence then return trip:done({ sentence = sentence }) end
+    if refusal then return trip:done({ error = refusal }) end
+    if not s then return trip:done({ error = "VPS Avenger's browser cannot be read now" }) end
     local fav = Br.fav(s, ctx.pl)
-    local lines, shown = presetRows(s, ctx.pl, byName["presets"], lists, fav)
+    local v = { pageCategory = name, favoriteView = fav }
+    local keys = { "pageCategory", "favoriteView", "favoriteStates" }
+    if fav then
+      local rows = Br.shownRows(ctx.pl, ctx.window, expansion, lists)
+      if rows then
+        Br.stars(s, ctx.pl, rows)
+        v.favoriteStates = starsOver(rows, known, expansion)
+      end
+    end
     s:release()
-    local v = { categoryShown = shown, favoriteView = fav, favoriteStates = fav and starsOver(lines, known, expansion) or nil }
-    local keys = { "categoryShown", "favoriteView", "favoriteStates" }
     local result = { part = { keys = keys, values = v } }
-    if shown == name then
-      v.pageCategory = name
-      keys[#keys + 1] = "pageCategory"
-      return trip:done(result)
+    if not changed then
+      log("'%s': nothing in the lists changed after %s's click%s", label, name, shownBefore and " — it was shown" or "")
+      result.note = shownBefore and ("unchanged, " .. name)
+        or (name .. " clicked; nothing VPS Avenger shows changed, and its presets cannot be read")
     end
-    if shown == nil then
-      result.note = name .. " chosen; which presets VPS Avenger lists cannot be read now"
-      return trip:done(result)
-    end
-    log("'%s': the rows read as %s's after %s was clicked (%s)", label, shown, name, changed and "changed" or "unchanged")
-    result.error = "VPS Avenger lists the presets of " .. shown .. " (by their names, from the database)"
     trip:done(result)
-  end, function(result) trip:done(result) end)
+  end)
 end
 
 -- What a preset row's action is given: { target = its place in the list, from 1, category, keep =
@@ -1169,9 +893,12 @@ function B.presetArg(args, known)
 end
 
 -- select_expansion_preset ("select"), load_expansion_preset ("load"), mark_expansion_preset_favorite
--- ("mark"), as B.open: the rows read; where they are another category's (or none is placed), the
--- target's category found and clicked first; the row looked for; then its click, its double-click,
--- or its star's click. `forget` (actions.luau's go) is told before a click that may load a preset.
+-- ("mark"), as the tool clicks them: the preset's category clicked first where this session's clicks
+-- did not leave it shown (the tool clicked it where the page showed every category, and assumed it
+-- shown otherwise), the presets' scrollbar clicked to the preset's page by the tool's table, then
+-- its row's click, its double-click, or its star's click. `forget` (actions.luau's go) is told
+-- before a click that may load a preset. Select and Load are confirmed by the preset's name read
+-- after them; one that is not the preset asked is said, and where the lists stand is forgotten.
 function B.preset(o, trip, forget, kind, arg, label, known)
   local lists, expansion = known.lists, known.selectedExpansion
   local target, cat = arg.target, arg.category
@@ -1181,7 +908,7 @@ function B.preset(o, trip, forget, kind, arg, label, known)
     was = E.ring.nameNow(o) or E.ring.lastName()
     if not trip:inFront() then return end
   end
-  local ctx = look(o, trip, { "caption", "name", "categories", "presets" }, expansion, label)
+  local ctx = look(o, trip, expansion)
   if not ctx then return end
   local pl = ctx.pl
   local fav = Br.fav(ctx.snap, pl)
@@ -1190,25 +917,31 @@ function B.preset(o, trip, forget, kind, arg, label, known)
     if fav == false then why = "the favorites view is off in VPS Avenger; turn FAV on first" end
     if fav == nil then why = "the favorites view cannot be read now" end
   end
+  if not why and (not cat or cat == "") then why = pname .. " has no category in the database" end
+  local members = cat and membersOf(lists, cat) or {}
+  local within = table.find(members, target)
+  if not why and not within then why = pname .. " has no place in its category in the database" end
   if why then
     ctx.snap:release()
-    log("'%s': nothing clicked — %s", label, why)
+    gate(ctx, label, "nothing clicked — " .. why)
     return trip:done({ part = partOf(ctx.st, known), error = why })
   end
+  gate(ctx, label, "go on, by its place")
   local page = arg.keep and B.ALL or cat
-  local readRows = function(s)
-    local b = Br.read(s, pl, { "presets" })
-    return Br.placed(Br.lines(Br.rows(b["presets"]), lists.presets, lists.presetCategories, "preset rows"))
+  local place = Pg.presetPlace(within - 1, #members)
+  -- The browser's values after the row's action: the page's category, FAV and the stars.
+  local function browserPart(rows)
+    local v = { pageCategory = page, favoriteView = fav }
+    if fav and rows then v.favoriteStates = starsOver(rows, known, expansion) end
+    return { keys = { "pageCategory", "favoriteView", "favoriteStates" }, values = v }
   end
-  -- The browser's values after the row's action: the category shown, the page's, FAV and the stars.
-  local function browserPart(lines)
-    local v = { categoryShown = cat, pageCategory = page, favoriteView = fav }
-    if fav then v.favoriteStates = starsOver(lines or {}, known, expansion) end
-    return { keys = { "categoryShown", "pageCategory", "favoriteView", "favoriteStates" }, values = v }
+  -- Where the lists stand is not what this session's clicks left: the preset clicked was another.
+  local function notWhereLeft(now)
+    S.forgetBrowserAt(ctx.window, "the preset read after the click is " .. tostring(now) .. ", not " .. pname)
   end
 
   -- Select and Load: the name watched as after ◀ and ▶, then the strip and the macros read with their
-  -- text (the tool's refresh), and with FAV on the rows' stars once more.
+  -- text (the tool's refresh), and with FAV on the stars of the rows shown once more.
   local function afterName(now, before, changed)
     -- The watch's end comes on a later turn: the strip and the macros are read only on Avenger.
     if not trip:inFront() then return end
@@ -1225,41 +958,53 @@ function B.preset(o, trip, forget, kind, arg, label, known)
     if fav then
       local s = picture(ctx)
       if s then
-        local lines = readRows(s)
-        if trip:inFront() then Br.stars(s, pl, lines) end
+        local rows = Br.shownRows(pl, ctx.window, expansion, lists)
+        if rows and trip:inFront() then Br.stars(s, pl, rows) end
         s:release()
         if not trip:inFront() then return end
-        part.values.favoriteStates = starsOver(lines, known, expansion)
+        part.values.favoriteStates = rows and starsOver(rows, known, expansion) or nil
       end
     end
     local loaded = loadedIn(now, expansion)
     part = merged(part, { keys = { "loadedIndex" }, values = { loadedIndex = loaded } })
-    local note = nil
-    if not changed and before ~= nil and now == before then note = "unchanged, " .. now end
-    trip:done({ set = E.named(now), part = part, note = note })
+    local result = { set = E.named(now), part = part }
+    if not changed and before ~= nil and now == before then
+      result.note = "unchanged, " .. now
+      log("'%s': the name stayed %s after the click", label, now)
+    elseif loaded == target - 1 then
+      log("'%s': the name read is %s — confirmed", label, now)
+    else
+      notWhereLeft(now)
+      result.error = "VPS Avenger shows " .. now .. " where " .. pname .. " lies by its place in " .. cat
+      log("'%s': the name read is %s, not %s — not the place asked", label, now, pname)
+    end
+    trip:done(result)
   end
 
-  local function act(row, pic)
+  local function act(pic)
+    local point, star = Pg.presetPoint(place.row, place.adjust)
+    local x, y = pl:point(point[1], point[2])
+    local row = { index = target, y = y }
     if kind == "mark" then
+      local sx = pl:point(star[1], star[2])
       Br.stars(pic, pl, { row })
       local before = row.star
-      local x = math.floor(pl:exact(X.PRESET_FAVORITE_X, 0) + 0.5)
-      log("'%s': clicking %s's star at (%d,%d), its row's height (read '%s', %s)", label, row.name, x, row.y, row.read,
-        row.how)
-      local ok, said = E.ring.clickPoint(o, label, x, row.y, nil, true)
+      log("'%s': clicking %s's star at (%d,%d), the tool's row %d of page %d of %s", label, pname, sx, y, place.row + 1,
+        place.page + 1, cat)
+      local ok, said = E.ring.clickPoint(o, label, sx, y, nil, true)
       if not ok then
         pic:release()
         return trip:done({ sentence = said })
       end
       -- The star's box on screen, the change wait's watch.
       local k = pl.k
-      local box = { math.floor(x - X.FAVORITE_STATE[1] / 2 * k), math.floor(row.y - X.FAVORITE_STATE[2] / 2 * k),
-        math.ceil(x + X.FAVORITE_STATE[1] / 2 * k), math.ceil(row.y + X.FAVORITE_STATE[2] / 2 * k) }
+      local box = { math.floor(sx - X.FAVORITE_STATE[1] / 2 * k), math.floor(y - X.FAVORITE_STATE[2] / 2 * k),
+        math.ceil(sx + X.FAVORITE_STATE[1] / 2 * k), math.ceil(y + X.FAVORITE_STATE[2] / 2 * k) }
       local deadline = host.now() + CHANGE_WITHIN
       local function round(from)
         waitFrom(trip, ctx, from, { box }, math.max(1, deadline - host.now()), 0, function(s, changed)
           if not s then return trip:done({ part = browserPart(nil), error = "the star cannot be read now" }) end
-          local again = { index = row.index, x = row.x, y = row.y }
+          local again = { index = target, y = y }
           Br.stars(s, pl, { again })
           if not trip:inFront() then
             s:release()
@@ -1274,8 +1019,7 @@ function B.preset(o, trip, forget, kind, arg, label, known)
           if again.star == nil then
             return trip:done({ part = part, error = "the star cannot be read now" })
           end
-          part.values.favoriteStates = part.values.favoriteStates or {}
-          part.values.favoriteStates[row.index - 1] = again.star
+          part.values.favoriteStates = starsOver({ again }, known, expansion)
           local words = again.star and "a favorite" or "not a favorite"
           if before ~= nil and again.star == before then return trip:done({ part = part, note = "unchanged, " .. words }) end
           if not changed then return trip:done({ part = part, note = "unchanged, " .. words }) end
@@ -1286,93 +1030,79 @@ function B.preset(o, trip, forget, kind, arg, label, known)
     end
     -- Whatever a click on a row does in Avenger — select, load — may change the preset.
     forget("the page's " .. label)
-    log("'%s': %s %s at (%d,%d), the middle of its words (read '%s', %s)", label,
-      kind == "load" and "double-clicking" or "clicking", row.name, row.x, row.y, row.read, row.how)
+    log("'%s': %s %s at (%d,%d), the tool's row %d of page %d of %s", label, kind == "load" and "double-clicking"
+      or "clicking", pname, x, y, place.row + 1, place.page + 1, cat)
     pic:release()
     local ok, said
     if kind == "load" then
-      ok, said = E.ring.doublePoint(o, label, row.x, row.y, true, function(okD, saidD)
+      ok, said = E.ring.doublePoint(o, label, x, y, true, function(okD, saidD)
         if okD then return E.ring.watchName(o, was, afterName, label) end
         if trip:inFront() then trip:done({ sentence = saidD }) end
       end)
     else
-      ok, said = E.ring.clickPoint(o, label, row.x, row.y, nil, true)
+      ok, said = E.ring.clickPoint(o, label, x, y, nil, true)
       if ok then E.ring.watchName(o, was, afterName, label) end
     end
     if not ok then return trip:done({ sentence = said }) end
   end
 
-  local function rowsFrom(pic, rows)
-    B.seek(o, trip, ctx, {
-      list = "presets",
-      label = label,
-      pic = pic,
-      entries = rows,
-      read = readRows,
-      match = function(e) return e.index == target end,
-      place = function(e) return e.index end,
-      target = target,
-      ordered = true,
-      onFound = act,
-      onNotFound = function(word, s, sentence)
-        if s then s:release() end
-        if sentence then return trip:done({ sentence = sentence }) end
-        log("'%s': %s not found among the rows (%s) — nothing clicked", label, pname, word)
-        trip:done({ part = browserPart(nil), error = notFound(word, pname, "list of " .. cat) })
-      end,
-    })
+  -- Its page: from where this session's clicks left the category's list, the tool's clicks.
+  local function toPage(pic)
+    -- With no window to keep it by, what the category's click just did.
+    local at = S.browserAt(ctx.window) or { expansion = expansion, category = cat, presets = { page = 0, first = 0 } }
+    local clicks = Pg.presetScroll(at.presets, place, #members)
+    if #clicks > 0 then
+      log("'%s': %s is the %d of %d in %s — page %d, row %d; %d click(s) on the presets' scrollbar", label, pname,
+        within, #members, cat, place.page + 1, place.row + 1, #clicks)
+    end
+    clickSeries(o, trip, ctx, "presets", pic, clicks, label, function(s, sentence)
+      if sentence then return trip:done({ sentence = sentence }) end
+      if not s then return trip:done({ error = "VPS Avenger's browser cannot be read now" }) end
+      at.presets = { page = place.page, first = place.first, final = place.final }
+      S.setBrowserAt(ctx.window, at)
+      act(s)
+    end)
   end
 
-  local rows = Br.placed(Br.lines(Br.rows(ctx.byName["presets"]), lists.presets, lists.presetCategories, "preset rows"))
-  local shown = Br.categoryOf(rows, lists.presetCategories)
-  if shown == cat then return rowsFrom(ctx.snap, rows) end
-  -- The rows are another category's, or none was placed: the target's category first — the read
-  -- decides, not the page's flag (the tool clicked it only where the page showed every category).
-  log("'%s': the rows read as %s's, %s is in %s — its category first", label, tostring(shown), pname, cat)
-  local cats = Br.lines(Br.rows(ctx.byName["categories"]), lists.categories, nil, "categories")
-  local ci = table.find(lists.categories, cat)
-  if not ci then
-    ctx.snap:release()
-    return trip:done({ error = pname .. " has no category in the database" })
-  end
-  chooseCategory(o, trip, ctx, label, lists, ci, ctx.snap, cats, function(byName, _, s)
-    local lines = Br.placed(Br.lines(Br.rows(byName["presets"]), lists.presets, lists.presetCategories, "preset rows"))
-    local now = Br.categoryOf(lines, lists.presetCategories)
-    if now ~= cat then
-      s:release()
-      return trip:done({ part = { keys = { "categoryShown" }, values = { categoryShown = now } },
-        error = now and ("VPS Avenger lists the presets of " .. now .. " (by their names, from the database)")
-          or (cat .. " chosen; which presets VPS Avenger lists cannot be read now") })
-    end
-    rowsFrom(s, lines)
-  end, function(result) trip:done(result) end)
+  local at = S.browserAt(ctx.window)
+  if at and at.expansion == expansion and at.category == cat and at.presets then return toPage(ctx.snap) end
+  -- The category Avenger shows is not known from this session's clicks: its category first.
+  log("'%s': %s is in %s, which this session's clicks did not leave shown — its category first", label, pname, cat)
+  clickCategory(o, trip, ctx, label, expansion, lists, cat, ctx.snap, function(s, _, sentence, refusal)
+    if sentence then return trip:done({ sentence = sentence }) end
+    if refusal then return trip:done({ error = refusal }) end
+    if not s then return trip:done({ error = "VPS Avenger's browser cannot be read now" }) end
+    toPage(s)
+  end)
 end
 
--- select_all_expansion_presets: no click — the name read, then the browser's rows, and the page's
--- category "every one".
+-- select_all_expansion_presets: no click — the name read, FAV, and the page's category "every one".
 function B.all(o, trip, label, known)
   local name = E.ring.nameNow(o)
   if not trip:inFront() then return end
   local expansion = known.selectedExpansion
-  local ctx = look(o, trip, { "caption", "name", "categories", "presets" }, expansion, label)
+  local ctx = look(o, trip, expansion)
   if not ctx then return end
   local st = ctx.st
   local why = notOpen(st, expansion)
   if why then
     ctx.snap:release()
+    gate(ctx, label, "nothing clicked — " .. why)
     return trip:done({ set = E.named(name), part = partOf(st, known), error = why })
   end
-  local lists = known.lists
+  gate(ctx, label, "no click")
   local fav = Br.fav(ctx.snap, ctx.pl)
   local v = { pageCategory = B.ALL, favoriteView = fav, loadedIndex = loadedIn(name, expansion) }
-  if lists then
-    local lines, shown = presetRows(ctx.snap, ctx.pl, ctx.byName["presets"], lists, fav)
-    v.categoryShown = shown
-    if fav then v.favoriteStates = starsOver(lines, known, expansion) end
+  if fav and known.lists then
+    local rows = Br.shownRows(ctx.pl, ctx.window, expansion, known.lists)
+    if rows then
+      Br.stars(ctx.snap, ctx.pl, rows)
+      v.favoriteStates = starsOver(rows, known, expansion)
+    end
   end
   ctx.snap:release()
-  trip:done({ set = E.named(name), part = { keys = { "pageCategory", "favoriteView", "loadedIndex", "categoryShown",
-    "favoriteStates" }, values = v }, focus = "expansion-category-all" })
+  trip:done({ set = E.named(name), part = { keys = { "pageCategory", "favoriteView", "loadedIndex", "favoriteStates" },
+    values = v }, focus = "expansion-category-all" })
 end
 
 -- go_to_loaded_preset_category: no trip, as the tool's — the category the database has for the name
@@ -1403,26 +1133,21 @@ end
 
 local CANNOT_TELL = "whether an expansion is open in VPS Avenger, and which, cannot be told now"
 
--- align_open_expansion: no click. The header's name says which expansion is open where it is read
--- as one (read/browser.luau, Br.state); where it is not, every read after the page key and every
--- action of the browser's scores the expansion the page has open first, and takes it on one preset
--- name its columns share (read/expansion.luau, E.fromArea), so an expansion that opened in its place
--- stays named read after read; this read expects none, and the database names what the columns list over its whole catalog
--- (the tool scored its roster) — or, where two expansions list what was read as much, names neither,
--- and which one is open cannot be read (the tool took the first). The name read first, as All reads
--- it (the tool placed the preset loaded in what it found); then the caption and the columns, once —
--- the tool's 0.45 s second read goes: every trip's first read comes at the same arrival. Posted:
--- what the read says; with an expansion named, its lists, the rows' category, FAV and, with FAV on,
--- the stars; the page's own category only where the expansion is another than the page had (the
--- tool cleared its "All" only then). Nothing settled: every value of the browser's posted as not
--- read, never kept.
+-- align_open_expansion: no click. The name read first, as All reads it (the tool placed the preset
+-- loaded in what it found); then ONE picture of the browser, its header read and its picture tested
+-- with no expansion expected — so an expansion the page has open by its place is not taken for the
+-- one shown unless the header reads its name. The tool read the area's words twice, 0.45 s apart, and
+-- scored its roster by them; nothing below the header is read here. Posted: what the read says; with
+-- an expansion named, its lists and FAV, the page's own category only where the expansion is another
+-- than the page had. Nothing settled: every value of the browser's posted as not read, never kept.
 function B.align(o, trip, label, known)
   local name = E.ring.nameNow(o)
   if not trip:inFront() then return end
-  local ctx = look(o, trip, { "caption", "name", "categories", "presets" }, nil, label)
+  local ctx = look(o, trip, nil)
   if not ctx then return end
   local st, s, pl = ctx.st, ctx.snap, ctx.pl
   local set = E.named(name)
+  gate(ctx, label, "no click")
   if not st then
     s:release()
     return trip:done({ set = set, part = { keys = KEYS, values = {} }, error = CANNOT_TELL })
@@ -1433,233 +1158,33 @@ function B.align(o, trip, label, known)
   end
   if not st.name then
     s:release()
-    return trip:done({ set = set, part = partOf(st, known), error = "VPS Avenger shows an expansion open; which one cannot be "
-      .. (DB.present and "read now" or "read without the preset database") })
+    return trip:done({ set = set, part = { keys = KEYS, values = { expansionOpen = true, selectedExpansion = "" } },
+      error = "VPS Avenger shows an expansion open; which one cannot be read in its header now" })
   end
   local y = st.name
   local had = known.expansionOpen == true and known.selectedExpansion ~= "" and known.selectedExpansion or nil
   local marks = {}
   local fav = Br.fav(s, pl, marks)
-  local v = { expansionOpen = true, selectedExpansion = y, favoriteView = fav, loadedIndex = loadedIn(name, y),
-    -- Named by what it lists, the database's naming — unless the header read its name, or the page had
-    -- it open by the word clicked, as the key's read keeps it (read/open.luau).
-    selectedFromDatabase = st.score ~= nil and not (y == known.selectedExpansion and not known.selectedFromDatabase)
-      or nil }
+  local v = { expansionOpen = true, selectedExpansion = y, favoriteView = fav, loadedIndex = loadedIn(name, y) }
   local keys = { "expansionView", "expansionViewFrom", "expansionOpen", "selectedExpansion", "lists", "loadedIndex",
-    "favoriteView", "favoriteStates", "categoryShown", "selectedFromDatabase" }
+    "favoriteView", "favoriteStates", "selectedFromDatabase" }
   local okL, lists = pcall(DB.lists, y)
-  local lines = nil
-  if okL and lists then
-    v.lists = lists
-    lines, v.categoryShown = presetRows(s, pl, ctx.byName["presets"], lists, fav, marks)
-    if fav then v.favoriteStates = starsOver(lines, known, y) end
-  end
+  if okL and lists then v.lists = lists end
   if y ~= had then
-    v.pageCategory = v.categoryShown
+    S.forgetBrowserAt(ctx.window, "Correct open Expansion reads " .. y)
+    v.pageCategory = nil
     keys[#keys + 1] = "pageCategory"
-    log("'%s': the page had %s; %s by what it lists (%d)", label, had or "no expansion open", y, st.score or 0)
+    log("'%s': the page had %s; the header reads %s", label, had or "no expansion open", y)
+  elseif fav then
+    local rows = v.lists and Br.shownRows(pl, ctx.window, y, v.lists)
+    if rows then
+      Br.stars(s, pl, rows, marks)
+      v.favoriteStates = starsOver(rows, known, y)
+    end
   end
-  openPicture(s, ctx, lines, marks)
+  Br.picture(string.format("browser-open-%dpct", pl.zoom or 0), s, ctx.region, marks)
   s:release()
-  local words = y .. (v.selectedFromDatabase and ", from the database" or "")
-  trip:done({ set = set, part = { keys = keys, values = v },
-    note = (y == had and "unchanged, " or "corrected to ") .. words })
-end
-
--- ── Avenger's own list ───────────────────────────────────────────────────────
-
--- How sure a tile's name is, where the reads of one place agree as often on two: the same words,
--- then the same ignoring case, then similarity, then a text kept as read.
-local SURE = { exact = 4, folded = 3, fuzzy = 2, ["as read"] = 1 }
-
--- Avenger's list gathered from reads of its grid taken a step apart from its top down. `add(tiles)`
--- — one read's tiles, in reading order — places them by where their names were read before: each
--- name read before says where the read begins, and the place most of them say is taken (on a tie,
--- the one nearest where the read before began), so a tile misread in the overlap places nothing
--- wrong. It answers "merged"; "empty" (no tile: nothing learnt); "gap" (no name of it read before:
--- the grid may have moved past a part of the list unread); or "backward" (it begins before the read
--- before it: the grid moved up). `result()`: the names, each place's the one most of its reads read
--- (the surer on a tie), and their marks — true where that is the database's spelling of a read that
--- took similarity — or nil and why: a place read as two names as often and as surely, or two places
--- read as one name (Avenger lists each expansion once, so one of them was misread). And, for the
--- log, every place whose reads did not agree.
-function B.gather()
-  local places, at = {}, {}
-  local from = nil
-  local g = {}
-  function g.add(tiles)
-    if #tiles == 0 then return "empty" end
-    local d = 0
-    if #places > 0 then
-      local counts = {}
-      for j, t in ipairs(tiles) do
-        for place in pairs(at[t.key] or {}) do counts[place - j] = (counts[place - j] or 0) + 1 end
-      end
-      local best, n = nil, 0
-      for k, c in pairs(counts) do
-        local off, bestOff = math.abs(k - (from - 1)), best and math.abs(best - (from - 1))
-        if c > n or (c == n and (off < bestOff or (off == bestOff and k > best))) then best, n = k, c end
-      end
-      if best == nil then return "gap" end
-      if best + 1 < from then return "backward" end
-      d = best
-    end
-    for j, t in ipairs(tiles) do
-      local place = d + j
-      local p = places[place] or {}
-      places[place] = p
-      local v = p[t.key]
-      if not v then
-        v = { n = 0, name = t.name, how = t.how }
-        p[t.key] = v
-      elseif SURE[t.how] > SURE[v.how] then
-        v.name, v.how = t.name, t.how
-      end
-      v.n += 1
-      at[t.key] = at[t.key] or {}
-      at[t.key][place] = true
-    end
-    from = d + 1
-    return "merged"
-  end
-  function g.result()
-    local names, marks, seen, told = {}, {}, {}, {}
-    for i, p in ipairs(places) do
-      local reads = {}
-      for key, v in pairs(p) do reads[#reads + 1] = { key = key, v = v } end
-      table.sort(reads, function(a, b)
-        if a.v.n ~= b.v.n then return a.v.n > b.v.n end
-        if SURE[a.v.how] ~= SURE[b.v.how] then return SURE[a.v.how] > SURE[b.v.how] end
-        return a.key < b.key
-      end)
-      local best, other = reads[1].v, reads[2] and reads[2].v
-      if other and other.n == best.n and SURE[other.how] == SURE[best.how] then
-        return nil, string.format("place %d read as %s and as %s as often", i, best.name, other.name), told
-      end
-      if other then
-        local all = {}
-        for _, r in ipairs(reads) do
-          all[#all + 1] = string.format("'%s' %d time%s", r.v.name, r.v.n, r.v.n == 1 and "" or "s")
-        end
-        told[#told + 1] = string.format("place %d read as %s — %s taken", i, table.concat(all, ", "), best.name)
-      end
-      local key = reads[1].key
-      if seen[key] then return nil, string.format("places %d and %d both read as %s", seen[key], i, best.name), told end
-      seen[key] = i
-      names[i] = best.name
-      marks[i] = best.how == "fuzzy" or nil
-    end
-    return names, marks, told
-  end
-  return g
-end
-
--- read_expansion_list: Avenger's grid moved to its top with change waits only, then read down a step
--- at a time to its end, each read placed in the list by B.gather. Kept only where both ends were
--- reached, the reads at both read something, no read lost its place, and every place told one name
--- (S.setAvengerList); otherwise nothing is kept, and the answer says which.
-function B.list(o, trip, label, known)
-  local ctx = look(o, trip, { "caption", "name", "area" }, known.selectedExpansion, label)
-  if not ctx then return end
-  local st, pl = ctx.st, ctx.pl
-  local function refuse(why, part)
-    ctx.snap:release()
-    log("'%s': nothing moved — %s", label, why)
-    trip:done({ part = part, error = why })
-  end
-  if not st then return refuse(VIEW_UNREAD) end
-  if st.open then return refuse(OPEN_NOW, partOf(st, known)) end
-  -- The view read now, never one remembered (as B.open).
-  local view = st.view
-  if not view then return refuse(VIEW_UNREAD, partOf(st, known)) end
-  host.speech.output("Reading the expansions VPS Avenger lists.", { interrupt = false })
-  local list = B.gather()
-  local restarted = false
-  -- What the read after the last step added (B.gather's answer).
-  local last = nil
-  local GAP = "a part of the list could not be read"
-  local function incomplete(why, sentence, words)
-    log("'%s': the list not read whole (%s) — nothing kept", label, why)
-    if sentence then return trip:done({ sentence = sentence }) end
-    trip:done({ error = (words or "the list could not be read to its end") .. "; "
-      .. (S.avengerList and "the list shown stays" or "the database's list stays") })
-  end
-  local readTiles = function(s)
-    local b = Br.read(s, pl, { "area" })
-    return Br.tiles(b["browser area"], view, pl)
-  end
-  local down
-  local function up(pic, n)
-    if n >= B.GUARD then
-      pic:release()
-      return incomplete("still moving up after " .. B.GUARD .. " steps")
-    end
-    B.step(o, trip, ctx, "grid", "up", pic, label, function(s, moved, sentence)
-      if sentence then return incomplete("refused", sentence) end
-      if not s then return incomplete("no picture") end
-      if moved then return up(s, n + 1) end
-      log("'%s': at the top after %d step%s", label, n, n == 1 and "" or "s")
-      local tiles = readTiles(s)
-      if not trip:inFront() then
-        s:release()
-        return
-      end
-      last = list.add(tiles)
-      if last == "empty" then
-        s:release()
-        return incomplete("nothing read at the top", nil, GAP)
-      end
-      down(s, 0)
-    end)
-  end
-  down = function(pic, n)
-    if n >= B.GUARD then
-      pic:release()
-      return incomplete("still moving down after " .. B.GUARD .. " steps")
-    end
-    B.step(o, trip, ctx, "grid", "down", pic, label, function(s, moved, sentence)
-      if sentence then return incomplete("refused", sentence) end
-      if not s then return incomplete("no picture") end
-      if not moved then
-        s:release()
-        if last == "empty" then return incomplete("nothing read at the end", nil, GAP) end
-        local names, marks, told = list.result()
-        for _, line in ipairs(told) do log("'%s': %s", label, line) end
-        if not names then return incomplete(marks, nil, GAP) end
-        log("'%s': at the end — %d expansion%s: %s", label, #names, #names == 1 and "" or "s", table.concat(names, ", "))
-        S.setAvengerList(names, marks)
-        return trip:done({ part = partOf(st, known), note = string.format("VPS Avenger lists %d expansion%s; this list is "
-          .. "VPS Avenger's for this session", #names, #names == 1 and "" or "s"), focus = "expansion-search-input" })
-      end
-      local tiles = readTiles(s)
-      if not trip:inFront() then
-        s:release()
-        return
-      end
-      last = list.add(tiles)
-      if last == "empty" then log("'%s': a step down read no tile — the next read places the list", label) end
-      if last == "gap" then
-        s:release()
-        log("'%s': a read that overlaps nothing read before — a part of the list may lie unread here", label)
-        return incomplete("a read placed nowhere", nil, GAP)
-      end
-      if last == "backward" then
-        if restarted or means.grid ~= "wheel" then
-          s:release()
-          return incomplete("the grid moved up where it was moved down")
-        end
-        restarted = true
-        sign.grid = -sign.grid
-        log("'%s': the wheel moved the grid up, where it was turned down — turned round for the session, and the "
-          .. "list read again from its top", label)
-        list, last = B.gather(), nil
-        return up(s, 0)
-      end
-      down(s, n + 1)
-    end)
-  end
-  gridPicture(ctx.snap, ctx, view, Br.tiles(ctx.byName["browser area"], view, pl))
-  up(ctx.snap, 0)
+  trip:done({ set = set, part = { keys = keys, values = v }, note = (y == had and "unchanged, " or "corrected to ") .. y })
 end
 
 -- What actions.luau hands over: { ring = main.luau's helpers, named = (name) -> the preset's set,
@@ -1668,9 +1193,5 @@ end
 function B.start(env)
   E = env
 end
-
--- How each list was seen to move this session, and its wheel's sign: for the log's readers, and the
--- tests.
-function B.ways() return means, sign end
 
 return B

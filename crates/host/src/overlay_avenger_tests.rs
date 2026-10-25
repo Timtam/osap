@@ -1124,13 +1124,40 @@ function T.avenger()
   end
   rawset(T.host, "input", T.strict("host.input", {
     -- S.clickAnswers, when set: one entry per click, `true` for a click made or the error value a
-    -- refused one is answered with, nothing clicked (host.input.click's `false, err`).
-    click = function(x, y, opts)
+    -- refused one is answered with, nothing clicked (host.input.click's `false, err`). A
+    -- double-click (`clicks = 2`) as the host makes one on a thread of its own: its first click at
+    -- the call — the entry it takes the call's answer, refused there with nothing clicked — and its
+    -- second, and its callback, 100 ms later, as long as the host's gesture takes — the entry it
+    -- takes the callback's: an error value sends no second click and is what the callback hears.
+    -- Each click is an entry of S.clicks, marked `double` with its number for a double-click's. A
+    -- callback is answered once, on a later tick, as the host answers it.
+    click = function(x, y, opts, cb)
+      local function later(fn, ms) S.after[#S.after + 1] = { at = S.now + (ms or 0), fn = fn } end
+      local double = opts and opts.clicks == 2 or nil
+      local function made(n)
+        S.clicks[#S.clicks + 1] = { x, y, button = opts and opts.button, double = double and n }
+        if S.browserClick then S.browserClick(x, y, opts and opts.button) end
+        if S.onClick then S.onClick(#S.clicks) end
+      end
       local answer = S.clickAnswers and table.remove(S.clickAnswers, 1)
-      if answer ~= nil and answer ~= true then return false, answer end
-      S.clicks[#S.clicks + 1] = { x, y, button = opts and opts.button }
-      if S.browserClick then S.browserClick(x, y, opts and opts.button) end
-      if S.onClick then S.onClick(#S.clicks) end
+      if answer ~= nil and answer ~= true then
+        if cb then later(function() cb(false, answer) end) end
+        return false, answer
+      end
+      made(1)
+      if double then
+        later(function()
+          local second = S.clickAnswers and table.remove(S.clickAnswers, 1)
+          if second ~= nil and second ~= true then
+            if cb then cb(false, second) end
+            return
+          end
+          made(2)
+          if cb then cb(true) end
+        end, 100)
+      elseif cb then
+        later(function() cb(true) end)
+      end
     end,
     -- The wheel, as the host turns it (docs/api/input.md): at whole pixels, by `notches`, positive up.
     scroll = function(x, y, notches)

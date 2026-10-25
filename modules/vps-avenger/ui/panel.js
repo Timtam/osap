@@ -16,17 +16,17 @@
 //   * Back and Next say they are unavailable where VPS Avenger steps no preset (on Init Preset);
 //   * DRUM SQ claims nothing at a click: no pattern SELECTED and no LENGTH before Avenger is read,
 //     and its PASTE items offered from the module's word that a COPY was taken in Avenger's menu;
-//   * the expansions listed are Avenger's own where the module read them off its grid (Read
-//     Avenger's List, an action of the port's), marked where the database spelt a name, and the
-//     open expansion's heading says ", from the database" where only the database named it.
+//   * the expansions listed are the database's roster, said so, one it has no presets for marked,
+//     and the open expansion's heading says ", from the database" where only its place in the
+//     database's list named it.
 // Text goes into the page as text (textContent), never as HTML.
 (() => {
   'use strict';
 
   const $ = (id) => document.getElementById(id);
 
-  // Every action this page sends the module, by the tool's names, and the port's own: Read
-  // Avenger's List and the Settings section's two. perform() sends no other, and says so in the
+  // Every action this page sends the module, by the tool's names, and the port's own: the
+  // Settings section's two. perform() sends no other, and says so in the
   // module's log — a name not here is this page's own mistake. The module answers each one; a test
   // of the repository holds this list against the tool's and the module's handlers, and every name
   // this script and the markup send against this list.
@@ -53,7 +53,7 @@
     'select_central_drum_sq_pattern', 'toggle_central_drum_sq_pattern',
     'central_drum_sq_pattern_menu_item', 'central_drum_sq_control',
     'reset_central_drum_sq_control', 'central_drum_sq_length', 'central_drum_sq_speed',
-    'align_open_expansion', 'read_expansion_list', 'set_setting', 'reset_settings',
+    'align_open_expansion', 'set_setting', 'reset_settings',
     'confirm_osc_count', 'confirm_expansion_view'
   ];
   // To the module; nothing when the page is opened in a browser, to be looked at.
@@ -92,13 +92,12 @@
   };
   const ALL_PRESET_CATEGORY = '__all__';
   let currentExpansions = [];
+  // The list is a roster of the preset database's.
   let currentExpansionsFromDatabase = false;
-  // The port's: the list is Avenger's own, read off its grid, and the names in it the database
-  // spelt (true where it did); and the open expansion named only by the database.
-  let currentExpansionsFromAvenger = false;
-  let currentExpansionMarks = [];
   // A roster's expansion the database has no presets for (the tool keeps it in its list).
   let currentExpansionsWithoutData = [];
+  // The port's: the open expansion named by its place in the database's list, its name not read
+  // in Avenger's header.
   let currentSelectedFromDatabase = false;
   // An open expansion's categories and presets are the preset database's lists.
   let currentExpansionListsFromDatabase = false;
@@ -185,16 +184,13 @@
     results.setAttribute(
       'aria-label',
       `Expansions, ${shown.length} result${shown.length === 1 ? '' : 's'}` +
-        (currentExpansionsFromAvenger ? ', as VPS Avenger lists them'
-          : (currentExpansionsFromDatabase ? ', from the database' : ''))
+        (currentExpansionsFromDatabase ? ', from the database' : '')
     );
     shown.forEach((item) => {
       const btn = document.createElement('button');
       btn.type = 'button';
       btn.id = `expansion-search-button-${item.index}`;
       btn.textContent = item.name;
-      // A name the database spelt for a poor read: said so, its text still the name the search filters by.
-      if (currentExpansionMarks[item.index] === true) btn.setAttribute('aria-label', `${item.name}, from the database`);
       if (currentExpansionsWithoutData[item.index] === true) {
         btn.setAttribute('aria-label', `${item.name}, no presets in the database`);
       }
@@ -224,10 +220,8 @@
     const searchInput = $('expansion-search-input');
     const resetButton = $('reset-expansion-search-button');
     const searchSection = $('expansion-search-section');
-    const readList = $('read-expansion-list-button');
     expansionSearchOpen = true;
     if (viewTrigger) viewTrigger.hidden = false;
-    if (readList) readList.hidden = currentExpansionOpen === true;
     if (searchInput) {
       searchInput.hidden = (
         currentExpansionOpen || searchNeedsView()
@@ -325,8 +319,6 @@
     // earlier state is kept in its place.
     currentExpansions = Array.isArray(s.expansions) ? s.expansions : [];
     currentExpansionsFromDatabase = Array.isArray(s.expansions) && !!s.expansions_from_database;
-    currentExpansionsFromAvenger = Array.isArray(s.expansions) && !!s.expansions_from_avenger;
-    currentExpansionMarks = Array.isArray(s.expansions_marks) ? s.expansions_marks.map((v) => v === true) : [];
     currentExpansionsWithoutData = Array.isArray(s.expansions_without_data)
       ? s.expansions_without_data.map((v) => v === true)
       : [];

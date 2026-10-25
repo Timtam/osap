@@ -444,27 +444,35 @@ fn a_tab_menu_is_opened_with_the_right_button_and_its_item_chosen_in_the_painted
     "##));
 }
 
-/// An oscillator's knob reset: a double-click — both clicks with the right button for Pan — and
-/// the knob read after it; never while Drums is selected, which has no oscillator controls.
+/// An oscillator's knob reset: ONE double-click of the host's (host.input.click's `clicks = 2`, overlay
+/// runtime 0.15) — both clicks with the right button for Pan, the second marked as click 2 — and the
+/// knob read after it, said against the tool's default; never while Drums is selected, which has no
+/// oscillator controls.
 #[test]
 fn a_knob_is_reset_with_a_double_click_and_never_on_the_drums_tab() {
     run_mac(&scenario(r##"
         local _, _, W = T.pageOn({ osc = 2, selected = "osc", index = 1, volume = 150, transpose = 0, fine = 0 })
         T.tripFrom({ action = "reset_osc_control", args = { control = "volume" }, focused = true }, W)
-        T.ok(T.clickAt() == "652,193" and #S.changeWaits == 0, "the first click: " .. T.clickAt())
+        T.ok(T.clickAt() == "652,193" and S.clicks[#S.clicks].double == 1 and #S.changeWaits == 0,
+          "the first click: " .. T.clickAt())
         local n = #S.clicks
         T.tick(1)
-        T.ok(#S.clicks == n + 1 and T.clickAt() == "652,193" and #S.changeWaits == 1, "the second, then the wait")
+        T.ok(#S.clicks == n + 1 and T.clickAt() == "652,193" and S.clicks[#S.clicks].double == 2 and #S.changeWaits == 1,
+          "the second, marked click 2, then the wait")
         T.repaint({ osc = 2, selected = "osc", index = 1, volume = 100, transpose = 0, fine = 0 })
         T.settle()
         T.ok(T.lastPost("state").state.osc_panel.volume_values[1] == 100 and T.lastPost().id == "osc-reset-volume",
           tostring(T.lastPost("state").state.osc_panel.volume_values[1]))
+        T.ok(T.count("[avenger] [act] 'Resetting an oscillator's control': before 150 percent, after 100 percent, its "
+          .. "default 100 percent (the tool's) — reset") == 1, T.dump())
         T.event()
         T.tripFrom({ action = "reset_osc_control", args = { control = "pan" }, focused = true }, W)
         T.tick(1)
-        T.ok(S.clicks[#S.clicks].button == "right" and S.clicks[#S.clicks - 1].button == "right", "Pan: the right button")
+        T.ok(S.clicks[#S.clicks].button == "right" and S.clicks[#S.clicks - 1].button == "right"
+          and S.clicks[#S.clicks].double == 2 and S.clicks[#S.clicks - 1].double == 1, "Pan: the right button, twice")
         T.tick(16)
-        T.ok(T.lastPost("error").text == "Resetting an oscillator's control: unchanged, Pan 0", T.lastPost("error").text)
+        T.ok(T.lastPost("error").text == "Resetting an oscillator's control: Pan 0, already at its default",
+          T.lastPost("error").text)
         T.event()
         T.paintAvenger(98, 84, 1.6, { osc = 2, selected = "drums" })
         local clicks = #S.clicks
@@ -472,6 +480,78 @@ fn a_knob_is_reset_with_a_double_click_and_never_on_the_drums_tab() {
         T.settle(2)
         T.ok(#S.clicks == clicks and T.lastPost("error").text
           == "Resetting an oscillator's control: the Drums tab is selected; it has no oscillator controls", T.lastPost("error").text)
+    "##));
+}
+
+/// The third Mac test's §7 (the avenger_control developer's report of 2026-10-25): a reset is said
+/// against the control's default — the tool's, Volume 100 % and a macro's amount 0 — from the knob
+/// read before and after the double-click: from 160 to 100 reset; 160 staying 160 failed; 160 to 130
+/// changed but not to its default, not confirmed; 100 staying 100 already at its default; the knob
+/// not read after, not confirmed. One log line each, with the three values. A macro knob from 40 to 0
+/// reset, and from 0 already at its default. The default is never posted from the click: what is
+/// posted is what was read.
+#[test]
+fn a_reset_is_said_against_the_tools_default() {
+    run_mac(&scenario(r##"
+        local LABEL = "Resetting an oscillator's control"
+        local _, _, W = T.pageOn({ osc = 1, selected = "osc", index = 1, volume = 160, transpose = 0, fine = 0 })
+        local function reset(before, after, words)
+          T.event()
+          T.repaint({ osc = 1, selected = "osc", index = 1, volume = before, transpose = 0, fine = 0 })
+          T.tripFrom({ action = "reset_osc_control", args = { control = "volume" }, focused = true }, W)
+          T.tick(1)
+          if after ~= before then
+            T.repaint({ osc = 1, selected = "osc", index = 1, volume = after, transpose = 0, fine = 0 })
+          end
+          T.run(2600)
+          local text = T.lastPost("error").text
+          if words == nil then
+            T.ok(text == "" and T.lastPost().id == "osc-reset-volume", "reset: " .. text)
+          else
+            T.ok(text == LABEL .. ": " .. words, text)
+          end
+        end
+        reset(160, 100, nil)
+        T.ok(T.count("before 160 percent, after 100 percent, its default 100 percent (the tool's) — reset") == 1, T.dump())
+        reset(160, 160, "Volume 160 percent, unchanged; the reset failed")
+        T.ok(T.count("before 160 percent, after 160 percent, its default 100 percent (the tool's) — failed: unchanged") == 1,
+          T.dump())
+        T.ok(T.lastPost("state").state.osc_panel.volume_values[1] == 160, "the value read posted, not the default")
+        reset(160, 130, "Volume 130 percent, not its default 100 percent; the reset is not confirmed")
+        T.ok(T.count("— changed, not to its default") == 1, T.dump())
+        reset(100, 100, "Volume 100 percent, already at its default")
+        T.ok(T.count("before 100 percent, after 100 percent, its default 100 percent (the tool's) — already at its default")
+          == 1, T.dump())
+        -- The knob not read after the click: its pointer gone from the picture.
+        T.event()
+        T.repaint({ osc = 1, selected = "osc", index = 1, volume = 160, transpose = 0, fine = 0 })
+        T.tripFrom({ action = "reset_osc_control", args = { control = "volume" }, focused = true }, W)
+        T.tick(1)
+        T.repaint({ osc = 1, selected = "osc", index = 1, transpose = 0, fine = 0 })
+        T.run(2600)
+        T.ok(T.lastPost("error").text == LABEL .. ": Volume cannot be read now; whether it was reset is not confirmed",
+          T.lastPost("error").text)
+        T.ok(T.count("after not read, its default 100 percent (the tool's) — not read") == 1, T.dump())
+        T.ok(T.held() == 0, "every picture released: " .. T.held())
+    "##));
+    run_mac(&scenario(r##"
+        local words = { ["macro tabs"] = "MACRO 1", ["macro macro1"] = "Cutoff" }
+        local _, _, W = T.pageOn({ osc = 1, selected = "osc", index = 1, macroShown = 1, buttons = { false, false },
+          amounts = { 40, 0, 0 } }, words)
+        T.tripFrom({ action = "reset_macro_amount", args = { index = 1 }, focused = true }, W)
+        T.tick(1)
+        T.ok(S.clicks[#S.clicks].double == 2 and S.clicks[#S.clicks - 1].double == 1, "one double-click of the host's")
+        T.repaint({ osc = 1, selected = "osc", index = 1, macroShown = 1, buttons = { false, false }, amounts = { 0, 0, 0 } })
+        T.settle()
+        T.ok(T.lastPost("state").state.macro_panel.amount_values[1] == 0 and T.lastPost().id == "macro-1-slot-1-reset-amount",
+          tostring(T.lastPost("state").state.macro_panel.amount_values[1]))
+        T.ok(T.count("before 40 percent, after 0 percent, its default 0 percent (the tool's) — reset") == 1, T.dump())
+        -- From its default: said so.
+        T.event()
+        T.tripFrom({ action = "reset_macro_amount", args = { index = 1 }, focused = true }, W)
+        T.run(2600)
+        T.ok(T.lastPost("error").text == "Resetting a macro's amount: Cutoff 0 percent, already at its default",
+          T.lastPost("error").text)
     "##));
 }
 
@@ -767,7 +847,7 @@ fn the_rings_strip_and_macro_controls_say_what_was_read_and_click_as_the_page_do
         T.repaint({ osc = 3, selected = "osc", index = 2, mute = { [2] = true }, volume = 100, transpose = 0, fine = 0,
           macroShown = 1, buttons = { false, false } })
         T.tick(3)
-        T.ok(T.lastSaid() == "Volume 100 percent", T.said())
+        T.ok(T.lastSaid() == "Volume 100 percent, reset", T.said())
         -- Reset pan: the right button.
         clicks = #S.clicks
         T.pressAt(header, T.indexOf(header, "Reset pan"))
@@ -775,7 +855,7 @@ fn the_rings_strip_and_macro_controls_say_what_was_read_and_click_as_the_page_do
         T.ok(#S.clicks == clicks + 2 and S.clicks[#S.clicks].button == "right" and S.clicks[#S.clicks - 1].button == "right",
           "Pan with the right button")
         T.tick(16)
-        T.ok(T.lastSaid() == "Pan 0, unchanged", T.said())
+        T.ok(T.lastSaid() == "Pan 0, already at its default", T.said())
         -- Macro button 1.
         i = T.indexOf(header, "Macro button 1")
         header.focus = i - 1
@@ -832,9 +912,18 @@ fn the_rings_knobs_turn_with_page_up_and_page_down_and_return_confirms() {
         T.ok(T.typed("PageDown") == "taken" and T.typed("PageDown") == "taken", "the hold's keys")
         local m = T.inputs("move")
         T.ok(#m == 2 and T.xy(m[1]) == "652,194" and T.xy(m[2]) == "652,196", T.xy(m[1]) .. " " .. T.xy(m[2]))
-        -- The overlay's other keys work on.
+        -- Tab and Shift+Tab do nothing while the knob is held (Act.SWALLOWED): swallowed, also by the
+        -- hook, the first saying how the hold ends, once and interrupting.
+        T.ok(T.count("[keys] 'VPS Avenger' holds PageUp, PageDown, Return, Escape for its module until its onKey ends "
+          .. "it; Tab, Shift+Tab swallowed meanwhile") == 1, T.dump())
+        local at = header.focus
         T.tab()
-        T.ok(header.focus == level + 1 and T.lastSaid() == "Reset level, button", "Tab moves on: " .. T.said())
+        T.ok(header.focus == at and T.lastSaid() == "Return confirms, Escape cancels."
+          and S.speech[#S.speech].interrupt == true, "Tab swallowed: " .. T.said())
+        local swallowed = #S.speech
+        T.ok(T.typed("Shift+Tab") == "taken" and T.typed("Tab") == "taken" and header.focus == at
+          and #S.speech == swallowed and #T.inputs("move") == 2 and #T.inputs("up") == 0, "said once, nothing moved")
+        -- The overlay's other keys work on.
         local clicks = #S.clicks
         T.stepAt(header, T.indexOf(header, "Oscillator"), 1)
         T.ok(#S.clicks == clicks and T.lastSaid() == "Oscillator: still working on the last press", T.said())
@@ -862,6 +951,7 @@ fn the_rings_knobs_turn_with_page_up_and_page_down_and_return_confirms() {
         T.ok(T.count("[avenger] [amount] 'volume': read Volume 100 percent (Volume 150 percent before) — changed true") == 1,
           T.dump())
         T.ok(not S.holding["PageUp"] and not S.holding["Escape"] and T.typed("PageUp") == "application", "the keys back")
+        T.ok(S.holding["Tab"] and not S.menuTaken["Tab"] and not S.menuTaken["Shift+Tab"], "Tab the ring's again")
         T.ok(T.count("[keys] 'VPS Avenger': its hold of PageUp, PageDown, Return, Escape ends (ended)") == 1, T.dump())
         -- Pan: the right button, read at once with nothing moved.
         local pan = T.indexOf(header, "Pan")

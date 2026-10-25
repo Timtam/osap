@@ -114,6 +114,13 @@ fn rename_preset_double_clicks_the_name_sees_the_editor_hands_over_and_reads_the
         T.tick()
         T.ok(S.holding["Return"] and S.holding["Escape"] and T.open() == true and S.scopedTo == W.id, "handed over")
         T.ok(#S.speech == said, "nothing said: " .. T.said(said + 1))
+        -- Tab does nothing in Avenger's editor (Act.SWALLOWED): taken while Return and Escape go
+        -- through, the rename's sentence once, interrupting.
+        T.ok(S.menuTaken["Tab"] and S.menuTaken["Shift+Tab"], "Tab and Shift+Tab swallowed")
+        T.ok(T.typed("Tab") == "taken" and T.typed("Shift+Tab") == "taken" and T.typed("Tab") == "taken", "taken")
+        T.ok(#S.speech == said + 1 and T.lastSaid() == "Return keeps the name, Escape cancels."
+          and S.speech[#S.speech].interrupt == true, T.said(said + 1))
+        said = #S.speech
         T.ok(T.count("[avenger] [editor] 'preset': open — changed true, settled true") == 1, T.dump())
         T.ok(T.count("[avenger] [rename] 'preset': the keyboard after the double-click: ") == 1, T.dump())
         T.ok(#T.page().posts == posts, "nothing posted while the user types")
@@ -127,6 +134,7 @@ fn rename_preset_double_clicks_the_name_sees_the_editor_hands_over_and_reads_the
         T.ok(p[#p - 1].kind == "error" and p[#p - 1].text == "" and p[#p].kind == "focus" and p[#p].id == "rename-preset-button",
           tostring(p[#p].id))
         T.ok(S.front == T.PAGE_WIN and not S.holding["Return"] and T.open() == false, "the page back, the keys back")
+        T.ok(not S.menuTaken["Tab"] and not S.menuTaken["Shift+Tab"], "Tab and Shift+Tab given back")
         T.ok(T.held() == 0, "every picture released: " .. T.held())
     "##));
 }
@@ -296,7 +304,8 @@ fn the_page_key_or_another_window_while_renaming_posts_the_name_as_not_read() {
             end
             T.settle(2)
             if how ~= "key" and how ~= "other" then T.run(2200) end
-            T.ok(not S.holding["Return"] and T.open() ~= true, how .. ": the keys back")
+            T.ok(not S.holding["Return"] and not S.menuTaken["Tab"] and not S.menuTaken["Shift+Tab"] and T.open() ~= true,
+              how .. ": the keys back, Tab and Shift+Tab among them")
             T.ok(T.lastPost("state").state.preset == nil, how .. ": the preset posted as not read")
             local want = how ~= "other" and "Renaming the preset: stopped by the page key; what VPS Avenger did then was not read"
               or "Renaming the preset: another window came to the front; nothing more was done"
@@ -563,6 +572,12 @@ fn browse_presets_says_the_tools_sentence_holds_only_return_clicks_nothing_and_r
           and S.speech[#S.speech].interrupt == false, tostring(T.lastSaid()))
         T.answer(T.lastRead("vps-avenger browse"), T.nameRead("LD Palm´s Lead 1"))
         T.ok(T.typed("Escape") == "passed", "Escape is Avenger's browser's")
+        -- Tab does nothing in Avenger's browser (Act.SWALLOWED): taken, the browser's sentence once.
+        T.ok(S.menuTaken["Tab"] and S.menuTaken["Shift+Tab"], "Tab and Shift+Tab swallowed")
+        local sw = #S.speech
+        T.ok(T.typed("Tab") == "taken" and T.typed("Shift+Tab") == "taken", "taken")
+        T.ok(#S.speech == sw + 1 and T.lastSaid() == "To return to Avenger Control, press Return."
+          and S.speech[#S.speech].interrupt == true, T.said(sw + 1))
         T.tick()
         T.ok(S.holding["Return"], "and no end")
         T.typed("Return")
@@ -575,7 +590,7 @@ fn browse_presets_says_the_tools_sentence_holds_only_return_clicks_nothing_and_r
         T.ok(T.lastPost().kind == "focus" and T.lastPost().id == "browse-expansion-presets-button", tostring(T.lastPost().id))
         T.ok(T.count("[avenger] [browse] the name at the start 'LD Palm´s Lead 1', after Return 'AR Deep Arp' (read ") == 1,
           T.dump())
-        T.ok(S.front == T.PAGE_WIN and not S.holding["Return"], "the page back, the keys back")
+        T.ok(S.front == T.PAGE_WIN and not S.holding["Return"] and not S.menuTaken["Tab"], "the page back, the keys back")
         T.ok(T.held() == 0, "every picture released: " .. T.held())
     "##));
 }
@@ -597,7 +612,8 @@ fn browse_presets_ended_by_the_page_key_or_another_window_posts_the_name_as_not_
               T.show(T.OTHER)
             end
             T.settle(2)
-            T.ok(not S.holding["Return"] and T.open() ~= true, how .. ": the keys back")
+            T.ok(not S.holding["Return"] and not S.menuTaken["Tab"] and not S.menuTaken["Shift+Tab"] and T.open() ~= true,
+              how .. ": the keys back, Tab and Shift+Tab among them")
             T.ok(T.lastPost("state").state.preset == nil, how .. ": the preset posted as not read")
             T.ok(T.starts(T.lastPost("error").text, "Browse Presets: "), tostring(T.lastPost("error").text))
         "##;
@@ -634,7 +650,9 @@ fn browse_presets_refused_for_the_front_leaves_the_words_to_the_give_up() {
 // ---------------------------------------------------------------------------------------------
 
 /// The module sends, types and captures no key of its own while renaming or browsing: nothing is
-/// sent, and every capture made from the message on is the runtime's two, Return and Escape.
+/// sent, and every capture made from the message on is the runtime's — Return and Escape, Return
+/// alone for the browser — and the two it swallows for the module's `swallow`, Tab and Shift+Tab,
+/// taken in a menu.
 #[test]
 fn the_module_sends_types_and_captures_no_key_while_renaming() {
     run_mac(&scenario(r##"
@@ -643,9 +661,9 @@ fn the_module_sends_types_and_captures_no_key_while_renaming() {
         T.reads("LD Lead 1", "My Bass")
         local captured = {}
         local capture = T.host.keys.capture
-        rawset(T.host.keys, "capture", function(spec, fn)
-          captured[#captured + 1] = spec
-          return capture(spec, fn)
+        rawset(T.host.keys, "capture", function(spec, fn, opts)
+          captured[#captured + 1] = spec .. ((opts and opts.menu == "taken") and " (taken)" or "")
+          return capture(spec, fn, opts)
         end)
         local sent = #S.sent
         T.renameOpen({ action = "start_rename", args = {}, focused = true }, W, PLAIN, { 34, 7, 214, 22 })
@@ -657,7 +675,8 @@ fn the_module_sends_types_and_captures_no_key_while_renaming() {
         T.runDue()
         T.nameReads("LD Lead 2", 1200)
         T.ok(#S.sent == sent, "nothing sent: " .. table.concat(S.sent, ","))
-        T.ok(table.concat(captured, ",") == "Return,Escape,Return", table.concat(captured, ","))
+        T.ok(table.concat(captured, ",") == "Return,Escape,Tab (taken),Shift+Tab (taken),Return,Tab (taken),Shift+Tab (taken)",
+          table.concat(captured, ","))
         T.ok(S.front == T.PAGE_WIN and T.held() == 0, "back, nothing held")
     "##));
 }

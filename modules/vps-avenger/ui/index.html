@@ -273,10 +273,6 @@
               id="reset-expansion-search-button"
               title="Clear the expansion search and show all expansions"
               hidden>Reset Search</button>
-      <button type="button"
-              id="read-expansion-list-button"
-              data-action="read_expansion_list"
-              title="Read the expansions VPS Avenger lists, in its order, and show them here for this session.">Read Avenger's List</button>
     </div>
 
     <div id="expansion-search-section">
@@ -506,7 +502,8 @@
       The tool's Confirm OSC Count and Confirm Expansion View, from its status menu: each tells the
       module what VPS Avenger shows, and clicks nothing in it. The count is kept for the preset shown
       until its name changes, and taken only where the oscillator tabs' dots give none; the view is
-      kept as a setting of the module's.
+      kept as a setting of the module's, and with it the grid with no expansion open, for the window
+      and the size VPS Avenger shows (the tool's Confirm Expansion View sets no expansion open).
     -->
     <button type="button"
             id="settings-osc-count-trigger"
@@ -525,7 +522,7 @@
             id="settings-expansion-view-trigger"
             aria-expanded="false"
             aria-controls="settings-expansion-view-items"
-            title="Tell the page which Expansion View VPS Avenger shows, without changing it.">
+            title="Tell the page which Expansion View VPS Avenger's grid is in, with no expansion open — nothing in VPS Avenger changes.">
       Confirm Expansion View
     </button>
     <div id="settings-expansion-view-items"

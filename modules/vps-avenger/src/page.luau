@@ -27,10 +27,10 @@
 --                 Category is the database's, with no trip, and Correct open Expansion a trip with
 --                 no click; a name the page sends that is none of these is answered "<label> is not
 --                 available in this module yet"
---   the list      the expansions the page lists: Avenger's own, read off its grid this session
---                 where the user asked for it (read_expansion_list), otherwise the preset
---                 database's roster, marked as the database's (state.luau, S.expansions); an
---                 expansion opened from the page is the one at its place in the list last posted
+--   the list      the expansions the page lists: the preset database's roster, marked as the
+--                 database's (state.luau, S.expansions); an expansion opened from the page is the
+--                 one at its place in the list last posted, which is where it is clicked in
+--                 Avenger's grid (src/actions/browser.luau, B.byPlace)
 --   the watcher   while the page is hidden, DRUM SQ's selected pattern said as AUTO FOLLOW moves it
 --                 (watch.luau), paced by the `drumSqCadence` setting
 --   the settings  six (P.SETTINGS), which the module's settings dialog shows and the page's own
@@ -157,7 +157,6 @@ P.LABELS = {
   align_open_expansion = "Correct open Expansion",
   confirm_osc_count = "Confirm OSC Count",
   confirm_expansion_view = "Confirm Expansion View",
-  read_expansion_list = "Reading Avenger's list",
   set_setting = "Settings",
   reset_settings = "Reset Saved Settings",
   select_osc_tab = "Choosing an oscillator tab",
@@ -333,15 +332,14 @@ local function roster()
   return names
 end
 
--- The list of expansions the page is posted: Avenger's own where it was read this session, else the
--- roster (S.expansions) — and the names kept, as the list last posted, which an index the page sends
--- with open_expansion refers to.
+-- The list of expansions the page is posted: the roster (S.expansions) — and the names kept, as the
+-- list last posted, which an index the page sends with open_expansion refers to.
 local lastShown = nil
 local function shownExpansions()
   local shown = S.expansions(roster())
   -- A roster's expansion the database has no data for stays in its list, as the tool keeps it, and
   -- is marked so (DB.roster).
-  if shown and not shown.avenger then
+  if shown then
     local have = {}
     for _, n in ipairs(E.DB.expansionNames() or {}) do have[n] = true end
     shown.noData = {}
@@ -406,7 +404,7 @@ local function open(o, answer)
     answer(v)
   end
   local ok, err = pcall(Reads.read, o, { zoom = E.zoomOf(origin), mark = mark,
-    expected = before and before.selectedExpansion or nil, expectedFromDatabase = before and before.selectedFromDatabase,
+    expected = before and before.selectedExpansion or nil,
     window = win.id }, function(values, why, words)
     if not values then
       host.log.info("[avenger] [page] not shown: " .. tostring(why))
@@ -725,17 +723,12 @@ P.HANDLERS.set_setting = function(_, args)
     text = string.format("%s: %s cannot be the page key (%s); it stays %s", s.words, value, left.refused, keyWords())
   elseif left.failed then
     text = s.words .. ": " .. valueWords(s, value) .. " cannot be stored now"
-  elseif s.key == "roster" and S.avengerList then
-    -- The list shown is Avenger's own, read this session (state.luau): the roster shows again only
-    -- once that is dropped.
-    text = s.words .. ": " .. value .. " is kept; the list shown stays VPS Avenger's own for this session"
   end
   answer(text)
 end
 
 -- reset_settings {key?}: with a key, that one setting back at its default (the page key's Reset to
--- Default) as set_setting would set it; without, every one, in RESET_ORDER. Avenger's own list read
--- this session is no setting and stays (the tool's reset left what it held in memory alone).
+-- Default) as set_setting would set it; without, every one, in RESET_ORDER.
 P.HANDLERS.reset_settings = function(_, args)
   local label = P.LABELS.reset_settings
   if args.key ~= nil then

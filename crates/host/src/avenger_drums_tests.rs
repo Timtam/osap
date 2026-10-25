@@ -911,9 +911,11 @@ fn a_browse_refused_for_the_front_clicks_nothing_and_ends_nothing_more() {
     "##));
 }
 
-/// A double-click the host does not make (O.doubleClick's answers, D41): a first click refused
-/// sends no second, watches for no change and ends the trip with the page told; a second click
-/// refused ends it the same way once it was asked for, and nothing is watched either.
+/// A double-click the host does not make (O.doubleClick's answers, D41): one the host refuses at
+/// the call clicks nothing, watches for no change and ends the trip with the page told; one whose
+/// second half the host did not send — the callback's `false, err` — ends it the same way once the
+/// first click was made, and nothing is watched either. The harness's `S.clickAnswers` takes the
+/// call's answer first and the callback's second.
 #[test]
 fn a_reset_whose_click_is_not_made_watches_for_nothing_and_says_so() {
     run_mac(&scenario(r##"
@@ -933,7 +935,7 @@ fn a_reset_whose_click_is_not_made_watches_for_nothing_and_says_so() {
         T.ok(#S.clicks == n + 1 and T.clickAt() == "831,212", "the first click: " .. T.clickAt())
         T.tick(2)
         T.ok(#S.clicks == n + 1 and S.changeWaitsAsked == asked, "the second not made, nothing watched")
-        T.ok(T.count("[avenger] 'Resetting a drum slot's control': the double-click's second click was not made — "
+        T.ok(T.count("[avenger] 'Resetting a drum slot's control': the double-click was not made whole — "
           .. "something else is drawn over the point") == 1, T.dump())
         T.ok(T.lastPost("error").text == said, T.lastPost("error").text)
         T.ok(T.held() == 0, "every picture released: " .. T.held())

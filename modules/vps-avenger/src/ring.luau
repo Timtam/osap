@@ -50,10 +50,12 @@
 -- once, "<control>: still working on the last press", without cutting into speech — the second Mac
 -- test's three Oscillator presses dropped in silence; the one out says what it read. Everything the
 -- ring says is in the log too ("[avenger] [ring] said: …"), its refusals among it. A knob turned
--- is one action from its press to the read after Return: Tab moves on meanwhile, and the press of
--- another control that would click Avenger — the ring's, and the header's ◀, ▶, MENU's items,
--- Zoom, Undo and the redo list (Ring.stillWorking) — says it is still working on the last one; the
--- name and Preset info, which only read, are read.
+-- is one action from its press to the read after Return: Tab and Shift+Tab do nothing while the
+-- knob is held — swallowed, as in every hand-over of the module's (Act.SWALLOWED), the first saying
+-- "Return confirms, Escape cancels." once — and move on again from Return or Escape on, while the
+-- read is out; the press of another control that would click Avenger — the ring's, and the
+-- header's ◀, ▶, MENU's items, Zoom, Undo and the redo list (Ring.stillWorking) — says it is still
+-- working on the last one; the name and Preset info, which only read, are read.
 --
 -- The tabs' menus, the macro knobs' reset modes and the macro buttons' menus are the page's only
 -- (the plan's question Q5-2): a stepper over their items would have no value read to say. So are a

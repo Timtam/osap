@@ -13,15 +13,18 @@ been published and has no licence of its own.
       the coordinates of Avenger's header, its menu and its zoom list, and of its oscillator
       strip, drums, macros, central area and expansion browser, from the tool's tables (as
       starting values; the files say what is known of each); and in src/tables/pages.luau the
-      tool's page tables for the expansion grid (its actions.py and clicker/header_map.py): each
-      view's page starts, the scrollbar's clicks for a page and a tile's point on it.
+      tool's tables for the expansion browser by position (its actions.py and
+      clicker/header_map.py): each view's page starts, the scrollbar's clicks for a page and a
+      tile's point on it; a category's row and its scrollbar's ends; and its measured table of
+      where a category's presets lie once scrolled, with its estimate for other sizes and its
+      clicks on the presets' scrollbar.
   src/read/*.luau
       the tool's classifiers, ported to shares of one picture: its colour tests and numbers for
       the oscillator tabs' dots, the selected tab's dark strip, a lit button, the drum lock, the
       brighter mode caption, the central tab, DRUM SQ, the macro buttons and FAV; its knob
-      readers; its reading of what a recogniser makes of Avenger's blank preset ("Init Preset"),
-      of the OSC tabs' captions and of the macro tabs' count; and its recognition of an open
-      expansion from the browser's text.
+      readers; and its reading of what a recogniser makes of Avenger's blank preset ("Init
+      Preset"), of the OSC tabs' captions, of the macro tabs' count and of the expansion
+      browser's view caption.
   src/state.luau
       the tool's state for its panel (its dispatcher's state_snapshot), built from what is read.
   src/actions/osc.luau, src/actions/macros.luau, src/act.luau

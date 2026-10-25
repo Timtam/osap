@@ -41,6 +41,9 @@ T.AMOUNT_DETECT_RADIUS = 35
 T.AMOUNT_DETECT_MIN_R = 8
 T.AMOUNT_DETECT_MAX_R = 28
 T.AMOUNT_DETECT_STEP = 10
+-- What a knob's reset (a double-click) sets its amount to — the project's actions.py, its Initialize
+-- Preset's amounts — said as done only where the knob reads it after (src/act.luau, Act.resetAnswer).
+T.AMOUNT_DEFAULT = 0
 
 -- The two buttons: clicked at y 523, x 761 and 813, and read over the whole button.
 T.BUTTON_Y = 523

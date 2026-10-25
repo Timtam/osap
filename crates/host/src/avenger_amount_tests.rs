@@ -122,6 +122,16 @@ fn macro_amount_presses_the_knob_hands_over_four_keys_and_moves_one_point_times_
         T.ok(#moves == 3 and T.xy(moves[1]) == "1276,850" and T.xy(moves[2]) == "1276,849" and T.xy(moves[3]) == "1276,847",
           "three moves: " .. T.xy(moves[1]) .. " " .. T.xy(moves[2]) .. " " .. T.xy(moves[3]))
         T.ok(#S.sounds == sounds and #T.page().posts == posts and #T.inputs("up") == 0, "nothing played, posted or let go")
+        -- Tab and Shift+Tab do nothing while the knob is held (Act.SWALLOWED): taken, the first saying
+        -- how the hand-over ends, once and interrupting.
+        T.ok(S.menuTaken["Tab"] and S.menuTaken["Shift+Tab"], "Tab and Shift+Tab swallowed")
+        local sw = #S.speech
+        T.key("Tab")
+        T.ok(#S.speech == sw + 1 and T.lastSaid() == "Return confirms, Escape cancels."
+          and S.speech[#S.speech].interrupt == true, T.said(sw + 1))
+        T.key("Shift+Tab")
+        T.key("Tab")
+        T.ok(#S.speech == sw + 1 and #T.inputs("move") == 3 and #T.inputs("up") == 0, "said once; nothing moved or let go")
         T.repaint(T.macroSpec(70))
         local n = #S.input
         T.key("Return")
@@ -148,6 +158,7 @@ fn macro_amount_presses_the_knob_hands_over_four_keys_and_moves_one_point_times_
         T.ok(T.lastPost("error").text == "" and T.lastPost().kind == "focus" and T.lastPost().id == "macro-1-slot-1-amount",
           tostring(T.lastPost().id))
         T.ok(S.front == T.PAGE_WIN and #S.heldButtons == 0 and T.ups() == 1 and T.held() == 0, "the page back, nothing held")
+        T.ok(not S.menuTaken["Tab"] and not S.menuTaken["Shift+Tab"], "Tab and Shift+Tab given back")
         T.ok(T.typed("PageUp") ~= "taken" and #T.inputs("move") == 3, "a PageUp after it moves nothing")
     "##));
 }
