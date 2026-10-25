@@ -346,9 +346,14 @@ fn builder(environment: &ort::environment::Environment) -> ort::Result<SessionBu
 /// process.
 ///
 /// Refused first on a processor without AVX2: pyke's builds of ONNX Runtime, which
-/// `download-binaries` links in, target x86-64-v3 from `ort` 2.0.0-rc.11 on, so their first call
-/// would end the process with an illegal instruction. `ort` itself only writes a warning to
-/// standard error, which nobody reads here.
+/// `download-binaries` links in, target x86-64-v3 from `ort` 2.0.0-rc.11 on, so the recogniser's
+/// first call would end the process with an illegal instruction. `ort` itself only writes a
+/// warning to standard error, which nobody reads here.
+///
+/// This guard only reaches a processor with AVX. The library's static initialisers hold AVX
+/// instructions (1.31's do, 1.22's held none), and they run before `main`: on a processor without
+/// AVX at all the executable ends with 0xC000001D before any of this code, with no log line
+/// (TODO.md, "Windows' ONNX Runtime needs AVX to start, and AVX2 to read").
 #[cfg(windows)]
 fn init() -> anyhow::Result<Engine> {
     #[cfg(target_arch = "x86_64")]
@@ -1680,9 +1685,10 @@ mod exit_safety_tests {
 
     /// Windows makes its session from the embedded model with [`builder`]'s options, under the
     /// ONNX Runtime linked in, and reads the lone digit the recogniser is there for — or, on a
-    /// processor without AVX2, refuses to make it and says why. The real session, in this
-    /// process: an option the linked ONNX Runtime refuses (an optimisation level it does not know,
-    /// a device policy) fails here rather than in the bench or on a user's machine.
+    /// processor with AVX but without AVX2, refuses to make it and says why (without AVX this
+    /// executable does not start, see [`init`]). The real session, in this process: an option the
+    /// linked ONNX Runtime refuses (an optimisation level it does not know, a device policy) fails
+    /// here rather than in the bench or on a user's machine.
     #[cfg(windows)]
     #[test]
     fn windows_makes_its_session_and_reads_a_lone_digit() {

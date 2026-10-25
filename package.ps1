@@ -134,8 +134,9 @@ if (-not $NoBuild) {
 }
 
 # What has to be there, by name. Checked rather than copied blindly, because a missing one
-# fails SILENTLY: without DirectML the second OCR engine is gone and small text stops being
-# read, which does not look like a missing file to whoever is testing.
+# is only found by whoever starts the package: the executable imports DirectML.dll (the
+# ONNX Runtime linked in does), so without it Windows does not start the application at all,
+# and its log stays empty.
 #
 # The two speech client DLLs used to be here. They are not any more: prism reaches NVDA over
 # raw RPC with stubs compiled into the binary, and is linked statically, so there is nothing

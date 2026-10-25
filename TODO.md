@@ -1822,11 +1822,13 @@ into the changelog with that release.
   function, a symbol — where it answered `{ ok: true }` and on a Mac the application ended. On the
   build for other systems `host.hotkey.register` raises for a spec that does not parse, as Windows
   and a Mac do, where it answered `nil, err`.
-- **Windows: the neural text recogniser needs a processor with AVX2** (2026-10-25, `ort`
-  2.0.0-rc.15, ONNX Runtime 1.31 linked in). Without it the log says once that the recogniser is
-  not available, and `Windows.Media.Ocr` reads small regions alone, so a lone digit it refuses
-  comes back empty. Whether such a PC starts the application at all is not seen yet (the item
-  "Windows' ONNX Runtime needs AVX2").
+- **Windows: the application needs a processor with AVX, and its neural text recogniser one with
+  AVX2** (2026-10-25, `ort` 2.0.0-rc.15, ONNX Runtime 1.31 linked in). Without AVX the
+  application does not start: it ends with an illegal instruction before any of its own code
+  runs, with nothing in the log. With AVX but without AVX2 the log says once that the recogniser
+  is not available, and `Windows.Media.Ocr` reads small regions alone, so a lone digit it refuses
+  comes back empty. A decision may still lift this (the item "Windows' ONNX Runtime needs AVX to
+  start, and AVX2 to read"); drop or reword this line with it.
 
 ## Implementation
 
@@ -2524,7 +2526,8 @@ See [docs/macos-port.md](docs/macos-port.md) for the decisions and
       `ONNX Runtime 1.22` without the patch — and the unsafe `ReleaseEnv` of `ort`'s environment:
       `ort` keeps none of its own, so the Mac keeps its handle beside the session (`ENVIRONMENT`)
       and the release drops it. Kept: the release, `ENV_MADE`, the backstop, the warm-up join and
-      `settle`. New: Windows refuses the recogniser on a processor without AVX2 (below). The
+      `settle`. New: Windows refuses the recogniser on a processor without AVX2, and does not
+      start at all without AVX (below). The
       comments on ort-sys's pkg-config and `ORT_` variables (macos-build.yml, package-macos.sh)
       say what rc.15 does: its build script returns at once under `load-dynamic`. The macOS job
       warns about a slice without chained fixups; build.yml's measured crates lose `ndarray` and
@@ -2541,15 +2544,34 @@ See [docs/macos-port.md](docs/macos-port.md) for the decisions and
       reason, the newer macOS's `--paddle-probe` says `ok`, no backstop line, and no warning about
       chained fixups. Then Windows with NVDA: Melodyne's lone digits read as before, and the log
       has no "not available" line.
-- [ ] **Windows' ONNX Runtime needs AVX2.** From `ort` 2.0.0-rc.11 on, pyke's x86_64 builds target
-      x86-64-v3: Intel from Haswell, AMD from the first Ryzen, and not the Atom-based Celerons and
-      Pentiums Windows 11 still supports. `init` refuses the recogniser without it
-      (`ort::sys::USING_PYKE_BINARIES` and `is_x86_feature_detected!`), so that its first call
-      cannot end the process; `ort` itself only warns on standard error. Not seen: what such a PC
-      does at all. ONNX Runtime is linked in, and code of it built for x86-64-v3 may run in the
-      executable's static initialisers, before `main`, where no guard reaches. If that matters,
-      the way around is an ONNX Runtime without that floor — Microsoft's own onnxruntime.dll,
-      which picks its kernels by processor at run time, loaded as on the Mac — not this guard.
+- [ ] **Decision: Windows' ONNX Runtime needs AVX to start, and AVX2 to read.** From `ort`
+      2.0.0-rc.11 on, pyke's x86_64 builds target x86-64-v3: Intel from Haswell, AMD from the
+      first Ryzen. `init` refuses the recogniser without AVX2 (`ort::sys::USING_PYKE_BINARIES` and
+      `is_x86_feature_detected!`), so that its first call cannot end the process; `ort` itself
+      only warns on standard error. That guard does not reach a processor without AVX. The
+      review of wip/deps (2026-10-26, read from the code, not run on such a PC) disassembled the
+      static initialisers of pyke's ms@1.31.0 onnxruntime.lib (the f99aaef2… download): 82, with
+      336 AVX instructions, 8 of them on 256-bit registers (`onnx::checker`'s `experimental_ops`,
+      `rnn::detail`'s `NameToArgUsageMap`, `Dml::FusionHelpers::c_fusableOps`,
+      `matmul_bn_fusion`'s `ignorable_nodes`, the ten `s_library_*` of provider_bridge_ort.obj,
+      …), and found their objects linked into the test executable; rc.10's ms@1.22.0 had 83 and
+      not one AVX instruction. They run before `main`, so the Atom-based Celerons and Pentium
+      Silvers Windows 11 supports (N4500, N5100, N6000) and the Core-based Pentiums and Celerons
+      before Alder Lake end with 0xC000001D at start: no log line, no guard, the test executables
+      too. The ones read use AVX alone, so a processor with AVX but not AVX2 probably starts and
+      the guard helps; what they call was not read. Written down as it is (2026-10-26): ocr.md's
+      Windows block, the comment on `init`, and the changelog line ("the application needs a
+      processor with AVX"). The decision left to the maintainer:
+      - (a) Microsoft's own onnxruntime.dll on Windows too, loaded at run time as on the Mac
+        (`load-dynamic`, `ort::init_from`). It picks its kernels by processor at run time, and
+        `init` would check before the library is opened. The session uses the CPU alone, so
+        DirectML.dll and its licence could leave the package. Needs Microsoft's archive, not
+        fetched: onnxruntime-win-x64-1.31.0.zip, 82,887,349 bytes,
+        sha256:3958d8a44984160692c1b4ffd0de3cb48f8c39f9d34bb31e433db06e30b82195, from
+        https://github.com/microsoft/onnxruntime/releases/download/v1.31.0/onnxruntime-win-x64-1.31.0.zip
+        — or onnxruntime-win-x64-1.22.0.zip (72,368,545 bytes; its release gives no digest, so
+        the SHA-256 would be taken on download) for the same 1.22 as the Mac.
+      - (b) Keep pyke's build and the floor as written; then tick this off.
 - [ ] **Before Rust 1.100: `copy-dylibs` and the tests.** ort 2.0.0-rc.14's notes: under the v2
       build-dir layout, test executables no longer see the DLLs `copy-dylibs` places, and
       Windows' test executables import DirectML.dll; look again when the toolchain moves. And
