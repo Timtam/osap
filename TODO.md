@@ -256,6 +256,21 @@ and to build it as soon as the usage allows.
       window, which destroys it, and a logoff that another program cancels would leave the tray
       without its window.
 
+## Keys that must not reach a plug-in during a hand-over (2026-10-25)
+
+- [ ] **Tab reaches the plug-in during a hand-over (2026-10-25, from the maintainer, oral report
+      from Windows).** VPS Avenger on Windows switches its oscillators on Tab. The ring captures
+      Tab, but a hand-over that lets the user work in Avenger directly does not: the knob hold
+      (`trip:handOver{ kind = "keys" }` / `O:holdKeys`: PageUp, PageDown, Return, Escape), a rename
+      (`kind = "typing"`: Return and Escape let through) and Browse (`kind = "browse"`: Return). A
+      Tab pressed then reaches Avenger and changes the oscillator by accident. The decision: Tab
+      does nothing then; it is swallowed and never reaches the plug-in, and the hand-over says once
+      how it ends ("Return confirms, Escape cancels" or the hand-over's own words). To build,
+      generally: an option of the runtime's hand-overs and holdKeys for keys held and swallowed
+      while it lasts, declared by the module (Avenger: Tab and Shift+Tab), with docs
+      (Returns/Errors) and tests. Built right after the third Mac test's fixes (`wip/fix-test3`),
+      which touch the same files.
+
 ## API rule: failures are typed, not sentences (2026-10-11, from the maintainer)
 
 - [x] **Replace every reason given as plain text with an error type.** The maintainer, on seeing
