@@ -383,8 +383,8 @@ pub mod element {
     pub const NOT_TAKEN: Reason = Reason { code: Code::Failed, message: "the program did not take the action (0x…)", entries: &["host-element-press"] };
 }
 
-/// `host.input`. A click's reasons come at the call or, after a "noactivate" hand-over, to the
-/// callback only; which is which is the docs' "arrives".
+/// `host.input`. A click's reasons come at the call or, after a "noactivate" or a double-click's
+/// (`clicks = 2`) hand-over, to the callback only; which is which is the docs' "arrives".
 pub mod input {
     use super::{Code, Reason};
 
@@ -412,6 +412,25 @@ pub mod input {
     pub const STYLE_THREAD_GONE: Reason = Reason { code: Code::Failed, message: "the host's window-style thread is gone", entries: &["host-input-click"] };
     pub const STYLE_THREAD_NOT_STARTED: Reason = Reason { code: Code::Failed, message: "the host could not start its window-style thread: …", entries: &["host-input-click"] };
     pub const STYLE_THREAD_FAILED: Reason = Reason { code: Code::Failed, message: "the host's thread for it failed: …", entries: &["host-input-click"] };
+    /// A double-click (`clicks = 2`, backend/double_click.rs) whose first click was made, and whose
+    /// second was not sent: the window at the point is another one now, or cannot be read again.
+    pub const DOUBLE_CUT: Reason = Reason {
+        code: Code::Covered,
+        message: "the window at the point changed after the first click: the second click was not sent",
+        entries: &["host-input-click"],
+    };
+    /// macOS: the window server's list of windows on screen could not be had before a
+    /// double-click's first press (`WindowFromPoint` on Windows cannot fail).
+    pub const DOUBLE_NO_WINDOW: Reason = Reason { code: Code::Failed, message: "the window at the point could not be read: nothing was clicked", entries: &["host-input-click"] };
+    /// macOS: an event of a double-click's second press or release the system would not make —
+    /// every event of a press is made before the first of it is posted, so nothing of it went out.
+    pub const DOUBLE_SECOND_NULL: Reason = Reason {
+        code: Code::Failed,
+        message: "CGEventCreateMouseEvent(type …) returned NULL for the second click; the first click was made",
+        entries: &["host-input-click"],
+    };
+    pub const GESTURE_THREAD_GONE: Reason = Reason { code: Code::Failed, message: "the host's input-gesture thread is gone", entries: &["host-input-click"] };
+    pub const GESTURE_THREAD_NOT_STARTED: Reason = Reason { code: Code::Failed, message: "the host could not start its input-gesture thread: …", entries: &["host-input-click"] };
     pub const NO_POST_ACCESS: Reason = Reason {
         code: Code::Denied,
         message: "this application may not post events: Accessibility is not granted to it (System Settings > Privacy & Security > Accessibility)",
@@ -1008,6 +1027,11 @@ pub static REASONS: &[&Reason] = &[
     &input::STYLE_THREAD_GONE,
     &input::STYLE_THREAD_NOT_STARTED,
     &input::STYLE_THREAD_FAILED,
+    &input::DOUBLE_CUT,
+    &input::DOUBLE_NO_WINDOW,
+    &input::DOUBLE_SECOND_NULL,
+    &input::GESTURE_THREAD_GONE,
+    &input::GESTURE_THREAD_NOT_STARTED,
     &input::NO_POST_ACCESS,
     &input::NOT_PAIRED,
     &input::NOT_ON_SCREEN,

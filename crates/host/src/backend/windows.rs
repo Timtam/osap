@@ -18,7 +18,7 @@ use super::hook_watch;
 use super::hook_watch_thread;
 use super::hotkey_hook::{self, Down, Mods, OsPress, Route, NO_ID};
 use super::{
-    capture_decision, menu_flag_owners, scope_of, Backend, Capture, CaptureFn, CaptureSource,
+    capture_decision, keypad_enter_as, menu_flag_owners, menu_taken, scope_of, Backend, Capture, CaptureFn, CaptureSource,
     CapturedImage, CompareFn, Captured, ControlInfo, HostEvents, KeyRefusal, MouseButton, OcrLine, OcrShot,
     OcrText, OcrThread, OcrWord, OcrWorker, OwnerKeys, Pressed, Recognise, Taken, WinInfo, capture_failed,
     DUPLICATION_UNANSWERED,
@@ -1450,6 +1450,12 @@ impl Backend for WindowsBackend {
         owner: usize,
     ) -> Result<super::ActJob, HostError> {
         super::click_win::prepare_hold(window, x, y, button, owner)
+    }
+
+    /// Nothing to read here: the gesture's job, which places, presses and releases on its own
+    /// thread ([`WinHand`]).
+    fn mouse_double_click(&self, x: i32, y: i32, button: MouseButton, interval: std::time::Duration) -> Result<super::ActJob, HostError> {
+        Ok(super::double_click::job(x, y, button, "counted by Windows", interval, move || WinHand { x, y, button, owed: false }))
     }
 
     fn give_back_activation(&self, when: super::GiveBackWhen, why: &str) -> Option<super::ActJob> {
@@ -3237,14 +3243,22 @@ unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LP
             // Remembered as noted, so that the captured-key branch below does not note the same
             // press again: a captured Return passes both, and one press read as "Return,
             // Return" in the runtime's log.
+            //
+            // Not one a capture takes in a menu (`menu = "taken"`): the flag never let it through,
+            // and the record would say it reached the program. A menu the system drew lets even
+            // that one through (`capture_decision`), and it is noted then.
             let mut menu_key_noted = false;
             if is_down && mask == 0 && (vk == 0x0D || vk == 0x1B) {
                 let st = locked(&KEY_STATE);
                 if st.owners.iter().any(|e| e.menu) {
                     let front = GetForegroundWindow() as isize;
-                    for owner in menu_flag_owners(&st.set, &st.owners, front) {
-                        note_menu_pass(owner, vk, mask);
-                        menu_key_noted = true;
+                    let ck = if keypad_enter { keypad_enter_as(&st.set, &st.owners, mask, front) } else { vk };
+                    let taken = menu_taken(&st.set, &st.owners, ck, mask, front) && !popup_menu_open();
+                    if !taken {
+                        for owner in menu_flag_owners(&st.set, &st.owners, front) {
+                            note_menu_pass(owner, vk, mask);
+                            menu_key_noted = true;
+                        }
                     }
                 }
             }
@@ -4633,6 +4647,61 @@ pub(super) fn click_input(x: i32, y: i32, button: MouseButton) -> Result<(), Hos
     released(button, &sent)
 }
 
+/// `host.input.click`'s `clicks = 2` on Windows, for the gesture's order (`double_click.rs`), on
+/// the host's `input-gesture` thread. Windows counts a double-click itself, as from a mouse: the
+/// second press of the same button within `GetDoubleClickTime` of the first and inside the
+/// double-click rectangle around it (`SM_CXDOUBLECLK` by `SM_CYDOUBLECLK`) is one — a window whose
+/// class has `CS_DBLCLKS` gets `WM_xBUTTONDBLCLK` for it, any other a second `WM_xBUTTONDOWN`,
+/// which a toolkit counts itself. `MOUSEINPUT` has no click count, and its `time` of 0 has the
+/// system stamp each event as it takes it, so what Windows measures is the time between the two
+/// `SendInput` presses. So: each press and each release a `SendInput` of its own, the pointer placed
+/// at the point before each press — put back, should the user's hand have moved it in the gap — and
+/// the window at the point `WindowFromPoint`'s, a local question any thread may ask (`click_win`,
+/// `target`). Every press and release is noted ([`note_button`]), so a move made meanwhile on the
+/// event loop is motion while the button is down; a release refused is sent again on its own
+/// ([`released`]); and a press that went out is released when the hand is dropped without its
+/// release made — the thread unwinding between the two.
+struct WinHand {
+    x: i32,
+    y: i32,
+    button: MouseButton,
+    /// A press went out and its release has not been made yet.
+    owed: bool,
+}
+
+impl super::double_click::Hand for WinHand {
+    fn at_point(&mut self) -> Option<u64> {
+        // SAFETY: a question to the window manager about a point, answered locally.
+        let at = unsafe { WindowFromPoint(POINT { x: self.x, y: self.y }) };
+        Some(at as usize as u64)
+    }
+
+    fn press(&mut self, _n: u8) -> Result<(), HostError> {
+        let (down, _) = button_flags(self.button);
+        place(self.x, self.y)?;
+        send_inputs(&[(mouse_input(down, 0), Holds::Down(button_code(self.button)))], &[]).answer()?;
+        note_button(self.button, true);
+        self.owed = true;
+        Ok(())
+    }
+
+    fn release(&mut self, _n: u8) -> Result<(), HostError> {
+        self.owed = false;
+        let (_, up) = button_flags(self.button);
+        let held = button_code(self.button);
+        let sent = send_inputs(&[(mouse_input(up, 0), Holds::Up(held))], &[held]);
+        released(self.button, &sent)
+    }
+}
+
+impl Drop for WinHand {
+    fn drop(&mut self) {
+        if self.owed {
+            let _ = super::double_click::Hand::release(self, 0);
+        }
+    }
+}
+
 /// The sixteen steps of a drag from `from` to `to`, each place handed to `step`, which sends it:
 /// the first step not taken ends them, and is the answer.
 fn drag_steps(from: (i32, i32), to: (i32, i32), mut step: impl FnMut((i32, i32)) -> Result<(), HostError>) -> Result<(), HostError> {
@@ -5085,9 +5154,9 @@ mod hook_carry_over_tests {
     fn a_reinstall_keeps_the_application_s_keys_and_forgets_what_the_old_hook_saw() {
         let _turn = locked(&RECORDS);
         let captured = vec![
-            Captured { vk: 0x09, mask: 0, owner: 1 },
-            Captured { vk: 0x09, mask: 1, owner: 1 },
-            Captured { vk: 0x0D, mask: 0, owner: 2 },
+            Captured { vk: 0x09, mask: 0, owner: 1, menu_taken: false },
+            Captured { vk: 0x09, mask: 1, owner: 1, menu_taken: false },
+            Captured { vk: 0x0D, mask: 0, owner: 2, menu_taken: false },
         ];
         let owners = vec![OwnerKeys { owner: 1, scope: 0x1234, menu: true }];
         {
@@ -5178,7 +5247,7 @@ mod hook_carry_over_tests {
     #[test]
     fn a_hook_out_of_the_chain_keeps_the_application_s_keys_and_forgets_what_it_recorded() {
         let _turn = locked(&RECORDS);
-        let captured = vec![Captured { vk: 0x09, mask: 0, owner: 1 }, Captured { vk: 0x20, mask: 0, owner: 2 }];
+        let captured = vec![Captured { vk: 0x09, mask: 0, owner: 1, menu_taken: false }, Captured { vk: 0x20, mask: 0, owner: 2, menu_taken: false }];
         let owners = vec![OwnerKeys { owner: 1, scope: 0x1234, menu: false }];
         {
             let mut st = locked(&KEY_STATE);
@@ -5258,7 +5327,7 @@ mod hook_carry_over_tests {
         let all_four = MASK_CTRL | MASK_ALT | MASK_SHIFT | MASK_WIN;
         let present = HOOK_HOTKEYS_PRESENT.swap(true, Ordering::Relaxed);
         locked(&KEY_STATE).set =
-            vec![Captured { vk: 0x09, mask: 0, owner: 1 }, Captured { vk: 0x12, mask: MASK_TAP, owner: 1 }];
+            vec![Captured { vk: 0x09, mask: 0, owner: 1, menu_taken: false }, Captured { vk: 0x12, mask: MASK_TAP, owner: 1, menu_taken: false }];
         {
             let mut t = locked(&HOOK_HOTKEYS);
             // MOD_ALT | MOD_CONTROL | MOD_SHIFT | MOD_WIN.
@@ -5766,8 +5835,8 @@ mod hook_carry_over_tests {
         assert!(!is_keypad_enter(0x26, LLKHF_EXTENDED));
         let unasked = || -> isize { panic!("the window in front is asked for the keypad's Enter alone") };
         let front = || 0x1234;
-        let numpad = Captured { vk: VK_NUMPAD_ENTER, mask: 0, owner: 1 };
-        let set = [numpad, Captured { vk: 0x09, mask: 0, owner: 1 }];
+        let numpad = Captured { vk: VK_NUMPAD_ENTER, mask: 0, owner: 1, menu_taken: false };
+        let set = [numpad, Captured { vk: 0x09, mask: 0, owner: 1, menu_taken: false }];
         assert_eq!(captured_key(&set, &[], VK_RETURN, true, 0, front), (VK_NUMPAD_ENTER, true));
         assert_eq!(captured_key(&set, &[], VK_RETURN, false, 0, unasked), (VK_RETURN, false), "the main Enter");
         assert_eq!(captured_key(&set, &[], VK_RETURN, true, MASK_CTRL, front), (VK_RETURN, false), "other modifiers");
@@ -5775,7 +5844,7 @@ mod hook_carry_over_tests {
         assert_eq!(captured_key(&set, &elsewhere, VK_RETURN, true, 0, front), (VK_RETURN, false), "scoped elsewhere");
         // A capture of Return beside it: the main Enter is Return's, the keypad's NumpadEnter's,
         // and Return's again where the NumpadEnter capture is out of scope.
-        let both = [Captured { vk: VK_RETURN, mask: 0, owner: 2 }, numpad];
+        let both = [Captured { vk: VK_RETURN, mask: 0, owner: 2, menu_taken: false }, numpad];
         assert_eq!(captured_key(&both, &[], VK_RETURN, false, 0, unasked), (VK_RETURN, true));
         assert_eq!(captured_key(&both, &[], VK_RETURN, true, 0, front), (VK_NUMPAD_ENTER, true));
         assert_eq!(captured_key(&both, &elsewhere, VK_RETURN, true, 0, front), (VK_RETURN, true));
@@ -5796,6 +5865,15 @@ mod hook_carry_over_tests {
         assert!(hook.contains("locked(&KEY_QUEUE).push(Taken { vk: ck, mask, owner, repeat, pressed });"));
         assert!(hook.contains("let system_held = hotkey_hook::held_before(late, || down(vk as u16));"));
         assert!(hook.contains("hook_hotkey(kb, vk, mask, late)"));
+        // Return and Escape are noted for a menu flag unless a capture takes them in a menu
+        // (`menu = "taken"`) — by the name the captures know the keypad's Enter by — and no menu the
+        // system drew lets that one through either.
+        let noted = hook.find("note_menu_pass(owner, vk, mask);").unwrap();
+        let taken = hook
+            .find("let taken = menu_taken(&st.set, &st.owners, ck, mask, front) && !popup_menu_open();")
+            .expect("a key taken in a menu is told");
+        assert!(taken < noted && hook[taken..noted].contains("if !taken {"));
+        assert!(hook[..taken].contains("let ck = if keypad_enter { keypad_enter_as(&st.set, &st.owners, mask, front) } else { vk };"));
     }
 
     /// The keypad's Enter held: its repeat is a repeat under either of its names, the one it went
@@ -6522,6 +6600,38 @@ mod pointer_motion_tests {
         assert!(body(SRC, "fn mouse_click(&self, x: i32, y: i32, button: MouseButton)").contains("click_input(x, y, button)"));
         assert!(body(SRC, "pub(super) fn click_input(x: i32, y: i32, button: MouseButton)").contains("released(button, &sent)"));
         assert!(body(CLICK, "fn hold_and_click(").contains("super::windows::click_input(x, y, button)?;"));
+    }
+
+    /// The double-click's hand (`clicks = 2`): the pointer placed before each press, so both land
+    /// at the point; the press and the release each a `SendInput` of their own, with what they hold
+    /// and noted, the release through `released` and its resend; the window at the point
+    /// `WindowFromPoint`'s; a press owed its release made when the hand goes; and the backend hands
+    /// the shared gesture's job the hand, saying that Windows counts the pair.
+    #[test]
+    fn the_double_clicks_hand_places_before_each_press_and_sends_each_event_alone() {
+        const SRC: &str = include_str!("windows.rs");
+        use crate::ocr_wiring_tests::body;
+        let hand = body(SRC, "impl super::double_click::Hand for WinHand {");
+        let press = body(hand, "fn press(&mut self, _n: u8)");
+        let placed = press.find("place(self.x, self.y)?;").expect("placed before each press");
+        let sent = press
+            .find("send_inputs(&[(mouse_input(down, 0), Holds::Down(button_code(self.button)))], &[]).answer()?;")
+            .expect("the press alone");
+        let noted = press.find("note_button(self.button, true);").expect("noted");
+        let owed = press.find("self.owed = true;").expect("owed its release");
+        assert!(placed < sent && sent < noted && noted < owed, "{press}");
+        let release = body(SRC, "fn release(&mut self, _n: u8)");
+        assert!(release.contains("let sent = send_inputs(&[(mouse_input(up, 0), Holds::Up(held))], &[held]);"), "{release}");
+        assert!(release.contains("released(self.button, &sent)") && release.starts_with("fn release(&mut self, _n: u8) -> Result<(), HostError> {\n        self.owed = false;"));
+        assert!(body(hand, "fn at_point(&mut self)").contains("WindowFromPoint(POINT { x: self.x, y: self.y })"));
+        assert!(!hand.contains("sleep"), "the waits are the gesture's, not the hand's");
+        assert!(body(SRC, "impl Drop for WinHand {").contains("if self.owed {"));
+        let backend = body(SRC, "fn mouse_double_click(&self, x: i32, y: i32, button: MouseButton, interval: std::time::Duration)");
+        assert!(backend.contains("super::double_click::job(x, y, button, \"counted by Windows\", interval, move || WinHand { x, y, button, owed: false })"));
+        // The two pairs' flags per button, as a plain click's.
+        assert_eq!(button_flags(MouseButton::Left), (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP));
+        assert_eq!(button_flags(MouseButton::Right), (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP));
+        assert_eq!(button_flags(MouseButton::Middle), (MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP));
     }
 }
 

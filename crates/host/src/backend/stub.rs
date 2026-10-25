@@ -166,6 +166,11 @@ impl Backend for StubBackend {
     fn mouse_click(&self, _x: i32, _y: i32, _button: MouseButton) -> Result<(), HostError> {
         Ok(())
     }
+    // A double-click too: handed to the host's thread as on Windows and a Mac, and made there as
+    // nothing.
+    fn mouse_double_click(&self, _x: i32, _y: i32, _button: MouseButton, _interval: std::time::Duration) -> Result<super::ActJob, HostError> {
+        Ok(Box::new(|| Ok(())))
+    }
     fn mouse_drag(&self, _x1: i32, _y1: i32, _x2: i32, _y2: i32, _button: MouseButton) -> Result<(), HostError> {
         Ok(())
     }

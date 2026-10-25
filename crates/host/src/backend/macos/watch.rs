@@ -310,6 +310,8 @@ fn on_app_activated(notification: &NSNotification) {
     // Subscribed for `front.rs` alone while no module watches windows: only the focus it waits for,
     // and the log's read of where the keyboard went after it, with no window read to wait for it.
     if !STARTED.load(Ordering::SeqCst) {
+        // This application's own request for the front has its answer (`app.rs`).
+        super::app::activation_answered();
         super::front::activated(app.processIdentifier());
         super::page::activated(app.processIdentifier());
         super::front::report_chain();
@@ -381,6 +383,9 @@ fn activated(app: &NSRunningApplication, announce: bool) {
     FRONT_PID.store(pid, Ordering::Relaxed);
     // Set against AppKit's word on this application's own key window, for the log (`own.rs`).
     super::own::note_front(pid);
+    // This application's own request for the front, if one waits, has its answer: the workspace
+    // says which application is in front, and the reads of where the keyboard is ask again (`app.rs`).
+    super::app::activation_answered();
 
     // Whatever menu we believed was open belonged to the application we just left. Anything
     // else risks carrying a stuck flag into an application that never opened a menu at all.
@@ -879,6 +884,14 @@ unsafe extern "C-unwind" fn ax_callback(
 /// name into a `String`: the focus notifications arrive whenever anyone moves the caret, and
 /// an allocation each would be a poor trade for readability.
 fn on_notification(pid: i32, name: &CFString) {
+    /// Another application's focus moved: the keyboard is there, so this application's request for
+    /// the front, if one waits, has its answer (`app.rs`). Nothing for a notification of our own.
+    fn focus_elsewhere(pid: i32) {
+        if pid != std::process::id() as i32 {
+            super::app::activation_answered();
+        }
+    }
+
     if !HEARD_ANYTHING.swap(true, Ordering::Relaxed) {
         crate::logging::line(
             "macos",
@@ -920,11 +933,13 @@ fn on_notification(pid: i32, name: &CFString) {
             }),
         }
         crate::logging::trace("macos", || format!("focused window changed in pid {pid}"));
+        focus_elsewhere(pid);
         super::queue::mark_focus_dirty();
         return;
     }
     if name == ns_to_cf(unsafe { NSAccessibilityFocusedUIElementChangedNotification }) {
         crate::logging::trace("macos", || format!("focus moved within pid {pid}"));
+        focus_elsewhere(pid);
         super::queue::mark_focus_dirty();
         return;
     }

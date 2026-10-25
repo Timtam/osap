@@ -591,6 +591,12 @@ struct Shared {
 /// start gives back.
 const GIVE_BACK_AT_EXIT: std::time::Duration = std::time::Duration::from_millis(2000);
 
+/// How long the end of the application waits for the double-click the host's input-gesture thread
+/// is making to end (`Shared::end_gestures_at_exit`): one takes about a hundred milliseconds, and
+/// ends with its release, and those queued behind it are not begun; the process does not end
+/// between a press and its release unless that one gesture holds the thread past this.
+const GESTURE_AT_EXIT: std::time::Duration = std::time::Duration::from_millis(250);
+
 /// The epoch's foreground window out of `obs`, asking `ask` only when the epoch has none yet: the
 /// first question of an epoch reaches the system, and every later one is served what it answered.
 /// The cache is let go of while `ask` runs, as every observation does, since the backend's answer
@@ -1931,6 +1937,16 @@ impl Shared {
     fn give_back_activation_at_exit(&self) {
         if let Some(job) = self.backend.give_back_activation_at_exit() {
             self.acting.run_and_wait(acting::Lane::Style, job, GIVE_BACK_AT_EXIT);
+        }
+    }
+
+    /// At exit: the double-click the host's input-gesture thread is making ends first, with its
+    /// release, and every one queued behind it is not begun (`acting::Acting::end_and_wait`) — waited
+    /// for at most [`GESTURE_AT_EXIT`], which one gesture fits in however many were queued. Nothing is
+    /// waited for where no double-click was ever made: the lane's thread is not started for it.
+    fn end_gestures_at_exit(&self) {
+        if self.acting.started(acting::Lane::Gesture) {
+            self.acting.end_and_wait(acting::Lane::Gesture, GESTURE_AT_EXIT);
         }
     }
 
@@ -5697,8 +5713,9 @@ impl Manager {
     }
 
     /// At exit, after the event loop: the watchdog stops, the `[cpu]` summary of the whole run is
-    /// written — what each module took of the event loop — every mouse button a module still
-    /// holds down is let go of, and every window given the no-activate style gets it taken off.
+    /// written — what each module took of the event loop — a double-click on its way ends, every
+    /// mouse button a module still holds down is let go of, and every window given the no-activate
+    /// style gets it taken off.
     fn stop_guard(&mut self) {
         if let Some(mut w) = self.watchdog.take() {
             w.stop();
@@ -5706,6 +5723,8 @@ impl Manager {
         for line in self.shared.guard.cpu_summary() {
             logging::line("cpu", &line);
         }
+        // A double-click on its way ends with its release before the buttons left held are let go.
+        self.shared.end_gestures_at_exit();
         self.shared.release_all_held_buttons();
         // And every window given the no-activate style for a click gets its activation back, on
         // the thread that gave it, waited for a bounded time (what is not given back by then, the
@@ -7897,10 +7916,11 @@ fn install_key_captures<H: captures::KeyHost>(lua: &Lua, keys: &Table, idx: usiz
             host_call!("host.keys.capture");
             // The parser's own error, which names the part it could not read.
             let (vk, mask) = backend::parse_key_spec(&spec).map_err(mlua::Error::external)?;
-            // The quick repeats' `taps` and `within` (taps.rs); a bad option raises, before the hook
-            // is asked for.
-            taps::only_options(opts.as_ref(), "host.keys.capture", &["taps", "within"])?;
+            // The quick repeats' `taps` and `within` (taps.rs), and `menu`, whether a menu flag lets
+            // the key through (captures.rs); a bad option raises, before the hook is asked for.
+            taps::only_options(opts.as_ref(), "host.keys.capture", &["menu", "taps", "within"])?;
             let taps = taps::read_opts(opts.as_ref(), "host.keys.capture")?;
+            let menu_taken = captures::read_menu(opts.as_ref(), "host.keys.capture")?;
             // The hook or the tap first: without it no key is captured, so nothing is recorded and
             // the module is answered `nil, err` — `denied` on a Mac that has not granted
             // Accessibility, `failed` otherwise (D30 of the typed-errors plan). It used to raise
@@ -7921,7 +7941,7 @@ fn install_key_captures<H: captures::KeyHost>(lua: &Lua, keys: &Table, idx: usiz
             // unique token, returned to the caller so `release` can target THIS exact
             // registration and not another overlay's re-capture of the same key.
             let key = lua.create_registry_value(cb)?;
-            let token = sh.captures().capture(idx, vk, mask, lua.clone(), key, taps);
+            let token = sh.captures().capture(idx, vk, mask, lua.clone(), key, taps, menu_taken);
             sh.refresh_captured();
             one_value(mlua::Value::Integer(token))
         })?,
@@ -8900,8 +8920,10 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
     // call (acting.rs, `click_opts`): through Windows' input, as ever (the default); posted to the
     // window as messages; or through the input with the window's top-level window holding the
     // no-activate style, which a thread of the host's gives it (backend/click_win.rs). With a
-    // `window`, a click is made only where that window is drawn. The callback hears the outcome
-    // on a later tick, whichever way it went.
+    // `window`, a click is made only where that window is drawn. And `clicks = 2`, a double-click
+    // through the input, made as one gesture on the host's input-gesture thread
+    // (backend/double_click.rs). The callback hears the outcome on a later tick, whichever way it
+    // went — a double-click's once both clicks are out, or the second was not sent.
     let sh = shared.clone();
     input.set(
         "click",
@@ -8911,6 +8933,37 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             let cb = acting::callback("host.input.click", cb)?;
             let button = c.button;
             let answer = cb.map(|cb| acting::Answer { idx, lua: lua.clone(), cb, what: "input.click" });
+            if c.clicks == 2 {
+                // The window's check first, as for any click through the input; then what only the
+                // event loop can read, and the gesture handed to its thread, which makes it after
+                // the call returns — its waits there, where no turn of the event loop stretches
+                // them. The outcome decides what the module holds once it is known, as a
+                // no-activate click's does (`fire_acted`).
+                let ready = c
+                    .window
+                    .map_or(Ok(()), |w| sh.backend.click_check(w, x, y))
+                    .and_then(|()| sh.backend.mouse_double_click(x, y, button, sh.backend.double_click_time()));
+                match ready {
+                    Ok(job) => {
+                        // At once: a picture of this module's still out may show it (said once in
+                        // the log).
+                        sh.note_acting(lua, "host.input.click");
+                        sh.bump_input_epoch();
+                        let release = acting::Release { idx, button, presses: sh.presses_of(idx) };
+                        sh.acting.run_releasing(acting::Lane::Gesture, job, answer, release);
+                        return acting::outcome_values(lua, Ok(()));
+                    }
+                    Err(why) => {
+                        if let Some(w) = c.window {
+                            logging::line("input", &format!("double-click at {x},{y} for window {w} refused: {why}"));
+                        }
+                        if let Some(answer) = answer {
+                            sh.acting.answer_now(answer, Err(why.clone()));
+                        }
+                        return acting::outcome_values(lua, Err(why));
+                    }
+                }
+            }
             // The way's own checks first: a click refused is no input, and nothing is noted.
             let ready: Result<Option<backend::ActJob>, errors::HostError> = match (c.via, c.window) {
                 (acting::Via::NoActivate, Some(w)) => sh.backend.mouse_click_noactivate(w, x, y, button, idx).map(Some),
@@ -10057,7 +10110,11 @@ mod source_and_option_tests {
         assert!(refused.contains("backend::KeyRefusal::Mistake(why) => Err(mlua::Error::external(why)),"));
         let captures = body(LIB, "fn install_key_captures<");
         let hook = captures.find("if let Err(e) = sh.key_backend().watch_keys() {").expect("the hook asked for");
-        let recorded = captures.find("sh.captures().capture(idx, vk, mask, lua.clone(), key, taps)").expect("the capture recorded");
+        let recorded =
+            captures.find("sh.captures().capture(idx, vk, mask, lua.clone(), key, taps, menu_taken)").expect("the capture recorded");
+        // Every option read before the hook is asked for, so a bad one raises and records nothing.
+        let read = captures.find("let menu_taken = captures::read_menu(opts.as_ref(), \"host.keys.capture\")?;").expect("menu read");
+        assert!(read < hook, "the options before the hook");
         assert!(hook < recorded, "the hook first, so a refusal records nothing");
         assert!(captures[hook..recorded].contains("return errors_lua::with_error(lua, mlua::Value::Nil, &e);"));
     }
@@ -11687,6 +11744,10 @@ mod ocr_wiring_tests {
         assert!(body(LIB, "fn stop_guard(&mut self)").contains("self.shared.give_back_activation_at_exit();"));
         let exit = body(LIB, "fn give_back_activation_at_exit(&self)");
         assert!(exit.contains("self.acting.run_and_wait(acting::Lane::Style, job, GIVE_BACK_AT_EXIT);"));
+        // A double-click on its own lane, waited for at the end before the held buttons are let go.
+        assert!(click.contains("sh.acting.run_releasing(acting::Lane::Gesture, job, answer, release);"));
+        let stop = body(LIB, "fn stop_guard(&mut self)");
+        assert!(stop.find("self.shared.end_gestures_at_exit();").unwrap() < stop.find("self.shared.release_all_held_buttons();").unwrap());
         // host.element.press: noted as acting and the input epoch turned over before it is asked,
         // as every other host.element question is — on the accessibility thread (element.rs).
         const ELEMENT_LUA: &str = include_str!("element_lua.rs");
@@ -12961,6 +13022,43 @@ mod ocr_wiring_tests {
         assert_eq!(stub.mouse_up(1, 2, MouseButton::Right), Ok(()));
         assert_eq!(stub.mouse_scroll(1, 2, 60), Ok(()));
         assert_eq!(stub.type_text("hello"), Ok(()));
+    }
+
+    /// `host.input.click`'s `clicks = 2`: its window checked first, then the backend's job for the
+    /// gesture, with the user's double-click time; noted as acting and the input epoch turned over
+    /// only once it is handed over, to the input-gesture lane with the module's presses for its
+    /// release — so nothing is let go at the call, and the outcome decides on a later tick, as a
+    /// no-activate click's does; a refusal at the call answered to the callback too, and logged with
+    /// its window. The end of the application waits for that lane, where it was started, for the
+    /// gesture in flight only and a bounded time. And the build for other systems hands over a job
+    /// that makes nothing.
+    #[test]
+    fn a_double_click_is_handed_to_the_gesture_lane_after_its_window_check() {
+        let api = body(LIB, "fn install_host_api(");
+        let click = bindings(api, "input").into_iter().find(|b| b.0 == "click").expect("host.input.click").1;
+        let from = click.find("if c.clicks == 2 {").expect("the double-click's branch");
+        let to = click.find("let ready: Result<Option<backend::ActJob>, errors::HostError>").expect("the other ways");
+        assert!(from < to, "before the other ways");
+        let double = &click[from..to];
+        let checked = double.find(".map_or(Ok(()), |w| sh.backend.click_check(w, x, y))").expect("the window checked");
+        let made = double.find("sh.backend.mouse_double_click(x, y, button, sh.backend.double_click_time())").expect("the job");
+        let noted = double.find("sh.note_acting(lua, \"host.input.click\");").expect("noted");
+        let bumped = double.find("sh.bump_input_epoch();").expect("turned over");
+        let handed = double.find("sh.acting.run_releasing(acting::Lane::Gesture, job, answer, release);").expect("handed over");
+        assert!(checked < made && made < noted && noted < bumped && bumped < handed, "{double}");
+        assert!(double.contains("let release = acting::Release { idx, button, presses: sh.presses_of(idx) };"));
+        assert!(!double.contains("after_release") && !double.contains("let_go_button"), "nothing let go at the call");
+        let refused = &double[double.find("Err(why) => {").expect("refused")..];
+        assert!(refused.contains("double-click at {x},{y} for window {w} refused: {why}"));
+        assert!(refused.contains("sh.acting.answer_now(answer, Err(why.clone()));"));
+        assert!(!refused.contains("bump_input_epoch") && !refused.contains("note_acting"), "a refusal is no input");
+        let end = body(LIB, "fn end_gestures_at_exit(&self)");
+        assert!(end.contains("if self.acting.started(acting::Lane::Gesture) {"));
+        assert!(end.contains("self.acting.end_and_wait(acting::Lane::Gesture, GESTURE_AT_EXIT);"));
+        use crate::backend::{Backend, MouseButton};
+        let stub = crate::backend::stub::StubBackend::default();
+        let job = stub.mouse_double_click(1, 2, MouseButton::Right, std::time::Duration::from_millis(500)).expect("handed over");
+        assert_eq!(job(), Ok(()));
     }
 
     /// What a click or a drag does to the record of what its module holds, by what it made: a

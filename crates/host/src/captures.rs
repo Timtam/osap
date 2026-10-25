@@ -61,7 +61,8 @@ use crate::task::Ctx;
 const DROPPED_QUIET: Duration = Duration::from_secs(10);
 
 /// One capture: the combination, the module that holds it, its release token, its callback in
-/// the VM it was made from, and its options for quick repeats (`taps`, `within`: taps.rs).
+/// the VM it was made from, its options for quick repeats (`taps`, `within`: taps.rs), and whether
+/// it takes its key while a menu flag counts (`menu = "taken"`, [`read_menu`]).
 pub(crate) struct Reg {
     pub(crate) vk: u32,
     pub(crate) mask: u8,
@@ -70,6 +71,7 @@ pub(crate) struct Reg {
     pub(crate) lua: Lua,
     pub(crate) cb: RegistryKey,
     pub(crate) taps: Taps,
+    pub(crate) menu_taken: bool,
 }
 
 /// What one module set: the window its captures are pinned to (0, everywhere) and whether it says
@@ -113,13 +115,24 @@ impl Captures {
     }
 
     /// Files module `owner`'s capture of `(vk, mask)`, replacing its own earlier one, and returns
-    /// its token.
-    pub(crate) fn capture(&self, owner: usize, vk: u32, mask: u8, lua: Lua, cb: RegistryKey, taps: Taps) -> i64 {
+    /// its token. `menu_taken`: the capture takes its key while a menu flag counts
+    /// ([`backend::Captured::menu_taken`]).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn capture(
+        &self,
+        owner: usize,
+        vk: u32,
+        mask: u8,
+        lua: Lua,
+        cb: RegistryKey,
+        taps: Taps,
+        menu_taken: bool,
+    ) -> i64 {
         let token = self.next_token.get() + 1;
         self.next_token.set(token);
         let mut regs = self.regs.borrow_mut();
         regs.retain(|r| !(r.vk == vk && r.mask == mask && r.owner == owner));
-        regs.push(Reg { vk, mask, owner, token, lua, cb, taps });
+        regs.push(Reg { vk, mask, owner, token, lua, cb, taps, menu_taken });
         token
     }
 
@@ -215,7 +228,7 @@ impl Captures {
             .borrow()
             .iter()
             .filter(|r| enabled(r.owner))
-            .map(|r| Captured { vk: r.vk, mask: r.mask, owner: r.owner as u32 })
+            .map(|r| Captured { vk: r.vk, mask: r.mask, owner: r.owner as u32, menu_taken: r.menu_taken })
             .collect()
     }
 
@@ -231,7 +244,8 @@ impl Captures {
 
     /// The line the trace switch writes for the captured set: each combination once, in the order
     /// it was first captured, with the modules that hold it in the order that decides — each with
-    /// its scope when it has one (`@0x…`) and `+menu` while it says a menu is open.
+    /// its scope when it has one (`@0x…`), `+menu` while it says a menu is open, and `!taken` for a
+    /// capture taken in a menu (`menu = "taken"`).
     pub(crate) fn captured_line(&self, set: &[Captured], id_of: impl Fn(usize) -> String) -> String {
         let owners = self.owners.borrow();
         let mut keys: Vec<(u32, u8)> = Vec::new();
@@ -251,7 +265,8 @@ impl Captures {
                         let e = owners.get(&idx).copied().unwrap_or_default();
                         let scope = if e.scope == 0 { String::new() } else { format!("@{:#x}", e.scope) };
                         let menu = if e.menu { "+menu" } else { "" };
-                        format!("{}{scope}{menu}", id_of(idx))
+                        let taken = if c.menu_taken { "!taken" } else { "" };
+                        format!("{}{scope}{menu}{taken}", id_of(idx))
                     })
                     .collect();
                 format!("vk 0x{vk:02X}/m{m}[{}]", holders.join(","))
@@ -577,8 +592,9 @@ pub(crate) fn pass_on<H: KeyHost + ?Sized>(h: &H, vk: u32, mask: u8, pressed: Pr
 /// module not in `let_go` that is scoped to `front` or to everywhere — the rule the hook takes a
 /// key by ([`backend::in_scope`], [`backend::capture_decision`]), so the module the hook would have
 /// taken it for had those never captured it. A menu is not asked: none was open there at the
-/// press, or the hook would not have taken the key, and a key that waited is not looked at for one
-/// since. `None`: no other module captures it there. `set` and `owners` are the enabled modules',
+/// press, or the hook would not have taken the key — but for a key a capture takes in a menu
+/// (`menu = "taken"`), which goes on as every key taken does — and a key that waited is not looked
+/// at for one since. `None`: no other module captures it there. `set` and `owners` are the enabled modules',
 /// as the hook is handed them ([`Captures::set`], [`Captures::owner_entries`]).
 pub(crate) fn offered_to(
     set: &[Captured],
@@ -783,13 +799,64 @@ pub(crate) fn moved_line(module: &str, spec: &str, queued: bool) -> String {
     }
 }
 
+/// `menu` of `host.keys.capture`'s options, read strictly: `nil` or `"through"` is a capture a
+/// menu flag lets through, as every capture was (`false`); `"taken"` one that takes its key all the
+/// same (`true`, [`backend::Captured::menu_taken`]); anything else raises, naming the call. The
+/// other keys are the caller's to check ([`taps::only_options`]).
+pub(crate) fn read_menu(opts: Option<&Table>, call: &str) -> mlua::Result<bool> {
+    let Some(t) = opts else { return Ok(false) };
+    match t.get::<Value>("menu")? {
+        Value::Nil => Ok(false),
+        Value::String(s) => match &*s.to_string_lossy() {
+            "through" => Ok(false),
+            "taken" => Ok(true),
+            other => Err(mlua::Error::external(format!("{call}: menu is \"through\" or \"taken\", not \"{other}\""))),
+        },
+        other => Err(mlua::Error::external(format!(
+            "{call}: menu is \"through\" or \"taken\", not a {}",
+            crate::json::luau_type(&other)
+        ))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn reg(c: &Captures, lua: &Lua, owner: usize, vk: u32, mask: u8) -> i64 {
         let cb = lua.create_registry_value(lua.create_function(|_, ()| Ok(())).unwrap()).unwrap();
-        c.capture(owner, vk, mask, lua.clone(), cb, Taps::default())
+        c.capture(owner, vk, mask, lua.clone(), cb, Taps::default(), false)
+    }
+
+    /// `menu`: absent or `"through"` a capture a menu flag lets through, `"taken"` one that keeps its
+    /// key; anything else raises with the call's name. Filed with the capture, and handed to the
+    /// backend with the set.
+    #[test]
+    fn menu_is_through_or_taken_and_goes_with_the_capture() {
+        let lua = Lua::new();
+        let read = |src: &str| {
+            let t: Option<Table> = lua.load(src).eval().unwrap();
+            read_menu(t.as_ref(), "host.keys.capture")
+        };
+        assert!(!read("return nil").unwrap());
+        assert!(!read("return {}").unwrap());
+        assert!(!read("return { menu = 'through' }").unwrap());
+        assert!(read("return { menu = 'taken' }").unwrap());
+        for (src, words) in [
+            ("return { menu = 'take' }", "host.keys.capture: menu is \"through\" or \"taken\", not \"take\""),
+            ("return { menu = true }", "host.keys.capture: menu is \"through\" or \"taken\", not a boolean"),
+            ("return { menu = 1 }", "host.keys.capture: menu is \"through\" or \"taken\", not a number"),
+        ] {
+            let e = read(src).unwrap_err().to_string();
+            assert!(e.contains(words), "{src}: {e}");
+        }
+        let c = Captures::default();
+        let cb = lua.create_registry_value(lua.create_function(|_, ()| Ok(())).unwrap()).unwrap();
+        c.capture(1, 0x09, 0, lua.clone(), cb, Taps::default(), true);
+        reg(&c, &lua, 2, 0x09, 0);
+        let set = c.set(|_| true);
+        assert!(set[0].menu_taken && !set[1].menu_taken, "{set:?}");
+        assert_eq!(c.captured_line(&set, |i| format!("m{i}")), "captured set: vk 0x09/m0[m1!taken,m2]");
     }
 
     /// Registration order across modules, one capture per combination and module (a module's
@@ -875,7 +942,7 @@ mod tests {
     fn a_key_let_go_of_goes_on_to_the_earliest_capture_in_scope_of_another_module() {
         const W1: isize = 0x111;
         const W2: isize = 0x222;
-        let cap = |owner, vk, mask| Captured { vk, mask, owner };
+        let cap = |owner, vk, mask| Captured { vk, mask, owner, menu_taken: false };
         let own = |owner, scope, menu| OwnerKeys { owner, scope, menu };
         // Module 1 pinned to W1, 2 to W2, 3 everywhere, 4 never scoped; 4 captures Space only.
         let set = [cap(1, 0x09, 0), cap(2, 0x09, 0), cap(3, 0x09, 0), cap(4, 0x20, 0), cap(2, 0x09, backend::MASK_SHIFT)];

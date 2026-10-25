@@ -1238,7 +1238,10 @@ fn decide(vk: u32, mask: u8, front: isize, menu_keys: bool) -> Option<(u32, Opti
     let keypad_enter = vk == crate::backend::VK_NUMPAD_ENTER;
     let vk = if keypad_enter { crate::backend::keypad_enter_as(&state.set, &state.owners, mask, front) } else { vk };
     let decided = capture_decision(&state.set, &state.owners, vk, mask, front, own, watch::native_menu_open);
-    if menu_keys && !own {
+    // A key taken never went through: with a menu flag counting here that is one a capture takes in
+    // a menu (`menu = "taken"`), which the record must not say reached the program.
+    let taken = matches!(decided, Some(Capture::Take { .. }));
+    if menu_keys && !own && !taken {
         let mut noted = false;
         // The keypad's Enter ends a menu as Return does, and is recorded as Return.
         let menu_vk = if keypad_enter { crate::backend::VK_RETURN } else { vk };

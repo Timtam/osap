@@ -5,6 +5,7 @@
 //! behind `#[cfg(target_os = "macos")]` is compiled by exactly one machine in the world, the
 //! CI Mac, and only after a push. Code in here is type-checked from Windows.
 
+use std::cell::Cell;
 use std::sync::atomic::{AtomicI32, Ordering};
 
 use objc2::MainThreadMarker;
@@ -13,8 +14,47 @@ use objc2_app_kit::{
     NSRunningApplication, NSWorkspace,
 };
 
+use crate::backend::ActivationAsked;
+
 /// Whoever was in front before wxWidgets took it away from them.
 static LAUNCH_FRONT: AtomicI32 = AtomicI32::new(0);
+
+thread_local! {
+    /// This application's request for the front while it has no answer (`backend::ActivationAsked`):
+    /// asked in [`activate_self`], answered by the workspace's notice (`watch.rs`), AppKit's key
+    /// window (`own.rs`), another application's focus notification (`watch.rs`) and a key typed
+    /// elsewhere ([`refresh_asked`]), and read by `ax::keyboard_is_ours`. All of it on the main thread.
+    static ASKED: Cell<ActivationAsked> = const { Cell::new(ActivationAsked::new()) };
+}
+
+/// Whether this application has asked for the front and has no answer yet ([`ASKED`]).
+pub(super) fn activation_asked() -> bool {
+    ASKED.with(|a| a.get().asked())
+}
+
+/// The request for the front, if one is waiting, has its answer: the workspace named an
+/// application the frontmost one, a window of ours took the keyboard, or another application's
+/// focus moved.
+pub(super) fn activation_answered() {
+    ASKED.with(|a| {
+        let mut s = a.get();
+        s.answered();
+        a.set(s);
+    });
+}
+
+/// The tick (`MacBackend::pump_pending`): the request for the front, if one waits, has its answer
+/// when the event tap has counted a key pressed since it while none of our windows has the keyboard
+/// — that key went to another application. One cell read when nothing waits.
+pub(super) fn refresh_asked() {
+    ASKED.with(|a| {
+        let mut s = a.get();
+        if s.key_seen(super::tap::pressed(), super::own::has_keyboard()) {
+            a.set(s);
+            crate::logging::trace("macos", || "a key went elsewhere since this application asked for the front: the keyboard is read there again".to_string());
+        }
+    });
+}
 
 /// The activation options that mean "come forward now, properly".
 ///
@@ -134,6 +174,10 @@ pub(crate) fn restore_frontmost_after_gui_start() {
 /// first (`front.rs`), and so is a page's request for the front whose page left before it was
 /// answered (`page.rs`): this application takes the front itself. Nothing is asked before the
 /// window system has started (`own::app`).
+///
+/// The request is noted as waiting for its answer ([`ASKED`]) before it is made: until the workspace
+/// or AppKit says where the front went, the reads of where the keyboard is ask no system-wide
+/// question, which the window server may already put to this process (`ax::keyboard_is_ours`).
 pub(crate) fn activate_self() {
     let Some(app) = super::own::app() else {
         crate::logging::line("macos", "this application did not ask for the front: the window system has not started");
@@ -141,6 +185,11 @@ pub(crate) fn activate_self() {
     };
     super::front::cancel("this application takes the front itself");
     super::page::superseded();
+    ASKED.with(|a| {
+        let mut s = a.get();
+        s.ask(super::tap::pressed());
+        a.set(s);
+    });
     #[allow(deprecated)]
     app.activateIgnoringOtherApps(true);
 }

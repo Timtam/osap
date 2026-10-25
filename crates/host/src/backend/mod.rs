@@ -62,6 +62,11 @@ mod uia;
 /// for. See the file.
 #[cfg(windows)]
 mod click_win;
+/// A double-click made as one gesture — `host.input.click`'s `clicks = 2` — on the host's
+/// `input-gesture` thread: the order and the timing of its two pairs, shared by both platforms'
+/// hands, and its log line. Pure apart from the hand; see the file.
+#[cfg(any(windows, target_os = "macos"))]
+pub(crate) mod double_click;
 #[cfg(target_os = "macos")]
 mod macos;
 /// Bringing this process to the front, and whether it has a Dock icon — see
@@ -554,6 +559,66 @@ pub(crate) struct HandState {
 #[cfg(any(test, target_os = "macos"))]
 pub(crate) fn active_for_handing(appkit_active: bool, lent: bool, front_ours: bool) -> bool {
     appkit_active && (!lent || front_ours)
+}
+
+/// macOS: whether this application has asked for the front and has no answer yet — the third half
+/// of `ax::keyboard_is_ours`, beside the workspace's word and AppKit's.
+///
+/// Between this application's request (`app::activate_self`) and either of its answers reaching
+/// this process — the workspace naming an application the frontmost one, AppKit making a window of
+/// ours the key one — the window server may have given this application the front already. A
+/// system-wide read of the focused element then goes to this process, whose main thread is the one
+/// asking, and it waits out the messaging bound, a second: the third Mac test (2026-10-25) lost
+/// 1,034 ms in `window.focusChain` so, and the application in front was put in the quarantine for a
+/// read it never got. While asked, those reads answer "not known" without asking.
+///
+/// Answered ([`answered`](Self::answered)) by the workspace naming any application the frontmost
+/// one, ours included; by a window of ours taking the keyboard; by a focus notification from another
+/// application, whose keyboard it is; and at the tick ([`key_seen`](Self::key_seen)) by a key
+/// pressed since the request while none of ours has the keyboard, which went to another application,
+/// as a page's show waiting for the front is answered (`page::refresh`). Nothing timed decides it. Pure.
+#[cfg(any(test, target_os = "macos"))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ActivationAsked {
+    /// The event tap's count of keys pressed when the front was asked for (`tap::pressed`); `None`
+    /// while nothing is asked.
+    pressed: Option<u32>,
+}
+
+#[cfg(any(test, target_os = "macos"))]
+impl ActivationAsked {
+    /// Nothing asked.
+    pub(crate) const fn new() -> Self {
+        ActivationAsked { pressed: None }
+    }
+
+    /// The front asked for, with the tap's count of keys pressed at that moment. A request made
+    /// again before the first is answered counts from the newer one.
+    pub(crate) fn ask(&mut self, pressed: u32) {
+        self.pressed = Some(pressed);
+    }
+
+    /// An answer came: the workspace named an application, a window of ours took the keyboard, or
+    /// another application's focus moved.
+    pub(crate) fn answered(&mut self) {
+        self.pressed = None;
+    }
+
+    /// The tick: a key pressed since the request — the count is `pressed_now` — while none of our
+    /// windows has the keyboard (`ours_key` false) went to another application, so the keyboard is
+    /// there: answered. Whether it was answered by this.
+    pub(crate) fn key_seen(&mut self, pressed_now: u32, ours_key: bool) -> bool {
+        let typed = !ours_key && self.pressed.is_some_and(|p| p != pressed_now);
+        if typed {
+            self.pressed = None;
+        }
+        typed
+    }
+
+    /// Whether the front is asked for and not answered.
+    pub(crate) fn asked(&self) -> bool {
+        self.pressed.is_some()
+    }
 }
 
 /// Why nothing is asked, for [`HandPlan::Keep`].
@@ -1734,6 +1799,25 @@ pub trait Backend {
         Err(HostError::of(&common::NOT_YET))
     }
 
+    /// `host.input.click`'s `clicks = 2`, its part on the event loop: what the gesture needs that
+    /// only this thread can read — on a Mac the program the system's hit test names at the point —
+    /// and then the job that makes it, for the host's `input-gesture` thread
+    /// (`double_click.rs`): two presses and releases of `button` at (x, y), each pair a double-click
+    /// on this platform (a Mac's click states 1 and 2; Windows counts them itself), the window at
+    /// the point read before each press and a change stopping the second. `interval` is the user's
+    /// double-click time, for the job's log line. The `window` check is the caller's
+    /// ([`click_check`](Self::click_check)), before this. The default is a platform without it,
+    /// `common::NOT_YET`.
+    fn mouse_double_click(
+        &self,
+        _x: i32,
+        _y: i32,
+        _button: MouseButton,
+        _interval: std::time::Duration,
+    ) -> Result<ActJob, HostError> {
+        Err(HostError::of(&common::NOT_YET))
+    }
+
     /// The job that gives back their activation — takes the no-activate style off again — to the
     /// windows `when` ends, for the same thread as the clicks, after them; `why` for the log.
     /// `None` when no window holds the style and no click that gives it is on its way, which is
@@ -2245,8 +2329,9 @@ pub const MASK_TAP: u8 = 0x10;
 /// modifier. Every chord that holds both is VoiceOver's before it is anybody else's.
 pub const MAC_VOICEOVER_LAYER: u8 = MASK_WIN | MASK_ALT;
 
-/// One capture as the keyboard hook or the event tap holds it: a combination, and the module
-/// that captured it, by the index the host numbers modules with.
+/// One capture as the keyboard hook or the event tap holds it: a combination, the module that
+/// captured it, by the index the host numbers modules with, and whether a menu flag lets its key
+/// through.
 ///
 /// The host hands the whole set over in registration order — the order `host.keys.capture` was
 /// called in — and only the captures of enabled modules. The order is what decides between two
@@ -2257,6 +2342,13 @@ pub struct Captured {
     pub vk: u32,
     pub mask: u8,
     pub owner: u32,
+    /// `host.keys.capture`'s `menu = "taken"`: the capture takes its key while a menu flag counts
+    /// for the window in front ([`menu_flag_owners`]), where every other capture lets it through
+    /// — for a key that must never reach the program while a module lets its others through to
+    /// it (the overlay runtime's swallowed keys during a hand-over). A menu the system drew still
+    /// lets it through: that menu has the keyboard, not the program's window. `false`, the
+    /// default (`menu = "through"`), for every capture that does not ask.
+    pub menu_taken: bool,
 }
 
 /// What one module set with `host.keys.scope` and `host.keys.menuOpen`: the window its captures
@@ -2342,7 +2434,9 @@ pub fn menu_flag_owners<'a>(
 ///   (`native_menu`, asked only once a capture is in scope, as it costs a call on Windows), or
 ///   a menu flag that counts for the window in front ([`menu_flag_owners`]) — the flag of one
 ///   module lets every capture in that window through, since a menu open there is open for
-///   every key pressed there.
+///   every key pressed there — but for a capture taken in a menu ([`Captured::menu_taken`]),
+///   which the flag leaves its key: the earliest capture in scope decides that, as it decides
+///   who takes it.
 ///
 /// The scope is a whole top-level window. Two plug-ins inside one DAW window share it, so there
 /// the earlier registration wins.
@@ -2362,11 +2456,11 @@ pub fn capture_decision(
     native_menu: impl FnOnce() -> bool,
 ) -> Option<Capture> {
     let mut any = false;
-    let mut taker = None;
+    let mut taker: Option<&Captured> = None;
     for c in set.iter().filter(|c| c.vk == vk && c.mask == mask) {
         any = true;
         if in_scope(owners, c.owner, front) {
-            taker = Some(c.owner);
+            taker = Some(c);
             break;
         }
     }
@@ -2374,18 +2468,30 @@ pub fn capture_decision(
         return None;
     }
     if own_has_keyboard {
-        return Some(Capture::Pass { why: PassWhy::OwnWindow, owner: taker });
+        return Some(Capture::Pass { why: PassWhy::OwnWindow, owner: taker.map(|c| c.owner) });
     }
-    let Some(owner) = taker else {
+    let Some(taker) = taker else {
         return Some(Capture::Pass { why: PassWhy::OutOfScope, owner: None });
     };
+    let owner = taker.owner;
     if native_menu() {
         return Some(Capture::Pass { why: PassWhy::MenuMode, owner: Some(owner) });
     }
-    if menu_flag_owners(set, owners, front).next().is_some() {
+    if !taker.menu_taken && menu_flag_owners(set, owners, front).next().is_some() {
         return Some(Capture::Pass { why: PassWhy::MenuFlag, owner: Some(owner) });
     }
     Some(Capture::Take { owner })
+}
+
+/// Whether the earliest capture of `(vk, mask)` in scope for `front` is one taken in a menu
+/// ([`Captured::menu_taken`]): a key a menu flag does not let through. The Windows hook and the
+/// Mac tap ask it before they note an unmodified Return or Escape as gone through for a menu
+/// flag (`host.keys.passedThrough`), which a capture that takes it never let through. One walk of
+/// the set, as [`capture_decision`]'s.
+pub fn menu_taken(set: &[Captured], owners: &[OwnerKeys], vk: u32, mask: u8, front: isize) -> bool {
+    set.iter()
+        .find(|c| c.vk == vk && c.mask == mask && in_scope(owners, c.owner, front))
+        .is_some_and(|c| c.menu_taken)
 }
 
 /// The key the keypad's Enter is, pressed with the roles in `mask` while `front` is in front:
@@ -4246,7 +4352,12 @@ mod capture_decision_tests {
     const SPACE: u32 = 0x20;
 
     fn cap(owner: u32, vk: u32, mask: u8) -> Captured {
-        Captured { vk, mask, owner }
+        Captured { vk, mask, owner, menu_taken: false }
+    }
+
+    /// A capture made with `menu = "taken"`.
+    fn held(owner: u32, vk: u32, mask: u8) -> Captured {
+        Captured { menu_taken: true, ..cap(owner, vk, mask) }
     }
 
     /// Where the keypad's Enter goes: NumpadEnter while a capture of that combination is in scope
@@ -4367,6 +4478,44 @@ mod capture_decision_tests {
         assert_eq!(capture_decision(&set, &owners, TAB, 0, W2, false, no_menu), pass(PassWhy::OutOfScope, None));
     }
 
+    /// A capture taken in a menu (`menu = "taken"`): a menu flag that counts for the window in front
+    /// leaves it its key — its own module's flag and another's alike — while every other capture
+    /// there is let through; a menu the system drew still lets it through, and so does one of this
+    /// application's own windows; out of scope it takes nothing. The earliest capture in scope
+    /// decides, so another module's earlier capture of the key that is let through lets it through.
+    /// `menu_taken` says the same for the record of Return and Escape.
+    #[test]
+    fn a_capture_taken_in_a_menu_keeps_its_key_while_a_menu_flag_lets_the_others_through() {
+        let set = [held(1, TAB, 0), held(1, TAB, MASK_SHIFT), cap(1, 0x0D, 0), cap(2, SPACE, 0)];
+        let owners = [own(1, W1, true), own(2, 0, false)];
+        assert_eq!(capture_decision(&set, &owners, TAB, 0, W1, false, no_menu), take(1), "its own flag");
+        assert_eq!(capture_decision(&set, &owners, TAB, MASK_SHIFT, W1, false, no_menu), take(1));
+        assert_eq!(capture_decision(&set, &owners, 0x0D, 0, W1, false, no_menu), pass(PassWhy::MenuFlag, Some(1)));
+        assert_eq!(capture_decision(&set, &owners, SPACE, 0, W1, false, no_menu), pass(PassWhy::MenuFlag, Some(2)));
+        assert_eq!(capture_decision(&set, &owners, TAB, 0, W1, false, || true), pass(PassWhy::MenuMode, Some(1)));
+        assert_eq!(capture_decision(&set, &owners, TAB, 0, W1, true, no_menu), pass(PassWhy::OwnWindow, Some(1)));
+        assert_eq!(capture_decision(&set, &owners, TAB, 0, W2, false, no_menu), pass(PassWhy::OutOfScope, None));
+        // Another module's flag in the same window.
+        let set2 = [held(1, TAB, 0), cap(2, SPACE, 0)];
+        let owners2 = [own(1, W1, false), own(2, 0, true)];
+        assert_eq!(capture_decision(&set2, &owners2, TAB, 0, W1, false, no_menu), take(1), "another module's flag");
+        // The earliest capture in scope decides: module 2's plain capture came first.
+        let set3 = [cap(2, TAB, 0), held(1, TAB, 0)];
+        assert_eq!(capture_decision(&set3, &owners, TAB, 0, W1, false, no_menu), pass(PassWhy::MenuFlag, Some(2)));
+        let owners3 = [own(1, W1, true), own(2, W2, false)];
+        assert_eq!(capture_decision(&set3, &owners3, TAB, 0, W1, false, no_menu), take(1), "2's is scoped elsewhere");
+        // With no flag, it is a capture like any other.
+        assert_eq!(capture_decision(&set, &[own(1, W1, false)], TAB, 0, W1, false, no_menu), take(1));
+        // The record's question.
+        let rec = [held(1, 0x0D, 0), cap(2, 0x1B, 0)];
+        let rec_owners = [own(1, W1, true)];
+        assert!(menu_taken(&rec, &rec_owners, 0x0D, 0, W1));
+        assert!(!menu_taken(&rec, &rec_owners, 0x0D, MASK_SHIFT, W1), "another combination");
+        assert!(!menu_taken(&rec, &rec_owners, 0x0D, 0, W2), "out of scope");
+        assert!(!menu_taken(&rec, &rec_owners, 0x1B, 0, W1), "a plain capture");
+        assert!(!menu_taken(&[], &[], 0x1B, 0, W1), "nothing captured");
+    }
+
     /// One of this application's own windows has the keyboard: every captured combination goes
     /// to it, naming the module that would have taken it, before the scope's menu, a menu flag or
     /// the native menu is looked at — the native menu not even asked; a modifier tap with them; a
@@ -4420,7 +4569,11 @@ mod capture_decision_tests {
             .find("capture_decision(&state.set, &state.owners, vk, mask, front, own, watch::native_menu_open)")
             .expect("and hands the answer to the decision");
         assert!(asked < decided);
-        assert!(decide.contains("if menu_keys && !own {"), "nothing is filed for a menu then");
+        assert!(decide.contains("if menu_keys && !own && !taken {"), "nothing is filed for a menu then");
+        // Nor for a key a capture took while a menu flag counts (`menu = "taken"`): it never went
+        // through.
+        let taken = decide.find("let taken = matches!(decided, Some(Capture::Take { .. }));").expect("a taken key is told");
+        assert!(decided < taken);
         let cb = body("unsafe extern \"C-unwind\" fn tap_callback(");
         let at = cb.find("decide(vk, mask, front, true)").unwrap();
         let held = cb
@@ -4972,6 +5125,108 @@ mod front_tests {
         for f in [take, came_back] {
             assert!(!f.contains("isActive()"), "never AppKit's word alone");
         }
+    }
+
+    /// This application's request for the front waits for its answer: asked, it is asked until an
+    /// answer comes — any of the notices, or a key typed elsewhere since it — and a key typed while a
+    /// window of ours has the keyboard, or none typed, is no answer. Asked again, it counts from the
+    /// newer request. Nothing timed.
+    #[test]
+    fn a_request_for_the_front_is_asked_until_an_answer_comes() {
+        let mut a = ActivationAsked::new();
+        assert!(!a.asked() && a == ActivationAsked::default());
+        assert!(!a.key_seen(5, false), "nothing asked: nothing answered");
+        a.ask(5);
+        assert!(a.asked());
+        assert!(!a.key_seen(5, false) && a.asked(), "no key since the request");
+        assert!(!a.key_seen(6, true) && a.asked(), "a key into a window of ours");
+        assert!(a.key_seen(6, false) && !a.asked(), "a key that went to another application");
+        a.ask(6);
+        a.ask(9);
+        assert!(!a.key_seen(9, false) && a.asked(), "counted from the newer request");
+        a.answered();
+        assert!(!a.asked());
+        a.answered();
+        assert!(!a.asked(), "an answer with nothing asked changes nothing");
+    }
+
+    /// The reads of where the keyboard is wait for the request too: `keyboard_is_ours` has the third
+    /// half, and its three readers are guarded by it; the request is noted before it is made; and
+    /// every answer is wired — the workspace's notice on both of its paths, a window of ours taking
+    /// the keyboard by AppKit's notice or at the tick, another application's focus notification, and
+    /// the tick's key. Held where it is written, as above.
+    #[test]
+    fn the_reads_of_the_keyboard_wait_for_this_applications_request_for_the_front() {
+        const AX: &str = include_str!("macos/ax.rs");
+        const APP: &str = include_str!("macos/app.rs");
+        const WATCH: &str = include_str!("macos/watch.rs");
+        const OWN: &str = include_str!("macos/own.rs");
+        const MAC: &str = include_str!("macos/mod.rs");
+        let ours = body(AX, "fn keyboard_is_ours(front: Option<i32>) -> bool {");
+        assert!(ours.contains("front.is_some_and(is_ours) || super::own::has_keyboard() || super::app::activation_asked()"));
+        for (read, guard) in [
+            ("pub fn window_focus_chain() -> Vec<ControlInfo> {", "if keyboard_is_ours(front) {"),
+            ("pub fn focus_step(hwnd: isize, direction: i32)", "if keyboard_is_ours(frontmost_pid()) {"),
+            ("pub fn focus_within(hwnd: isize, x: i32, y: i32, w: i32, h: i32)", "if keyboard_is_ours(frontmost_pid()) {"),
+        ] {
+            let f = body(AX, read);
+            assert!(at(f, guard) < at(f, "system_wide()"), "{read}: guarded before the system-wide read");
+        }
+        let take = body(APP, "pub(crate) fn activate_self() {");
+        assert!(at(take, "s.ask(super::tap::pressed());") < at(take, "app.activateIgnoringOtherApps(true);"));
+        assert!(body(APP, "pub(super) fn refresh_asked() {").contains("s.key_seen(super::tap::pressed(), super::own::has_keyboard())"));
+        assert!(body(MAC, "fn pump_pending(&self, events: &mut dyn HostEvents) {").contains("app::refresh_asked();"));
+        let activated = body(WATCH, "fn activated(app: &NSRunningApplication, announce: bool) {");
+        assert!(activated.contains("super::app::activation_answered();"));
+        let notice = body(WATCH, "fn on_app_activated(notification: &NSNotification) {");
+        assert!(at(notice, "super::app::activation_answered();") < at(notice, "activated(app, true);"), "the path before `start` too");
+        let heard = body(WATCH, "fn on_notification(pid: i32, name: &CFString) {");
+        assert!(heard.contains("if pid != std::process::id() as i32 {\n            super::app::activation_answered();"));
+        assert_eq!(heard.matches("focus_elsewhere(pid);").count(), 2, "the focused window's and the focused element's");
+        assert!(body(OWN, "fn on_key_change(n: &NSNotification, became: bool) {").contains("super::app::activation_answered();"));
+        assert!(body(OWN, "pub(super) fn refresh() {").contains("super::app::activation_answered();"));
+        for timed in ["Instant", "Duration", "after("] {
+            assert!(!body(APP, "pub(super) fn refresh_asked() {").contains(timed), "{timed}");
+        }
+    }
+
+    /// A double-click's hand on a Mac (`clicks = 2`): click state `n` on both events of pair `n` —
+    /// through `mouse_event`, which sets `kCGMouseEventClickState` — the move before the first pair
+    /// only, every event of a pair made before the first is posted, the second pair's NULL its own
+    /// reason, the right button's events by `button_events`; the release stamped afresh before it is
+    /// posted, and owed on drop; the window at the point the window server's list's, of the program
+    /// the hit test named at the call. Held where it is written; `check-macos.ps1` compiles it.
+    #[test]
+    fn a_macs_double_click_carries_click_states_one_and_two() {
+        const INPUT: &str = include_str!("macos/input.rs");
+        const AX: &str = include_str!("macos/ax.rs");
+        const MAC: &str = include_str!("macos/mod.rs");
+        let hand = body(INPUT, "impl crate::backend::double_click::Hand for Hand {");
+        let press = &hand[at(hand, "fn press(&mut self, n: u8) -> Result<(), HostError> {")..at(hand, "fn release(")];
+        assert!(press.contains("let clicks = Some(i64::from(n));"));
+        let moved = at(press, "if n == 1 {\n            built.push(make(CGEventType::MouseMoved, CGMouseButton::Left, None)?);");
+        let down = at(press, "built.push(make(down, cg, clicks)?);");
+        let up = at(press, "let release = make(up, cg, clicks)?;");
+        let posted = at(press, "post_all(&built);");
+        assert!(moved < down && down < up && up < posted, "every event of the pair made before the first is posted");
+        assert!(press.contains("let (down, up, _) = button_events(&self.button);") && press.contains("let cg = cg_button(&self.button);"));
+        assert!(press.contains("HostError::with(&input::DOUBLE_SECOND_NULL, said)"));
+        assert!(body(INPUT, "fn mouse_event(").contains("CGEventField::MouseEventClickState,"));
+        let release = &hand[at(hand, "fn release(&mut self, _n: u8) -> Result<(), HostError> {")..];
+        assert!(at(release, "CGEvent::set_timestamp(Some(&up), CGEvent::timestamp(Some(&now)));") < at(release, "post(&up);"));
+        assert!(body(INPUT, "impl Drop for Hand {").contains("Hand::release(self, 0)"));
+        let read = &hand[at(hand, "fn at_point(&mut self) -> Option<u64> {")..at(hand, "fn press(")];
+        assert!(read.contains("super::ax::listed_window_at(self.x, self.y, self.hit)"));
+        assert!(!hand.contains("sleep"), "the waits are the gesture's, not the hand's");
+        assert!(body(INPUT, "pub fn double_click(").contains("\"click states 1 and 2\""));
+        let listed = body(AX, "pub(super) fn listed_window_at(x: i32, y: i32, hit: Option<u32>) -> Option<u32> {");
+        assert!(listed.contains("CGWindowListCopyWindowInfo(") && listed.contains("double_click::front_window_for_hit(&listed, x, y, hit)"));
+        assert!(!listed.contains("MainThreadMarker"), "any thread may ask it");
+        // At the call, on the event loop, the hit test alone: no copy of the window list there.
+        let hit = body(AX, "pub(super) fn hit_window_at(x: i32, y: i32) -> Option<u32> {");
+        assert!(hit.contains("windowNumberAtPoint_belowWindowWithWindowNumber"));
+        assert!(!hit.contains("CGWindowListCopyWindowInfo") && !hit.contains("window_owner("), "no window list on the event loop");
+        assert!(body(MAC, "fn mouse_double_click(").contains("input::double_click(x, y, button, ax::hit_window_at(x, y), interval)"));
     }
 }
 

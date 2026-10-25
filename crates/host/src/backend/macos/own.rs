@@ -175,6 +175,10 @@ fn on_key_change(n: &NSNotification, became: bool) {
         if !had && number != 0 {
             KEY_EDGE.with(|e| e.set(Some((true, Instant::now()))));
         }
+        // This application's request for the front, if one waits, has its answer (`app.rs`).
+        if number != 0 {
+            super::app::activation_answered();
+        }
     } else if KEY_NUMBER.compare_exchange(number, 0, Ordering::Relaxed, Ordering::Relaxed).is_ok() {
         // Only the window noted as the key one: another of ours may have become key already, and
         // AppKit does not promise the order of the two notifications.
@@ -238,6 +242,11 @@ pub(super) fn refresh() {
         KEY_NUMBER.store(number, Ordering::Relaxed);
         KEY_NONACTIVATING.store(key.as_deref().is_some_and(nonactivating), Ordering::Relaxed);
         OWN_KEY.store(number != 0, Ordering::Relaxed);
+        // A window of ours has the keyboard, with no notification said: this application's request
+        // for the front, if one waits, has its answer (`app.rs`).
+        if number != 0 {
+            super::app::activation_answered();
+        }
     }
     let (said, since) = SAID.with(Cell::get);
     if number == said {

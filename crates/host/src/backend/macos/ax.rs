@@ -59,7 +59,7 @@ use objc2_core_foundation::{
     CGSize, Type,
 };
 use objc2_core_graphics::{
-    kCGWindowBounds, kCGWindowLayer, kCGWindowNumber, kCGWindowOwnerPID,
+    kCGWindowAlpha, kCGWindowBounds, kCGWindowLayer, kCGWindowNumber, kCGWindowOwnerPID,
     CGRectMakeWithDictionaryRepresentation, CGWindowListCopyWindowInfo, CGWindowListOption,
 };
 use objc2_foundation::NSString;
@@ -1545,6 +1545,56 @@ fn number_owns_point(ours: u32, x: i32, y: i32, what: &str) -> Option<bool> {
     Some(false)
 }
 
+/// The window a click at the screen point lands in: the hit test's (`number_owns_point`'s, which
+/// skips windows that let clicks through), its number — for a double-click's check of the window at
+/// the point between its two clicks (`input::double_click`), which compares that window's program's
+/// windows alone. The hit test alone, on the event loop: who owns the window is looked up on the
+/// host's `input-gesture` thread, in each read's own copy of the window list ([`listed_window_at`]).
+/// `None` off the main thread, where the hit test names no window, or for none there.
+pub(super) fn hit_window_at(x: i32, y: i32) -> Option<u32> {
+    let mtm = objc2::MainThreadMarker::new()?;
+    let (_, height) = super::capture::screen_size();
+    if height <= 0 {
+        return None;
+    }
+    let point = CGPoint::new(x as f64, (height - y) as f64);
+    let hit = NSWindow::windowNumberAtPoint_belowWindowWithWindowNumber(point, 0, mtm);
+    if hit <= 0 {
+        return None;
+    }
+    Some(hit as u32)
+}
+
+/// The window at the screen point for a double-click (`input::Hand`): the front-most window on
+/// screen of the window server's list that holds the point and is drawn, of the program that owns
+/// window `hit` in the same list — the window the hit test named at the call — when one is given
+/// (`double_click::front_window_for_hit`); its number, 0 for none. `None` when the list could not be
+/// had. The list is CG's alone, which any thread may ask — the double-click asks it on the host's
+/// `input-gesture` thread — and costs one copy of it, a few milliseconds.
+pub(super) fn listed_window_at(x: i32, y: i32, hit: Option<u32>) -> Option<u32> {
+    let list = CGWindowListCopyWindowInfo(
+        CGWindowListOption::OptionOnScreenOnly | CGWindowListOption::ExcludeDesktopElements,
+        0,
+    )?;
+    // SAFETY: CGWindowListCopyWindowInfo is documented to return an array of dictionaries.
+    let typed: &CFArray<CFDictionary> = unsafe { list.cast_unchecked::<CFDictionary>() };
+    let listed: Vec<crate::backend::double_click::Listed> = (0..typed.len().min(512)).filter_map(|i| {
+        let dict = typed.get(i)?;
+        let r = dict_rect(&dict)?;
+        Some(crate::backend::double_click::Listed {
+            number: dict_i64(&dict, unsafe { kCGWindowNumber }).unwrap_or(0) as u32,
+            pid: dict_i64(&dict, unsafe { kCGWindowOwnerPID }).unwrap_or(0) as i32,
+            // A window that says nothing of its alpha is drawn.
+            alpha: dict_f64(&dict, unsafe { kCGWindowAlpha }).unwrap_or(1.0),
+            x: r.origin.x,
+            y: r.origin.y,
+            w: r.size.width,
+            h: r.size.height,
+        })
+    }).collect();
+    Some(crate::backend::double_click::front_window_for_hit(&listed, x, y, hit))
+}
+
 /// Who owns a window number, and at what level. From the on-screen list; `None` for a
 /// number the list does not carry.
 pub(super) fn window_owner(number: u32) -> Option<(i32, i32)> {
@@ -1993,18 +2043,26 @@ fn is_ours(pid: i32) -> bool {
     pid == std::process::id() as i32
 }
 
-/// Whether the keyboard can be in this application: it is the frontmost application (`front`), or
-/// one of its windows has the keyboard by AppKit's account inside this process
-/// (`own::has_keyboard`), whatever the workspace names. A system-wide read of the focused element
-/// is then answered by this process — the main thread asking the main thread — so the reads of
-/// where the keyboard is answer "not known" instead, without asking.
+/// Whether the keyboard can be in this application: it is the frontmost application (`front`), one
+/// of its windows has the keyboard by AppKit's account inside this process (`own::has_keyboard`),
+/// whatever the workspace names, or it has asked for the front and neither has answered yet
+/// (`app::activation_asked`). A system-wide read of the focused element is then answered by this
+/// process — the main thread asking the main thread — so the reads of where the keyboard is
+/// (`window_focus_chain`, `focus_step`, `focus_within`) answer "not known" instead, without asking.
 ///
-/// Either half alone leaves a moment open: the workspace names an application frontmost apart
+/// The first two alone leave a moment open: the workspace names an application frontmost apart
 /// from AppKit telling this process that one of its windows took or lost the keyboard, and which
-/// comes first is not known (MW17 in TODO.md). Both together never ask this process; what they
-/// cost is a "not known" while the keyboard is on its way to or from another application.
+/// comes first is not known (MW17 in TODO.md). And both leave open the moment between this
+/// application's request for the front and either answer: the window server may give it the front
+/// before either notice reaches it, and a read in that moment waited out the messaging bound,
+/// 1,001 ms (the third Mac test, 2026-10-25) — the third half closes it, until the workspace, AppKit,
+/// another application's focus or a key typed elsewhere answers (`backend::ActivationAsked`). The
+/// three together never ask this process; what they cost is a "not known" while the keyboard is on
+/// its way to or from another application, read again by the first read after the answer — the
+/// focus round that the workspace's notice, AppKit's and a focus notification each bring, or an
+/// overlay's next poll.
 fn keyboard_is_ours(front: Option<i32>) -> bool {
-    front.is_some_and(is_ours) || super::own::has_keyboard()
+    front.is_some_and(is_ours) || super::own::has_keyboard() || super::app::activation_asked()
 }
 
 /// Whether the window in front is this application's, for the answers that name that window
@@ -2575,6 +2633,18 @@ pub(super) fn dict_i64(dict: &CFDictionary, key: &CFString) -> Option<i64> {
     // SAFETY: the value is borrowed from the dictionary, which outlives this call.
     let num: &CFType = unsafe { &*(v as *const CFType) };
     num.downcast_ref::<CFNumber>()?.as_i64()
+}
+
+/// A fractional number in a window-list entry: `kCGWindowAlpha`.
+fn dict_f64(dict: &CFDictionary, key: &CFString) -> Option<f64> {
+    let ptr: *const c_void = (key as *const CFString).cast();
+    let v = unsafe { dict.value(ptr) };
+    if v.is_null() {
+        return None;
+    }
+    // SAFETY: the value is borrowed from the dictionary, which outlives this call.
+    let num: &CFType = unsafe { &*(v as *const CFType) };
+    num.downcast_ref::<CFNumber>()?.as_f64()
 }
 
 /// Whether a window-list entry holds a string under `key` — for `kCGWindowName`, whose PRESENCE is

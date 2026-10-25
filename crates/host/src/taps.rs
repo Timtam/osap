@@ -430,7 +430,7 @@ mod tests {
         let lua = Lua::new();
         let read = |src: &str| -> mlua::Result<Taps> {
             let t: Option<Table> = lua.load(src).eval().unwrap();
-            only_options(t.as_ref(), "host.keys.capture", &["taps", "within"])?;
+            only_options(t.as_ref(), "host.keys.capture", &["menu", "taps", "within"])?;
             read_opts(t.as_ref(), "host.keys.capture")
         };
         assert_eq!(read("return nil").unwrap(), Taps::default());
@@ -453,7 +453,7 @@ mod tests {
         assert!(raised("return { within = 0/0 }").contains("from 100 to 5000, not"));
         assert!(raised("return { within = math.huge }").contains("not inf"));
         assert!(raised("return { within = '300' }").contains("from 100 to 5000, not a string"));
-        assert!(raised("return { tap = 'final' }").contains("host.keys.capture: 'tap' is not an option; the options are taps and within"));
+        assert!(raised("return { tap = 'final' }").contains("host.keys.capture: 'tap' is not an option; the options are menu, taps and within"));
         assert!(raised("return { 'final' }").contains("a number key is not an option"));
         let t: Table = lua.load("return { forground = true }").eval().unwrap();
         let e = only_options(Some(&t), "host.hotkey.register", &["foreground", "taps", "within"]).unwrap_err().to_string();

@@ -6,9 +6,13 @@
 //! thread a message and waits for its answer, with no bound Windows lets us set. Nothing that can
 //! wait for another program runs on the event loop, which carries every key a person presses, so
 //! such work is a job ([`crate::backend::ActJob`]) for a thread of the host's — one per [`Lane`],
-//! started at its first job, each lane's jobs in the order they were handed over. (Pressing an
-//! element, `host.element.press`, is a question to an accessibility tree like the others, asked on
-//! the accessibility thread: element.rs.)
+//! started at its first job, each lane's jobs in the order they were handed over. And a gesture
+//! whose timing is its definition — a double-click, `clicks = 2`, whose press lasts 20 ms and whose
+//! second press follows 60 ms after the first release (backend/double_click.rs) — waits on a lane
+//! of its own: on the event loop the waits would hold every key, and timers there would stretch
+//! with any turn that runs long, a press into a long press, the gap past the double-click time.
+//! (Pressing an element, `host.element.press`, is a question to an accessibility tree like the
+//! others, asked on the accessibility thread: element.rs.)
 //!
 //! **The way back.** A module that hands over a callback gets the outcome on a later tick: the
 //! thread sends it here, the tick takes it ([`Acting::take_due`]) and hands it to the module's
@@ -19,17 +23,21 @@
 //! called exactly once, on a later tick, whichever way the click went.
 //!
 //! **What `host.input.click` takes** ([`click_opts`]): the button, the window the click is for,
-//! the way (`via`) and, for a posted click only, whether the pointer moves. Read and checked here,
-//! before anything acts, so a mistake raises at the call.
+//! the way (`via`), how many clicks (`clicks`) and, for a posted click only, whether the pointer
+//! moves. Read and checked here, before anything acts, so a mistake raises at the call.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
+use std::sync::Arc;
 
 use mlua::{Function, Lua, MultiValue, Table, Value};
 
 use crate::backend::{ActJob, MouseButton};
-use crate::errors::input::{STYLE_THREAD_FAILED, STYLE_THREAD_GONE, STYLE_THREAD_NOT_STARTED};
+use crate::errors::input::{
+    ENDING, GESTURE_THREAD_GONE, GESTURE_THREAD_NOT_STARTED, STYLE_THREAD_FAILED, STYLE_THREAD_GONE, STYLE_THREAD_NOT_STARTED,
+};
 use crate::errors::HostError;
 use crate::{errors_lua, logging};
 use crate::ocr::types::{current_priority, Priority};
@@ -40,17 +48,40 @@ pub(crate) enum Lane {
     /// Windows' styles: a click with `via = "noactivate"`, the style it gives, and giving it back.
     /// One thread, so a style is given back only after every click handed over before.
     Style = 0,
+    /// Gestures timed as they are made: a double-click (`clicks = 2`), its waits on this thread,
+    /// one gesture after the other.
+    Gesture = 1,
 }
 
 /// How many lanes there are.
-const LANES: usize = 1;
+const LANES: usize = 2;
 
 impl Lane {
     /// Its thread's name.
     fn thread(self) -> &'static str {
         match self {
             Lane::Style => "window-style",
+            Lane::Gesture => "input-gesture",
         }
+    }
+
+    /// What a job is answered with when the lane's thread is gone: in its own Reason's words.
+    fn gone(self) -> HostError {
+        let reason = match self {
+            Lane::Style => &STYLE_THREAD_GONE,
+            Lane::Gesture => &GESTURE_THREAD_GONE,
+        };
+        HostError::with(reason, format!("the host's {} thread is gone", self.thread()))
+    }
+
+    /// What a job is answered with when the lane's thread could not be started, `e` the system's
+    /// word for it.
+    fn not_started(self, e: &std::io::Error) -> HostError {
+        let reason = match self {
+            Lane::Style => &STYLE_THREAD_NOT_STARTED,
+            Lane::Gesture => &GESTURE_THREAD_NOT_STARTED,
+        };
+        HostError::with(reason, format!("the host could not start its {} thread: {e}", self.thread()))
     }
 }
 
@@ -91,8 +122,9 @@ struct Waiting {
     prio: Priority,
 }
 
-/// A lane's way to its thread: each job with its number.
-type ToThread = Sender<(u64, ActJob)>;
+/// A lane's way to its thread: each job with its number, and whether it runs even once the lane is
+/// ending ([`Acting::end_and_wait`]) — the end's own job.
+type ToThread = Sender<(u64, ActJob, bool)>;
 
 /// The jobs on their way and the outcomes coming back. Main thread only, like the rest of `Shared`;
 /// the threads hold only their own end of a channel.
@@ -106,12 +138,22 @@ pub(crate) struct Acting {
     done_rx: Receiver<(u64, Result<(), HostError>)>,
     /// Each lane's way to its thread, once that thread is started.
     lanes: [RefCell<Option<ToThread>>; LANES],
+    /// Each lane's word that the application is ending ([`Acting::end_and_wait`]), which its thread
+    /// reads before each job: a job not begun by then is not begun at all.
+    ending: [Arc<AtomicBool>; LANES],
 }
 
 impl Acting {
     pub(crate) fn new() -> Acting {
         let (done_tx, done_rx) = channel();
-        Acting { next: Cell::new(0), waiting: RefCell::new(HashMap::new()), done_tx, done_rx, lanes: Default::default() }
+        Acting {
+            next: Cell::new(0),
+            waiting: RefCell::new(HashMap::new()),
+            done_tx,
+            done_rx,
+            lanes: Default::default(),
+            ending: Default::default(),
+        }
     }
 
     /// Hands `job` to `lane`'s thread; `answer`, when given, gets its outcome on a later tick. A
@@ -126,11 +168,14 @@ impl Acting {
     }
 
     fn run_with(&self, lane: Lane, job: ActJob, answer: Option<Answer>, release: Option<Release>) {
+        self.send(lane, job, answer, release, false);
+    }
+
+    /// Hands `job` to `lane`'s thread with its number; `always`: it runs even once the lane is
+    /// ending. A thread that cannot be started, or is gone, answers the job as not done.
+    fn send(&self, lane: Lane, job: ActJob, answer: Option<Answer>, release: Option<Release>, always: bool) {
         let token = self.token(answer, release);
-        let sent = self.sender(lane).and_then(|tx| {
-            tx.send((token, job))
-                .map_err(|_| HostError::with(&STYLE_THREAD_GONE, format!("the host's {} thread is gone", lane.thread())))
-        });
+        let sent = self.sender(lane).and_then(|tx| tx.send((token, job, always)).map_err(|_| lane.gone()));
         if let Err(why) = sent {
             logging::line("input", &format!("a job for the {} thread was not done: {why}", lane.thread()));
             let _ = self.done_tx.send((token, Err(why)));
@@ -143,7 +188,7 @@ impl Acting {
     /// when the other program a job waits for does not answer. One log line when it was not done.
     pub(crate) fn run_and_wait(&self, lane: Lane, job: ActJob, within: std::time::Duration) -> bool {
         let (tx, rx) = channel::<()>();
-        self.run(
+        self.send(
             lane,
             Box::new(move || {
                 let r = job();
@@ -151,6 +196,8 @@ impl Acting {
                 r
             }),
             None,
+            None,
+            true,
         );
         match rx.recv_timeout(within) {
             Ok(()) => true,
@@ -166,6 +213,17 @@ impl Acting {
                 false
             }
         }
+    }
+
+    /// At the end of the application: `lane` is ending — every job handed to it that its thread has
+    /// not begun yet is not begun at all, answered `cancelled` (`the application is ending`) — and
+    /// the one it is running, if any, is waited for, at most `within`, behind an empty job that runs
+    /// all the same: whether it ended in that time. So the end waits for one gesture in flight,
+    /// never for those queued behind it, and the process does not end between a press and its
+    /// release unless that one gesture holds the thread past `within`.
+    pub(crate) fn end_and_wait(&self, lane: Lane, within: std::time::Duration) -> bool {
+        self.ending[lane as usize].store(true, Ordering::Release);
+        self.run_and_wait(lane, Box::new(|| Ok(())), within)
     }
 
     /// An outcome known at the call, for `answer`: delivered on the next tick, as one from a
@@ -186,22 +244,38 @@ impl Acting {
         token
     }
 
+    /// Whether `lane`'s thread was started: a job was handed to it once. For the end of the
+    /// application, which waits for a lane only where something may still be on it.
+    pub(crate) fn started(&self, lane: Lane) -> bool {
+        self.lanes[lane as usize].borrow().is_some()
+    }
+
     /// `lane`'s thread, started at its first job. It runs each job inside `logging::contain`, so a
     /// job that panics is answered with the panic's report — and the report is in the log, for a
-    /// job nobody waits for — and the thread goes on. The one lane is the window-style thread, so
-    /// what its thread answers is in `errors::input`'s words for it.
+    /// job nobody waits for — and the thread goes on. What a lane's thread answers for itself —
+    /// gone, not started — is in its own Reasons' words ([`Lane::gone`], [`Lane::not_started`]); a
+    /// job that failed, in the words of `STYLE_THREAD_FAILED`, which name no lane.
     fn sender(&self, lane: Lane) -> Result<ToThread, HostError> {
         let mut slot = self.lanes[lane as usize].borrow_mut();
         if let Some(tx) = slot.as_ref() {
             return Ok(tx.clone());
         }
-        let (tx, rx) = channel::<(u64, ActJob)>();
+        let (tx, rx) = channel::<(u64, ActJob, bool)>();
         let done = self.done_tx.clone();
+        let ending = self.ending[lane as usize].clone();
         let name = lane.thread();
         std::thread::Builder::new()
             .name(name.to_string())
             .spawn(move || {
-                for (token, job) in rx {
+                for (token, job, always) in rx {
+                    if !always && ending.load(Ordering::Acquire) {
+                        drop(job);
+                        logging::line("input", &format!("a job for the host's {name} thread not begun: the application is ending"));
+                        if done.send((token, Err(HostError::of(&ENDING)))).is_err() {
+                            break;
+                        }
+                        continue;
+                    }
                     let result = logging::contain(job).unwrap_or_else(|p| {
                         logging::line("input", &format!("a job on the host's {name} thread failed: {p}"));
                         Err(HostError::with(&STYLE_THREAD_FAILED, format!("the host's thread for it failed: {p}")))
@@ -211,7 +285,7 @@ impl Acting {
                     }
                 }
             })
-            .map_err(|e| HostError::with(&STYLE_THREAD_NOT_STARTED, format!("the host could not start its {} thread: {e}", lane.thread())))?;
+            .map_err(|e| lane.not_started(&e))?;
         *slot = Some(tx.clone());
         Ok(tx)
     }
@@ -284,18 +358,25 @@ pub(crate) struct ClickOpts {
     pub via: Via,
     /// Whether the pointer moves to the point first; false only with `via = "post"`.
     pub move_pointer: bool,
+    /// How many clicks: 1, or 2 for a double-click, which is made through the system's input only.
+    pub clicks: u8,
 }
 
 /// Reads `host.input.click`'s `opts`: `button` as it always was read (case-insensitive, anything
 /// else left), `window` a window's id, `via` one of `"input"`, `"post"` and `"noactivate"`,
-/// `move` true or false. A `via` other than `"input"` without a `window`, and `move = false` with
-/// a way that clicks where the pointer is, raise — each naming the option.
+/// `move` true or false, `clicks` 1 or 2. A `via` other than `"input"` without a `window`,
+/// `move = false` with a way that clicks where the pointer is, and `clicks = 2` with a way other
+/// than `"input"` raise — each naming the option.
+///
+/// `clicks` is a count, as every system and toolkit names the quantity — AppKit's `clickCount`,
+/// Quartz's click state, JUCE's number of clicks, AutoHotkey's `Click X, Y, ClickCount` — so it
+/// has room for more than two without another option; this host makes one or two.
 pub(crate) fn click_opts(opts: Option<&Table>) -> mlua::Result<ClickOpts> {
     const F: &str = "host.input.click";
     let bad = |msg: String| mlua::Error::external(format!("{F}: {msg}"));
     let button = crate::button_from(opts);
     let Some(t) = opts else {
-        return Ok(ClickOpts { button, window: None, via: Via::Input, move_pointer: true });
+        return Ok(ClickOpts { button, window: None, via: Via::Input, move_pointer: true, clicks: 1 });
     };
     let window = match t.get::<Value>("window")? {
         Value::Nil => None,
@@ -338,7 +419,16 @@ pub(crate) fn click_opts(opts: Option<&Table>) -> mlua::Result<ClickOpts> {
             via.word()
         )));
     }
-    Ok(ClickOpts { button, window, via, move_pointer })
+    let clicks = match t.get::<Value>("clicks")? {
+        Value::Nil => 1,
+        Value::Integer(i @ (1 | 2)) => i as u8,
+        Value::Number(n) if n == 1.0 || n == 2.0 => n as u8,
+        other => return Err(bad(format!("opts.clicks is 1 or 2, not {}", crate::describe_value(&other)))),
+    };
+    if clicks == 2 && via != Via::Input {
+        return Err(bad(format!("clicks = 2 is for via = \"input\" only, not via = \"{}\"", via.word())));
+    }
+    Ok(ClickOpts { button, window, via, move_pointer, clicks })
 }
 
 #[cfg(test)]
@@ -359,7 +449,7 @@ mod tests {
     #[test]
     fn a_click_without_a_way_is_the_one_it_always_was() {
         let lua = Lua::new();
-        let plain = ClickOpts { button: MouseButton::Left, window: None, via: Via::Input, move_pointer: true };
+        let plain = ClickOpts { button: MouseButton::Left, window: None, via: Via::Input, move_pointer: true, clicks: 1 };
         assert_eq!(opts(&lua, "return nil").unwrap(), plain);
         assert_eq!(opts(&lua, "return {}").unwrap(), plain);
         assert_eq!(opts(&lua, "return { button = 'RIGHT' }").unwrap().button, MouseButton::Right);
@@ -374,7 +464,7 @@ mod tests {
     fn a_way_needs_its_window_and_a_bad_option_raises() {
         let lua = Lua::new();
         let post = opts(&lua, "return { window = 7, via = 'post', button = 'middle' }").unwrap();
-        assert_eq!(post, ClickOpts { button: MouseButton::Middle, window: Some(7), via: Via::Post, move_pointer: true });
+        assert_eq!(post, ClickOpts { button: MouseButton::Middle, window: Some(7), via: Via::Post, move_pointer: true, clicks: 1 });
         assert!(!opts(&lua, "return { window = 7, via = 'post', move = false }").unwrap().move_pointer);
         assert_eq!(opts(&lua, "return { window = 7, via = 'noactivate' }").unwrap().via, Via::NoActivate);
         assert_eq!(opts(&lua, "return { window = 7, via = 'input' }").unwrap().via, Via::Input);
@@ -396,6 +486,135 @@ mod tests {
         assert!(e.contains("opts.window is a window's id"), "{e}");
         let e = raised(opts(&lua, "return { window = 1.5 }"));
         assert!(e.contains("not 1.5"), "{e}");
+    }
+
+    /// `clicks`: one by default, 1 and 2 as numbers taken — with a button, a window, and the input's
+    /// way said or not; anything else raises, naming the option, and so does a double-click by a way
+    /// other than the system's input.
+    #[test]
+    fn clicks_is_one_or_two_and_a_double_click_goes_through_the_input() {
+        let lua = Lua::new();
+        assert_eq!(opts(&lua, "return {}").unwrap().clicks, 1);
+        assert_eq!(opts(&lua, "return { clicks = 1 }").unwrap().clicks, 1);
+        let double = opts(&lua, "return { clicks = 2, button = 'right', window = 9 }").unwrap();
+        assert_eq!(double, ClickOpts { button: MouseButton::Right, window: Some(9), via: Via::Input, move_pointer: true, clicks: 2 });
+        assert_eq!(opts(&lua, "return { clicks = 2, via = 'input' }").unwrap().clicks, 2);
+        assert_eq!(opts(&lua, "return { clicks = 4 / 2 }").unwrap().clicks, 2, "a number that is 2");
+        for (src, said) in [
+            ("return { clicks = 3 }", "opts.clicks is 1 or 2, not 3"),
+            ("return { clicks = 0 }", "opts.clicks is 1 or 2, not 0"),
+            ("return { clicks = 1.5 }", "opts.clicks is 1 or 2, not 1.5"),
+            ("return { clicks = '2' }", "opts.clicks is 1 or 2, not the string \"2\""),
+            ("return { clicks = true }", "opts.clicks is 1 or 2, not a boolean"),
+            ("return { clicks = 2, window = 7, via = 'post' }", "clicks = 2 is for via = \"input\" only, not via = \"post\""),
+            ("return { clicks = 2, window = 7, via = 'noactivate' }", "clicks = 2 is for via = \"input\" only, not via = \"noactivate\""),
+        ] {
+            let e = raised(opts(&lua, src));
+            assert!(e.contains(&format!("host.input.click: {said}")), "{src}: {e}");
+        }
+        // A one-click with a posted way stays what it was.
+        assert_eq!(opts(&lua, "return { clicks = 1, window = 7, via = 'post' }").unwrap().via, Via::Post);
+    }
+
+    /// The gesture lane runs its jobs on a thread of its own, named for it, and answers the job's
+    /// outcome to who waits, as the style lane does; whether a lane was started is known, for the
+    /// end of the application; and its own answers are in its Reasons' words. Pure threads.
+    #[test]
+    fn the_gesture_lane_runs_on_its_own_thread_and_answers_in_its_words() {
+        use crate::errors::input::DOUBLE_CUT;
+        let lua = Lua::new();
+        let acting = Acting::new();
+        assert!(!acting.started(Lane::Gesture) && !acting.started(Lane::Style));
+        let named = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let n = named.clone();
+        let cb = lua.create_function(|_, ()| Ok(())).unwrap();
+        let release = Release { idx: 2, button: MouseButton::Left, presses: 0 };
+        acting.run_releasing(
+            Lane::Gesture,
+            Box::new(move || {
+                *n.lock().unwrap() = std::thread::current().name().unwrap_or_default().to_string();
+                Err(HostError::of(&DOUBLE_CUT))
+            }),
+            Some(Answer { idx: 2, lua: lua.clone(), cb, what: "input.click" }),
+            release,
+        );
+        assert!(acting.started(Lane::Gesture) && !acting.started(Lane::Style), "one lane started, not the other");
+        let mut due = Vec::new();
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while due.is_empty() && std::time::Instant::now() < until {
+            due.extend(acting.take_due());
+            std::thread::yield_now();
+        }
+        assert_eq!(due.len(), 1);
+        assert_eq!((due[0].release, &due[0].result), (Some(release), &Err(HostError::of(&DOUBLE_CUT))));
+        assert_eq!(due[0].answer.as_ref().map(|a| a.what), Some("input.click"));
+        assert_eq!(*named.lock().unwrap(), "input-gesture");
+        assert_eq!(Lane::Gesture.gone().message(), "the host's input-gesture thread is gone");
+        assert!(Lane::Gesture.gone().reason() == &GESTURE_THREAD_GONE);
+        let e = std::io::Error::other("no threads left");
+        let not = Lane::Gesture.not_started(&e);
+        assert!(not.reason() == &GESTURE_THREAD_NOT_STARTED && not.message() == "the host could not start its input-gesture thread: no threads left", "{not:?}");
+        assert!(Lane::Style.not_started(&e).reason() == &STYLE_THREAD_NOT_STARTED);
+        assert!(acting.run_and_wait(Lane::Gesture, Box::new(|| Ok(())), std::time::Duration::from_secs(10)), "waited for at the end");
+    }
+
+    /// The end of the application on the gesture lane: the gesture the thread is making goes on to its
+    /// end, every one queued behind it is not begun — answered `cancelled`, `the application is
+    /// ending` — and the end waits for the one in flight only, not for the queue. Pure threads.
+    #[test]
+    fn at_the_end_a_gesture_in_flight_ends_and_the_ones_queued_are_not_begun() {
+        use std::time::{Duration, Instant};
+        let lua = Lua::new();
+        let acting = Acting::new();
+        let ran = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (started_tx, started_rx) = channel::<()>();
+        let (go_tx, go_rx) = channel::<()>();
+        let r1 = ran.clone();
+        // The one in flight: begun, and held until the end has been asked for.
+        acting.run(
+            Lane::Gesture,
+            Box::new(move || {
+                let _ = started_tx.send(());
+                let _ = go_rx.recv_timeout(Duration::from_secs(10));
+                r1.lock().unwrap().push(1);
+                Ok(())
+            }),
+            None,
+        );
+        let cb = || lua.create_function(|_, ()| Ok(())).unwrap();
+        for i in 2..=4 {
+            let r = ran.clone();
+            acting.run(
+                Lane::Gesture,
+                Box::new(move || {
+                    r.lock().unwrap().push(i);
+                    std::thread::sleep(Duration::from_millis(400));
+                    Ok(())
+                }),
+                Some(Answer { idx: i, lua: lua.clone(), cb: cb(), what: "input.click" }),
+            );
+        }
+        started_rx.recv_timeout(Duration::from_secs(10)).expect("the first gesture began");
+        let t = Instant::now();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(30));
+            let _ = go_tx.send(());
+        });
+        assert!(acting.end_and_wait(Lane::Gesture, Duration::from_secs(5)), "the one in flight ended in time");
+        assert!(t.elapsed() < Duration::from_millis(1000), "the three queued, 400 ms each, were not waited for: {:?}", t.elapsed());
+        release.join().unwrap();
+        assert_eq!(*ran.lock().unwrap(), vec![1], "only the one in flight ran");
+        let mut due = Vec::new();
+        let until = Instant::now() + Duration::from_secs(10);
+        while due.len() < 3 && Instant::now() < until {
+            due.extend(acting.take_due());
+            std::thread::yield_now();
+        }
+        assert_eq!(due.len(), 3);
+        assert!(due.iter().all(|d| d.result == Err(HostError::of(&ENDING))), "each answered as not begun");
+        assert_eq!(HostError::of(&ENDING).message(), "the application is ending");
+        // The style lane is not ending: its jobs run as ever.
+        assert!(acting.run_and_wait(Lane::Style, Box::new(|| Ok(())), Duration::from_secs(10)));
     }
 
     /// A callback is a function or nothing.
@@ -500,9 +719,10 @@ mod tests {
     #[test]
     fn the_style_threads_own_answers_are_its_reasons() {
         assert_eq!(Lane::Style.thread(), "window-style");
-        let gone = HostError::with(&STYLE_THREAD_GONE, format!("the host's {} thread is gone", Lane::Style.thread()));
+        let gone = Lane::Style.gone();
+        assert!(gone.reason() == &STYLE_THREAD_GONE);
         assert_eq!(gone.message(), "the host's window-style thread is gone");
-        let not = HostError::with(&STYLE_THREAD_NOT_STARTED, format!("the host could not start its {} thread: e", Lane::Style.thread()));
-        assert_eq!(not.code(), crate::errors::Code::Failed);
+        let not = Lane::Style.not_started(&std::io::Error::other("e"));
+        assert_eq!((not.code(), not.message()), (crate::errors::Code::Failed, "the host could not start its window-style thread: e"));
     }
 }

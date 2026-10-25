@@ -305,6 +305,101 @@ pub fn mouse_click(x: i32, y: i32, button: MouseButton) -> Result<(), HostError>
     Ok(())
 }
 
+/// `host.input.click`'s `clicks = 2`: the job for the host's `input-gesture` thread that makes the
+/// double-click there (`double_click.rs`) with a [`Hand`], `hit` the window the system's hit test
+/// named at the point at the call (`ax::hit_window_at`), whose program's windows the hand compares.
+/// `interval` is the user's double-click time, for the line.
+pub fn double_click(x: i32, y: i32, button: MouseButton, hit: Option<u32>, interval: std::time::Duration) -> crate::backend::ActJob {
+    crate::backend::double_click::job(x, y, button, "click states 1 and 2", interval, move || Hand { x, y, button, hit, up: None })
+}
+
+/// A double-click's hand on a Mac (`double_click.rs`), made on the `input-gesture` thread and used
+/// there alone: its events are that thread's, posted from that thread's own event source (`SOURCE`
+/// is per thread), at the HID level as every click here — `CGEventPost` may be called from any
+/// thread.
+///
+/// What makes the pair a double-click is the click state each event carries
+/// (`kCGMouseEventClickState`), as the VPS Avenger control tool posts it (`clicker/driver.py`,
+/// `double_click` and `right_double_click`): 1 on the first press and release, 2 on the second —
+/// Apple: "A click state of 1 represents a single click. A click state of 2 represents a
+/// double-click." It is what AppKit hands a program as the events' `clickCount`. The move primes the
+/// point once, before the first press, as the tool does (`_prime_cursor`): a custom-drawn view that
+/// hit-tests on movement learns where the press is. The modifier flags are cleared, as on every click
+/// here (`mouse_event`). The right button is `RightMouseDown`/`Up` with `CGMouseButton::Right`.
+///
+/// A pair's events are all made before the first of them is posted, so one the system would not make
+/// posts nothing of the pair: the first pair's answers `input::NULL_MOUSE_SENT`, nothing clicked; the
+/// second's `input::DOUBLE_SECOND_NULL`, the first click made. The release is made with its press and
+/// posted [`double_click::PRESS_MS`](crate::backend::double_click::PRESS_MS) later, stamped afresh
+/// first, so the time from press to release is in the events as well as in their delivery. A press
+/// that went out is released when the hand is dropped with its release still owed — the thread
+/// unwinding between the two.
+///
+/// The window at the point is the window server's list's (`ax::listed_window_at`), CG alone, as any
+/// thread may ask it: the hit test a click asks (`NSWindow`'s) is the main thread's, and only its
+/// window's number comes here — its owner is read off each read's own copy of the list.
+struct Hand {
+    x: i32,
+    y: i32,
+    button: MouseButton,
+    /// The window the hit test named at the point at the call, whose program's windows alone are
+    /// compared; `None` where it named none.
+    hit: Option<u32>,
+    /// The release owed: the press of its pair went out, it has not.
+    up: Option<CFRetained<CGEvent>>,
+}
+
+impl crate::backend::double_click::Hand for Hand {
+    fn at_point(&mut self) -> Option<u64> {
+        super::ax::listed_window_at(self.x, self.y, self.hit).map(u64::from)
+    }
+
+    fn press(&mut self, n: u8) -> Result<(), HostError> {
+        let (down, up, _) = button_events(&self.button);
+        let cg = cg_button(&self.button);
+        let (x, y) = (self.x, self.y);
+        let clicks = Some(i64::from(n));
+        // The second pair's event not made: the first click was.
+        let make = |etype: CGEventType, b: CGMouseButton, clicks: Option<i64>| {
+            mouse_event(etype, x, y, b, clicks).map_err(|e| {
+                if n == 1 {
+                    e
+                } else {
+                    let said = format!("CGEventCreateMouseEvent(type {}) returned NULL for the second click; the first click was made", etype.0);
+                    HostError::with(&input::DOUBLE_SECOND_NULL, said)
+                }
+            })
+        };
+        let mut built = Vec::with_capacity(2);
+        if n == 1 {
+            built.push(make(CGEventType::MouseMoved, CGMouseButton::Left, None)?);
+        }
+        built.push(make(down, cg, clicks)?);
+        let release = make(up, cg, clicks)?;
+        post_all(&built);
+        self.up = Some(release);
+        Ok(())
+    }
+
+    fn release(&mut self, _n: u8) -> Result<(), HostError> {
+        if let Some(up) = self.up.take() {
+            // Stamped now: it was made with its press, PRESS_MS ago. A snapshot of the input state
+            // carries the moment it was made, in the events' own unit, as `cursor_pos` reads it.
+            if let Some(now) = CGEvent::new(None) {
+                CGEvent::set_timestamp(Some(&up), CGEvent::timestamp(Some(&now)));
+            }
+            post(&up);
+        }
+        Ok(())
+    }
+}
+
+impl Drop for Hand {
+    fn drop(&mut self) {
+        let _ = crate::backend::double_click::Hand::release(self, 0);
+    }
+}
+
 /// `host.input.click`'s `via = "post"`: the move, the press and the release at (x, y) handed to the
 /// process of `window` with `CGEventPostToPid`, each carrying the window's number and the place in
 /// the window, so that AppKit gives them to that window while its application stays where it is

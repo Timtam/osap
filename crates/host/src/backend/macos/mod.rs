@@ -280,6 +280,19 @@ impl Backend for MacBackend {
         input::post_click(window, x, y, button, move_pointer).map(|line| crate::logging::line("input", &line))
     }
 
+    /// The window the hit test names at the point, read here on the main thread — its owner is the
+    /// gesture thread's to look up — and the job that makes the double-click on the host's
+    /// `input-gesture` thread with click states 1 and 2 (`input::double_click`).
+    fn mouse_double_click(
+        &self,
+        x: i32,
+        y: i32,
+        button: MouseButton,
+        interval: std::time::Duration,
+    ) -> Result<crate::backend::ActJob, crate::errors::HostError> {
+        Ok(input::double_click(x, y, button, ax::hit_window_at(x, y), interval))
+    }
+
     fn mouse_drag(&self, x1: i32, y1: i32, x2: i32, y2: i32, button: MouseButton) -> Result<(), crate::errors::HostError> {
         input::mouse_drag(x1, y1, x2, y2, button)
     }
@@ -535,6 +548,9 @@ impl Backend for MacBackend {
         // A page's show still waiting for the front, and a key the tap has seen pressed elsewhere
         // since: its answer. One borrow when nothing waits.
         page::refresh();
+        // And this application's own request for the front, which the reads of where the keyboard
+        // is wait for (`ax::keyboard_is_ours`): the same answer. One cell read when nothing waits.
+        app::refresh_asked();
         // A sleep, a lock, a display change (`system.rs`) are the first thing `queue::drain`
         // delivers: before the window events, as on Windows.
         queue::drain(events);

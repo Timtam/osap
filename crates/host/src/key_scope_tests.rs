@@ -453,6 +453,45 @@ fn a_disabled_module_takes_its_scope_and_flag_with_it() {
     assert_eq!(owner_entry(&h, 1), None);
 }
 
+/// A capture made with `menu = "taken"` keeps its key while its module's menu flag counts for the
+/// window in front, where the module's other captures there go through to the program — the
+/// overlay runtime's swallowed keys during a hand-over that lets its end keys through — and so
+/// while another module's flag counts; out of scope it takes nothing, and made again without the
+/// option it is let through like the rest. The key is delivered to its callback as any key taken.
+#[test]
+fn a_capture_taken_in_a_menu_keeps_its_key_while_the_flag_lets_the_others_through() {
+    let h = host();
+    let a = vm(&h, 1);
+    let b = vm(&h, 2);
+    h.backend.set_front(W1);
+    run(
+        &a,
+        r#"heard = {}
+        host.keys.scope(true)
+        host.keys.capture("Return", function() heard[#heard + 1] = "return" end)
+        host.keys.capture("Tab", function() heard[#heard + 1] = "tab" end, { menu = "taken" })
+        host.keys.capture("Shift+Tab", function() heard[#heard + 1] = "shift tab" end, { menu = "through" })
+        host.keys.menuOpen(true)"#,
+    );
+    assert_eq!(press(&h, "Return", W1), Some(Capture::Pass { why: PassWhy::MenuFlag, owner: Some(1) }));
+    assert_eq!(press(&h, "Shift+Tab", W1), Some(Capture::Pass { why: PassWhy::MenuFlag, owner: Some(1) }), "through");
+    assert_eq!(press(&h, "Tab", W1), Some(Capture::Take { owner: 1 }), "taken all the same");
+    assert_eq!(press(&h, "Tab", W2), Some(Capture::Pass { why: PassWhy::OutOfScope, owner: None }));
+    assert_eq!(deliver(&h, "Tab", 1, W1), RAN);
+    assert_eq!(heard(&a), "tab");
+    let (set, _) = h.backend.keys();
+    assert!(set.iter().any(|c| c.vk == 0x09 && c.mask == 0 && c.menu_taken), "{set:?}");
+    // Another module's flag in the same window: A's Tab is still taken.
+    run(&a, "host.keys.menuOpen(false)");
+    run(&b, r#"host.keys.capture("Space", function() end); host.keys.menuOpen(true)"#);
+    assert_eq!(press(&h, "Tab", W1), Some(Capture::Take { owner: 1 }), "B's flag");
+    assert_eq!(press(&h, "Return", W1), Some(Capture::Pass { why: PassWhy::MenuFlag, owner: Some(1) }));
+    // Made again without the option, it goes through like the others.
+    run(&a, r#"host.keys.capture("Tab", function() heard[#heard + 1] = "tab again" end)"#);
+    assert_eq!(press(&h, "Tab", W1), Some(Capture::Pass { why: PassWhy::MenuFlag, owner: Some(1) }));
+    assert!(h.errors.borrow().is_empty(), "{:?}", h.errors.borrow());
+}
+
 // ── Keys that wait in a busy module's mailbox ────────────────────────────────────────────────
 
 /// While A waits, its keys wait in its mailbox, in the order they came — each to the capture it was
@@ -1695,7 +1734,9 @@ fn a_capture_s_bad_option_raises_and_captures_nothing() {
         ("{ taps = 'twice' }", "host.keys.capture: taps is \"every\" or \"final\", not \"twice\""),
         ("{ within = 50 }", "host.keys.capture: within is a number of milliseconds from 100 to 5000, not 50"),
         ("{ within = '300' }", "within is a number of milliseconds from 100 to 5000, not a string"),
-        ("{ final = true }", "host.keys.capture: 'final' is not an option; the options are taps and within"),
+        ("{ final = true }", "host.keys.capture: 'final' is not an option; the options are menu, taps and within"),
+        ("{ menu = 'take' }", "host.keys.capture: menu is \"through\" or \"taken\", not \"take\""),
+        ("{ menu = false }", "host.keys.capture: menu is \"through\" or \"taken\", not a boolean"),
     ] {
         let e = a.load(format!("host.keys.capture('Tab', function() end, {opts})")).exec().unwrap_err().to_string();
         assert!(e.contains(said), "{opts}: {e}");
