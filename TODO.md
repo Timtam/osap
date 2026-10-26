@@ -2494,6 +2494,44 @@ See [docs/macos-port.md](docs/macos-port.md) for the decisions and
       `crates/host/licences/onnxruntime` holds those of the release ort-sys 2.0.0-rc.10 links, and
       `package.ps1` and a test refuse another ort-sys in Cargo.lock until its own notices and
       `SOURCE.txt` are there.
+      **Tried and held back** (2026-10-26, the maintainer's decision). Package 2 moved both
+      platforms to 2.0.0-rc.15; that work is on the branch `wip/ort-rc15` (d0a6790; CI run
+      40248138435 green on 87004a2), not on main. Held back because pyke's Windows builds from
+      rc.11 on target x86-64-v3: the review disassembled the static initialisers of the ms@1.31.0
+      onnxruntime.lib rc.15 links and found 336 AVX instructions in 82 of them, which run before
+      `main`, where rc.10's ms@1.22.0 has none. So on a processor without AVX (the Atom-based
+      Celerons and Pentium Silvers Windows 11 supports: N4500, N5100, N6000; Core-based Pentiums
+      and Celerons before Alder Lake) the application would end at start with 0xC000001D and an
+      empty log. It brought users nothing else, and Windows' recogniser measured slower in that
+      run (the session 220 ms, was 128; 320-pixel inputs 25 to 27 ms, were 20 to 21; one run
+      each), with every reading the same. What the branch learned, for the next try:
+      - rc.11 made `GraphOptimizationLevel::Level3` ONNX Runtime's layout level 3, which 1.22
+        refuses; `All` is the old meaning.
+      - At `api-22` `ort` gives every builder a device-selection policy, and Microsoft's 1.22 for
+        macOS lists no CPU device for it ("No CPU based execution providers were found"), so no
+        Mac session is made; `api-21` sets none and keeps ONNX Runtime's own CPU provider.
+      - Microsoft's 1.23.2 is the last universal2 archive (macOS 13.4); 1.24 and later are arm64
+        only, so the Intel Macs stay on 1.22 or 1.23.
+      - `ort::init_from` drops `dlopen`'s own words from its error (libloading keeps them as the
+        source); the branch's `load_failure` adds them back.
+      - rc.14 is the first release whose `copy-dylibs` works under Rust 1.100's build-dir layout
+        (the item below).
+      The way on, when wanted: Microsoft's own onnxruntime.dll on Windows too, loaded at run
+      time as on the Mac (`load-dynamic`, `ort::init_from`); it chooses its kernels by processor
+      at run time, so no AVX floor. The session uses the CPU alone, so DirectML.dll and its
+      licence would leave the package. It needs Microsoft's archive, which waits for the
+      maintainer's go: onnxruntime-win-x64-1.22.0.zip (72,368,545 bytes, no digest on its
+      release) for the Mac's 1.22, or onnxruntime-win-x64-1.31.0.zip (82,887,349 bytes,
+      sha256:3958d8a44984160692c1b4ffd0de3cb48f8c39f9d34bb31e433db06e30b82195), both from
+      https://github.com/microsoft/onnxruntime/releases.
+- [ ] **Before Rust 1.100: `copy-dylibs` and the tests.** ort 2.0.0-rc.14's notes: under the v2
+      build-dir layout, test executables no longer see the DLLs `copy-dylibs` places, and
+      Windows' test executables import DirectML.dll; rc.10, which main stays on, predates that
+      fix. Look again when the toolchain moves: if Windows' tests stop finding DirectML.dll, that
+      is the cause, and the way above (or rc.14 or later) is the cure. Also: Windows CI does not
+      cache `%LOCALAPPDATA%\ort.pyke.io`, so every run fetches pyke's archive again
+      (`ORT_CACHE_DIR` is a build-time variable an `actions/cache` keyed on ort-sys's version
+      could use).
 - [ ] **The dylib on a tester's Mac: first start, translocation, quarantine.** Whether the bundled
       dylib loads in a download opened with its quarantine flag still set, and after "Open
       Anyway": it may stay in quarantine. Does loading then fail quietly — the log's "not
