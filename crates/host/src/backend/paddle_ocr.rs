@@ -432,7 +432,7 @@ fn init() -> anyhow::Result<Engine> {
     if !dylib.is_file() {
         anyhow::bail!("ONNX Runtime is not in the bundle: {}", dylib.display());
     }
-    let environment = ort::init_from(&dylib)?;
+    let environment = ort::init_from(&dylib).map_err(load_failure)?;
     match ort::util::probe(&dylib) {
         Some(minor) if minor == RUNTIME_MINOR => {}
         Some(minor) => anyhow::bail!(
@@ -450,6 +450,22 @@ fn init() -> anyhow::Result<Engine> {
     register_backstop();
     let session = builder(&environment)?.commit_from_file(&model)?;
     Ok(Engine { session: Mutex::new(Some(session)), dict: paddle_pre::dict() })
+}
+
+/// Why `ort::init_from` could not load the library, in full. libloading 0.9 says only "dlopen
+/// failed" and keeps `dlerror`'s words as the error's source, which `ort`'s message leaves out;
+/// they are what tells a library without this Mac's half from a damaged one (CI's macos-15 copy
+/// with the x86_64 half alone, run 40248138435).
+#[cfg(target_os = "macos")]
+fn load_failure(e: ort::LoadDynamicError) -> anyhow::Error {
+    let why = match &e {
+        ort::LoadDynamicError::Dlopen { error, .. } => std::error::Error::source(error).map(ToString::to_string),
+        _ => None,
+    };
+    match why {
+        Some(why) => anyhow::anyhow!("{e}: {why}"),
+        None => anyhow::Error::new(e),
+    }
 }
 
 /// Whether ONNX Runtime's environment exists and has not been released: set by [`init`] once
@@ -1527,7 +1543,7 @@ mod exit_safety_tests {
         let start = SRC.find("#[cfg(target_os = \"macos\")]\nfn init()").expect("the Mac's init");
         let body = &SRC[start..start + SRC[start..].find("\n}\n").unwrap()];
         let first = |what: &str| body.find(what).unwrap_or_else(|| panic!("{what} is in the Mac's init"));
-        let loaded = first("ort::init_from(&dylib)?");
+        let loaded = first("ort::init_from(&dylib).map_err(load_failure)?");
         for earlier in ["bundle_files()", "macos_new_enough()", "model.is_file()", "dylib.is_file()"] {
             assert!(first(earlier) < loaded, "{earlier} comes before the load");
         }

@@ -2546,7 +2546,12 @@ See [docs/macos-port.md](docs/macos-port.md) for the decisions and
       is 21 now, so the pin to 1.22 is `RUNTIME_MINOR`, held to tools/onnxruntime-mac.txt by a
       test, and a const assertion keeps `ort` below `api-22`. `ort`'s `ep::CPU` would not have
       done: it only switches the arena and registers no provider, and only a registered provider
-      skips the selection.
+      skips the selection. Run 40248138435 (87004a2) passed on every job with it. It also showed
+      that the Mac's load failure had lost `dlopen`'s words: macos-15's copy with the x86_64 half
+      alone said only "failed to load from `…`: dlopen failed", where our own load had said
+      "incompatible architecture (have 'x86_64', need 'arm64e' or 'arm64')". libloading 0.9 keeps
+      them as the error's source, which `ort`'s message leaves out; `load_failure` adds them
+      again. Type-checked only: the next run's macos-15 leg shows it.
 - [ ] **Live (CI's OCR measurement, then Windows with NVDA): the recogniser on `ort` 2.0.0-rc.15**
       (built 2026-10-25, not run). Windows links ONNX Runtime 1.31, nine minor versions on. A run
       with `ocr-bench: both` on wip/deps, against main's 40228892320 (d2ef50e), whose Windows
@@ -2558,7 +2563,18 @@ See [docs/macos-port.md](docs/macos-port.md) for the decisions and
       reason, the newer macOS's `--paddle-probe` says `ok`, no backstop line, and no warning about
       chained fixups. Then Windows with NVDA: Melodyne's lone digits read as before, and the log
       has no "not available" line. The first run, 40245493004 on cf021ab, is not the measurement:
-      the Mac made no session there (the correction above).
+      the Mac made no session there (the correction above). **CI's part done** (2026-10-26, run
+      40248138435 on 87004a2, against 40228892320): every reading is the same on all four legs.
+      Windows: 23 of 27, 1 of 3 and 4 of 9 as before, every picture's text and score unchanged;
+      the session 220 ms (was 128), the first recognition 7.9 ms (7.3); the model within 0.4 ms
+      on inputs up to 165 pixels wide (val-db@2x 12 ms, was 11), slower on the wider ones: 18 to
+      21 ms at 240 to 266 pixels (15 to 17), 25 to 27 ms at 320 (20 to 21) — one run each, so
+      ONNX Runtime 1.31 or the runner, not yet told apart. The Macs: the wrong and
+      invented lists unchanged, no verdict flipped; the recogniser alone on field-64@2x 7.9 ms on
+      macos-26 (9.3), 9.7 on macos-15 (7.7, with Vision 1.6 times slower on that runner too) and
+      6.2 on macos-15-intel (8.1). `ready` says `ONNX Runtime 1.22`, macos-15's copies "not
+      available" with a reason, the newer macOS's probe `ok`, no backstop line, no chained-fixups
+      warning. Left: Windows with NVDA.
 - [ ] **Decision: Windows' ONNX Runtime needs AVX to start, and AVX2 to read.** From `ort`
       2.0.0-rc.11 on, pyke's x86_64 builds target x86-64-v3: Intel from Haswell, AMD from the
       first Ryzen. `init` refuses the recogniser without AVX2 (`ort::sys::USING_PYKE_BINARIES` and
