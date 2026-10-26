@@ -74,8 +74,8 @@ objc2 = "0.6"
 block2 = "0.6"
 dispatch2 = "0.3"
 # The neural recogniser (backend/paddle_ocr.rs): as host's macOS table, ONNX Runtime 1.22 opened at
-# run time (`api-22`). Without `download-binaries` the check downloads nothing and links nothing.
-ort = { version = "=2.0.0-rc.15", default-features = false, features = ["std", "tracing", "load-dynamic", "api-22"] }
+# run time (`api-21`). Without `download-binaries` the check downloads nothing and links nothing.
+ort = { version = "=2.0.0-rc.15", default-features = false, features = ["std", "tracing", "load-dynamic", "api-21"] }
 tracing = { version = "0.1", default-features = false, features = ["log"] }
 # `host.gui.webview` on the Mac: as host's macOS table, wry from 0.57.1 on, the first release with
 # its activation fix (#1866); host's comment says why. Its objc2 `exception` feature compiles one

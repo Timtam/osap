@@ -61,7 +61,7 @@ use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError, SyncSender, TryR
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
-use ort::session::builder::{AutoDevicePolicy, GraphOptimizationLevel, SessionBuilder};
+use ort::session::builder::{GraphOptimizationLevel, SessionBuilder};
 use ort::session::Session;
 use ort::value::Tensor;
 
@@ -323,22 +323,26 @@ const MODEL: &[u8] = include_bytes!("../../models/ppocr-rec.onnx");
 /// The session's options, one set for both platforms: the CPU alone, one intra-op thread, every
 /// graph optimisation. Each is there for a reason the default does not cover:
 ///
-/// - `PreferCPU`. Built at API level 22 (`api-22`, crates/host/Cargo.toml), `ort` hands out every
-///   builder with ONNX Runtime's device selection set to `MaxEfficiency`, which takes an NPU where
-///   ONNX Runtime finds one and, by `ort`'s own documentation, the Core ML provider on a Mac. A
-///   model this small gains nothing from either; `PreferCPU` takes the first CPU provider, which
-///   in both builds is ONNX Runtime's own, the one a session had before device selection existed.
 /// - `All` (`ORT_ENABLE_ALL`), what `Level3` was up to `ort` 2.0.0-rc.10. From rc.11 on `Level3`
 ///   is ONNX Runtime's newer layout level, 3, which 1.22 refuses as not valid: a Mac would make no
 ///   session, and Windows would lose the optimisations above it.
 /// - `ort::Result` rather than `anyhow`: each option hands its builder back inside its error
 ///   (`ort::Error<SessionBuilder>`), which is not `Send`, and `?` here makes it the plain one.
+///
+/// The CPU alone because no provider is registered and no device selection is asked for: ONNX
+/// Runtime then runs the session on its own CPU provider, as before device selection existed.
+/// That is why `ort` is built at API level 21 (`api-21`, crates/host/Cargo.toml) and not 22: from
+/// 22 on `ort` turns device selection on for every builder (`MaxEfficiency`), and Microsoft's 1.22
+/// for macOS lists no processor for it, so every policy, `PreferCPU` included, fails the session
+/// with "No CPU based execution providers were found" (CI run 40245493004). The assertion below
+/// keeps the level there.
 fn builder(environment: &ort::environment::Environment) -> ort::Result<SessionBuilder> {
-    Ok(Session::builder(environment)?
-        .with_auto_device(AutoDevicePolicy::PreferCPU)?
-        .with_optimization_level(GraphOptimizationLevel::All)?
-        .with_intra_threads(1)?)
+    Ok(Session::builder(environment)?.with_optimization_level(GraphOptimizationLevel::All)?.with_intra_threads(1)?)
 }
+
+// See [`builder`]: from API level 22 on, `ort` asks ONNX Runtime's device selection of every
+// session, which a Mac's 1.22 cannot make one under.
+const _: () = assert!(ort::MINOR_VERSION < 22, "ort at api-22 or above turns device selection on for every session");
 
 /// Makes the engine on Windows: ONNX Runtime's environment, under this application's name and
 /// with telemetry off, as on a Mac, then the session from the embedded model with [`builder`]'s
@@ -370,6 +374,12 @@ fn init() -> anyhow::Result<Engine> {
 #[cfg(target_os = "macos")]
 static RUNTIME: OnceLock<String> = OnceLock::new();
 
+/// The minor version of the ONNX Runtime a Mac package carries, 1.22 (`tools/onnxruntime-mac.txt`,
+/// which a test holds this to): [`init`] takes no other. Not `ort::MINOR_VERSION`, which is the
+/// API level `ort` asks of the library, 21 (see [`builder`]).
+#[cfg(any(target_os = "macos", test))]
+const RUNTIME_MINOR: u32 = 22;
+
 /// ONNX Runtime's environment on a Mac, from [`init`] until [`release`] drops it. `ort` keeps only
 /// a weak handle to it, and the session holds the other strong one, so this one is the last once
 /// the session has gone.
@@ -399,14 +409,15 @@ fn bundle_files() -> Result<(std::path::PathBuf, std::path::PathBuf), String> {
 /// 3. The model and the library are files in the bundle.
 /// 4. `ort::init_from` with the library's path, the first call of `ort` in the process: `ort`'s
 ///    own load, which opens the library, finds `OrtGetApiBase` and refuses a version older than
-///    the 1.22 this build is made for (`api-22`), each with its reason. Any other call of `ort`
-///    first, or after a load that failed, would read `ORT_DYLIB_PATH` from the environment and
-///    open what that names, or a library of that name wherever `dlopen` looks; this application
-///    reads no environment variable for it, and calls nothing of `ort` while there is no engine.
-///    A source test below holds this order. The library stays open for the life of the process.
-/// 5. Its minor version (`ort::util::probe`), which has to be the 1.22 the package carries
-///    (`tools/onnxruntime-mac.txt`): `ort` takes a newer one with a line in the log, and this
-///    file's release is written for 1.22's exit.
+///    the API level this build asks (1.21, `api-21`, see [`builder`]), each with its reason. Any
+///    other call of `ort` first, or after a load that failed, would read `ORT_DYLIB_PATH` from the
+///    environment and open what that names, or a library of that name wherever `dlopen` looks;
+///    this application reads no environment variable for it, and calls nothing of `ort` while
+///    there is no engine. A source test below holds this order. The library stays open for the
+///    life of the process.
+/// 5. Its minor version (`ort::util::probe`), which has to be [`RUNTIME_MINOR`], the 1.22 the
+///    package carries (`tools/onnxruntime-mac.txt`): `ort` takes a newer one with a line in the
+///    log, and this file's release is written for 1.22's exit.
 /// 6. Only then the environment (`build`) — kept in [`ENVIRONMENT`], said in [`ENV_MADE`] the
 ///    moment it exists, and the [`backstop`] registered right after it — and the session, from
 ///    the model's file, with [`builder`]'s options as on Windows: the Core ML provider brings
@@ -423,15 +434,14 @@ fn init() -> anyhow::Result<Engine> {
     }
     let environment = ort::init_from(&dylib)?;
     match ort::util::probe(&dylib) {
-        Some(minor) if minor == ort::MINOR_VERSION => {}
+        Some(minor) if minor == RUNTIME_MINOR => {}
         Some(minor) => anyhow::bail!(
-            "{} is ONNX Runtime 1.{minor}, and this build is made for 1.{}.x",
-            dylib.display(),
-            ort::MINOR_VERSION
+            "{} is ONNX Runtime 1.{minor}, and this build is made for 1.{RUNTIME_MINOR}.x",
+            dylib.display()
         ),
         None => anyhow::bail!("{} gives no version of ONNX Runtime 1.x", dylib.display()),
     }
-    let _ = RUNTIME.set(format!("1.{}", ort::MINOR_VERSION));
+    let _ = RUNTIME.set(format!("1.{RUNTIME_MINOR}"));
     let environment = environment.with_name("automation-platform").with_telemetry(false).build()?;
     *lock_even_if_poisoned(&ENVIRONMENT) = Some(environment.clone());
     // Before the session, which can fail: an environment made is released at the end whether
@@ -628,13 +638,12 @@ fn macos_new_enough() -> Result<(), String> {
     let v = objc2_foundation::NSProcessInfo::processInfo().operatingSystemVersion();
     if (v.majorVersion, v.minorVersion) < RUNTIME_MACOS {
         return Err(format!(
-            "macOS {}.{}.{} is older than the {}.{} ONNX Runtime 1.{}.x is built for",
+            "macOS {}.{}.{} is older than the {}.{} ONNX Runtime 1.{RUNTIME_MINOR}.x is built for",
             v.majorVersion,
             v.minorVersion,
             v.patchVersion,
             RUNTIME_MACOS.0,
-            RUNTIME_MACOS.1,
-            ort::MINOR_VERSION
+            RUNTIME_MACOS.1
         ));
     }
     Ok(())
@@ -1657,6 +1666,15 @@ mod exit_safety_tests {
         assert_eq!(*lock_even_if_poisoned(&m), 42);
     }
 
+    /// A Mac takes exactly the ONNX Runtime its package carries (`tools/onnxruntime-mac.txt`); the
+    /// assertion beside [`builder`] keeps `ort`'s API level below it.
+    #[test]
+    fn the_mac_takes_the_onnx_runtime_its_package_carries() {
+        const PIN: &str = include_str!("../../../../tools/onnxruntime-mac.txt");
+        let version = PIN.lines().find_map(|l| l.strip_prefix("version=")).expect("the pin names a version");
+        assert_eq!(version.split('.').nth(1), Some(RUNTIME_MINOR.to_string().as_str()), "{version}");
+    }
+
     /// The Windows package's ONNX Runtime licence and notices (`licences/onnxruntime`) are one
     /// release's, taken for the `ort-sys` that links it: another `ort-sys` in Cargo.lock links
     /// another ONNX Runtime. package.ps1 refuses that too, and ships the recogniser's four licence
@@ -1687,8 +1705,9 @@ mod exit_safety_tests {
     /// ONNX Runtime linked in, and reads the lone digit the recogniser is there for — or, on a
     /// processor with AVX but without AVX2, refuses to make it and says why (without AVX this
     /// executable does not start, see [`init`]). The real session, in this process: an option the
-    /// linked ONNX Runtime refuses (an optimisation level it does not know, a device policy) fails
-    /// here rather than in the bench or on a user's machine.
+    /// linked ONNX Runtime refuses (an optimisation level it does not know) fails here rather than
+    /// in the bench or on a user's machine. Not the Mac's 1.22, which only CI's newer-macos job
+    /// and the bench load (`--paddle-probe`): its refusal of device selection was seen there.
     #[cfg(windows)]
     #[test]
     fn windows_makes_its_session_and_reads_a_lone_digit() {

@@ -2533,6 +2533,20 @@ See [docs/macos-port.md](docs/macos-port.md) for the decisions and
       warns about a slice without chained fixups; build.yml's measured crates lose `ndarray` and
       gain `libloading` for the Mac. tools/paddle-engines stays on rc.10 in its own workspace.
       What is left: the three items below.
+      **Corrected** (2026-10-26, CI run 40245493004 on cf021ab): `PreferCPU` made every Mac
+      session fail. At `api-22` every policy, `ort`'s default `MaxEfficiency` included, ends in
+      ONNX Runtime 1.22's `PreferCpuEpPolicy`, which takes a CPU device from the environment's
+      list, and Microsoft's 1.22 for macOS lists none: "No CPU based execution providers were
+      found" (provider_policy_context.cc:342 at v1.22.0), so both newer-macos jobs'
+      `--paddle-probe` said "not available". ONNX Runtime selects devices only when a policy is
+      set (`ep_selection_policy.enable`, off by default, in 1.22 and 1.31 alike), and `ort` sets
+      one in every builder only from `api-22` on, so both of host's tables and macos-check now
+      ask `api-21`: no policy, the session on ONNX Runtime's own CPU provider as before device
+      selection existed, on both platforms, and `with_auto_device` is gone. `ort::MINOR_VERSION`
+      is 21 now, so the pin to 1.22 is `RUNTIME_MINOR`, held to tools/onnxruntime-mac.txt by a
+      test, and a const assertion keeps `ort` below `api-22`. `ort`'s `ep::CPU` would not have
+      done: it only switches the arena and registers no provider, and only a registered provider
+      skips the selection.
 - [ ] **Live (CI's OCR measurement, then Windows with NVDA): the recogniser on `ort` 2.0.0-rc.15**
       (built 2026-10-25, not run). Windows links ONNX Runtime 1.31, nine minor versions on. A run
       with `ocr-bench: both` on wip/deps, against main's 40228892320 (d2ef50e), whose Windows
@@ -2543,7 +2557,8 @@ See [docs/macos-port.md](docs/macos-port.md) for the decisions and
       `ready` line says `ONNX Runtime 1.22`, the macos-15 copies still say "not available" with a
       reason, the newer macOS's `--paddle-probe` says `ok`, no backstop line, and no warning about
       chained fixups. Then Windows with NVDA: Melodyne's lone digits read as before, and the log
-      has no "not available" line.
+      has no "not available" line. The first run, 40245493004 on cf021ab, is not the measurement:
+      the Mac made no session there (the correction above).
 - [ ] **Decision: Windows' ONNX Runtime needs AVX to start, and AVX2 to read.** From `ort`
       2.0.0-rc.11 on, pyke's x86_64 builds target x86-64-v3: Intel from Haswell, AMD from the
       first Ryzen. `init` refuses the recogniser without AVX2 (`ort::sys::USING_PYKE_BINARIES` and

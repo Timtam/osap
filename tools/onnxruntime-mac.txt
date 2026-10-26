@@ -3,7 +3,8 @@
 # fetches it, checks it against `sha256` below, and rebuilds when this file changes.
 #
 # Microsoft's own build, universal (arm64 and x86_64), for macOS 13.3 and later. 1.22 because the
-# application's `ort` (2.0.0-rc.15, `api-22`) is made for it, and because it is among the last
+# application's `ort` (2.0.0-rc.15, asking `api-21` of it: crates/host/Cargo.toml says why) takes
+# it, and because it is among the last
 # releases with an Intel half: 1.23.2 is Microsoft's last universal archive and needs macOS 13.4,
 # and 1.24 dropped x86_64 for macOS and needs macOS 14. Opened at run time from
 # Contents/Frameworks (crates/host/src/backend/paddle_ocr.rs); below 13.3 the application does
