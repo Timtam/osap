@@ -177,8 +177,8 @@ local function report(label, result)
   return name and (label .. ": " .. name) or nil
 end
 
--- The name read after a step, with where the preset database has it (marked so in the page), or
--- the expansion cleared where it does not.
+-- The name read after a step, with where the preset database has it (the page's heading shows it
+-- beside the name, as it is), or the expansion cleared where it does not.
 local function named(name)
   local expansion = false
   if name and E.DB.present then

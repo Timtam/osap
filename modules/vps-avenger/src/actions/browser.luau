@@ -39,7 +39,7 @@
 --                         table (Pg.category), the row clicked, the presets' change watched for
 --   select_all_expansion_presets   no click: the name read (the tool read the name)
 --   go_to_loaded_preset_category   no trip: the database's category for the name last read, as the
---                         tool's, marked as the database's on the page (B.goToCategory)
+--                         tool's (B.goToCategory)
 --   select_expansion_preset, load_expansion_preset, mark_expansion_preset_favorite {preset_index, …}
 --                         its category clicked first where this session's clicks did not leave it
 --                         shown, the presets' scrollbar clicked to its page by the tool's measured
@@ -96,7 +96,7 @@ local VIEW_UNREAD = "whether an expansion is open in VPS Avenger cannot be read 
 -- Every value of the browser's (state.luau's): a read that shows the grid, or another expansion,
 -- says each of them.
 local KEYS = { "expansionView", "expansionViewFrom", "expansionOpen", "selectedExpansion", "lists", "loadedIndex",
-  "favoriteView", "favoriteStates", "pageCategory", "selectedFromDatabase" }
+  "favoriteView", "favoriteStates", "pageCategory" }
 
 local function whole(v)
   local n = tonumber(v)
@@ -479,9 +479,9 @@ end
 -- ── What the reads say ───────────────────────────────────────────────────────
 
 -- The values a read of the browser says, from its state `st` (Br.state's): the grid — every open
--- expansion's value gone; an expansion open — the one the read names, with its lists from the
--- database where it is another than the one `known` had (marked where only its place named it), or
--- none. And the keys they are posted under.
+-- expansion's value gone; an expansion open — the one the read names, or the one at its place
+-- where only that named it, with its lists from the database where it is another than the one
+-- `known` had, or none. And the keys they are posted under.
 local function partOf(st, known)
   local v = {}
   if not st then return nil end
@@ -497,7 +497,6 @@ local function partOf(st, known)
   if st.name then
     local ok, lists = pcall(DB.lists, st.name)
     if ok and lists then v.lists = lists end
-    v.selectedFromDatabase = st.byPlace or nil
   end
   return { keys = KEYS, values = v }
 end
@@ -602,14 +601,15 @@ end
 -- As the tool opens it: by its place in the list chosen (the page's index into the roster it was
 -- posted), the view stored or read, and the tool's page tables (src/tables/pages.luau): the grid
 -- taken to the expansion's page by the tool's clicks on its scrollbar, each followed by a change
--- wait on the grid — a click that moves nothing leaves the grid where that point puts it, and is not
--- made again — and the tile clicked at the tool's point. CONFIRMED BY THE HEADER'S NAME after the
--- click: the one asked, it is open; another, it is closed again and said so; an expansion open whose
--- name the header does not read — its title band lit — the one at the place clicked, marked as the
--- database's (its place in the database's list named it). Where the grid's page is not known — none
--- of this session's clicks placed it in this window and view — it is taken to its top first, by the
--- tool's clicks for its first page from its last; then the page placed is kept, as the tool kept
--- AVGExpansionPageStart, and forgotten where the header does not confirm the expansion asked.
+-- wait on the grid — a click that moves nothing leaves the grid where that point puts it, and is
+-- not made again — and the tile clicked at the tool's point. CONFIRMED BY THE HEADER'S NAME after
+-- the click: the one asked, it is open; another, it is closed again and said so; an expansion open
+-- whose name the header does not read — its title band lit — the one at the place clicked (its
+-- place in the database's list names it), posted as any name is and the answer saying the header
+-- did not read it. Where the grid's page is not known — none of this session's clicks placed it in
+-- this window and view — it is taken to its top first, by the tool's clicks for its first page from
+-- its last; then the page placed is kept, as the tool kept AVGExpansionPageStart, and forgotten
+-- where the header does not confirm the expansion asked.
 function B.byPlace(o, trip, ctx, spec)
   local name, view, label, index, list = spec.name, spec.view, spec.label, spec.index, spec.list
   local pic = ctx.snap
@@ -746,7 +746,6 @@ function B.open(o, trip, args, name, label, known)
     -- clicks the category first.
     S.setBrowserAt(ctx.window, { expansion = name })
     if not st2.name then
-      v.selectedFromDatabase = true
       return finish({ part = { keys = KEYS, values = v }, focus = "open-expansion-name", note = "VPS Avenger shows an "
         .. "expansion open where " .. name .. " lies by its place in the list chosen; its name cannot be read in the "
         .. "header now" }, clicked .. ", an expansion open, its name not read in the header")
@@ -1155,7 +1154,7 @@ function B.goToCategory(known)
   if not (ok and p) then return nil, "the preset loaded is not in the database" end
   local open = known.selectedExpansion
   if open and open ~= "" and open ~= p.expansion then
-    return nil, "the preset loaded is in another expansion, " .. p.expansion .. ", from the database"
+    return nil, "the preset loaded is in another expansion, " .. p.expansion
   end
   local lists = open == p.expansion and known.lists or nil
   if not lists then
@@ -1206,7 +1205,7 @@ function B.align(o, trip, label, known)
   local fav = Br.fav(s, pl, marks)
   local v = { expansionOpen = true, selectedExpansion = y, favoriteView = fav, loadedIndex = loadedIn(name, y) }
   local keys = { "expansionView", "expansionViewFrom", "expansionOpen", "selectedExpansion", "lists", "loadedIndex",
-    "favoriteView", "favoriteStates", "selectedFromDatabase" }
+    "favoriteView", "favoriteStates" }
   local okL, lists = pcall(DB.lists, y)
   if okL and lists then v.lists = lists end
   if y ~= had then

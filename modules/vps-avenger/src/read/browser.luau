@@ -517,7 +517,7 @@ end
 -- where an expansion reads open, and with "presets" the stars of the rows this session's clicks
 -- placed. The values (state.luau's) and the keys read: a read of the grid says every open
 -- expansion's value is gone with it; one that does not settle it says only what was read.
-local OPEN_KEYS = { "lists", "loadedIndex", "favoriteView", "favoriteStates", "pageCategory", "selectedFromDatabase" }
+local OPEN_KEYS = { "lists", "loadedIndex", "favoriteView", "favoriteStates", "pageCategory" }
 
 function Br.part(snap, pl, opts)
   local fields = {}

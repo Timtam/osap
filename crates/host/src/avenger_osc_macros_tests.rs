@@ -1765,9 +1765,10 @@ fn the_rings_reads_place_no_name_after_the_preset_may_have_changed() {
 }
 
 /// Where the dots give no count: the preset database's, for a preset it places by its words as they
-/// stand — marked so — and the count the page's Confirm OSC Count says, kept for the preset read
-/// then until a name read differs, marked as confirmed; where the dots give one, theirs is taken and
-/// the page is told so. Confirm OSC Count clicks nothing, and is refused before a name was read.
+/// stand, which the page says as the count alone — and the count the page's Confirm OSC Count says,
+/// kept for the preset read then until a name read differs, marked as confirmed; where the dots give
+/// one, theirs is taken and the page is told so. Confirm OSC Count clicks nothing, and is refused
+/// before a name was read.
 #[test]
 fn a_count_from_the_database_or_confirmed_fills_in_where_the_dots_give_none() {
     run_mac(&format!("{OPEN}\n{DOTS}\n{}", r##"

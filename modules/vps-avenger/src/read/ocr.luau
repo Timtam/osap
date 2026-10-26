@@ -182,8 +182,9 @@ R.SNAP_RATIO = 0.72
 
 -- A name read compared with the name the preset database has in its place (`expected`, or nil):
 -- the database's spelling when the two are the same words, case and spacing aside; the database's
--- name, and `true` — to be marked — when they are R.SNAP_RATIO alike or more; otherwise the name
--- as read. With the ratio for the log.
+-- name, and `true`, when they are R.SNAP_RATIO alike or more; otherwise the name as read. The flag
+-- and the ratio are for the log: the name is shown as it comes back, unmarked (src/presets.luau,
+-- WHAT IT MAY DO).
 function R.snap(read, expected)
   if not expected or expected == "" then return read, false, nil end
   local a, b = string.lower(R.tidy(read)), string.lower(R.tidy(expected))

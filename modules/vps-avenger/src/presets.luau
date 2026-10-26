@@ -7,15 +7,18 @@
 -- below is all of them. An OPTIONAL dependency: without it `DB.present` is false, nothing here is
 -- asked, and the module is stage 1 exactly.
 --
--- WHAT IT MAY DO (the maintainer's decision of 2026-09-28). This module works from the screen,
--- and may orient itself on the database as the project's tool does. Whatever it says that was not
--- read off the screen is MARKED: ", from the database" after the value — or before a list of
--- names, where a trailing marker would sound like one more name. So a user always hears which
--- words Avenger showed and which the database supplied. One exception, the maintainer's of
--- 2026-10-26: the names of the preset's oscillator tabs, by which the module's own sentences name
--- a tab where its name was not read (src/actions/osc.luau, Osc.oscName — the ring's Oscillator
--- stepper, Mute and Solo, a knob's sentence), are said as they are, unmarked — naming the tabs
--- is what the database is there for.
+-- WHAT IT MAY DO (the maintainer's decisions of 2026-09-28 and 2026-10-26). This module works from
+-- the screen, and may orient itself on the database as the project's tool does. What the database
+-- has on a preset — its expansion, category, oscillator tabs and macros in Preset info, the names
+-- by which the module's own sentences name a tab whose name was not read (src/actions/osc.luau,
+-- Osc.oscName), and on the page the expansion, the lists, the roster and its spelling of a name
+-- read near it — is said and shown plainly, as Avenger's own words are: telling it is what the
+-- database is there for (2026-10-26, in place of 2026-09-28's rule that whatever was not read off
+-- the screen is marked). MARKED, with ", from the database" after it (DB.MARK), is only a NAME the
+-- database puts where the screen's read is not, so a user always knows which name Avenger showed
+-- and which is the database's guess: a read taken for a catalog name by similarity (SNAPPING's
+-- 3), the neighbour ◀ and ▶ lead to where nothing was read after the click or the read disagrees
+-- (THE NEIGHBOUR RULE), and the anchor's name where Preset info reads nothing (THE ANCHOR).
 --
 -- SNAPPING. A name read off the screen is looked up in the catalog, as the project's tool looks
 -- it up (its preset_db.find_match), in this order:
@@ -60,8 +63,8 @@
 -- redo list opened, the overlay leaving the front. A read that fails keeps the anchor, and that is
 -- where a stale one shows — the database's N taken for the position after a step whose read-back
 -- failed (below): a step whose name before the click cannot be read takes its N from
--- the anchor, and Preset info whose read fails speaks from it. Everything taken from it is
--- marked, and the next name read replaces it.
+-- the anchor, and Preset info whose read fails speaks from it. The name taken from it is marked,
+-- and the next name read replaces it.
 --
 -- THE NEIGHBOUR RULE for ◀ and ▶ (main.luau reads the names; this decides what is said). Before
 -- the click the name is read and placed as above. N is the preset one place before or after the
@@ -113,6 +116,8 @@ local DB = {}
 -- Whether the database is installed. main.luau adds the Preset info control only then.
 DB.present = P ~= nil
 
+-- The mark after a name the database puts where the screen's read is not (WHAT IT MAY DO), and
+-- after nothing else.
 DB.MARK = "from the database"
 
 -- The similarity a read has to reach to be taken for a catalog name: the project's tool's
@@ -571,9 +576,8 @@ end
 -- project's tool offers (page.luau, P.ROSTERS), from the index's `rosters` (data 1.3.0), each in
 -- its own order — an expansion it lists that the database has no data for kept in it, as the tool
 -- keeps it. Before 1.3.0, "Factory Standard" from `factoryStandard` and any other as every
--- expansion the database has. The database's list, never Avenger's own — the page marks it as the
--- database's — or nil and why there is none. It reads the index only (P.index, decoded once), not
--- the lookups the name searches build.
+-- expansion the database has. The database's list, never Avenger's own, or nil and why there is
+-- none. It reads the index only (P.index, decoded once), not the lookups the name searches build.
 function DB.roster(name)
   if not P then return nil, "not installed" end
   local ok, idx, why = pcall(P.index)
@@ -598,8 +602,8 @@ function DB.roster(name)
 end
 
 -- ── For the page ─────────────────────────────────────────────────────────────
--- What the page's reads (read/open.luau) take from the database — every word of it marked there
--- as the database's.
+-- What the page's reads (read/open.luau) take from the database, shown there plainly (WHAT IT MAY
+-- DO).
 
 -- The preset `read` (a name read off the screen) placed in the catalog, as Preset info places
 -- it, the anchor with it: { expansion, index (its place in the expansion's list), name (the
@@ -741,12 +745,12 @@ function DB.expansionNames()
   return names, folds
 end
 
--- The oscillators and macros of preset `i` of expansion file `x`, as said.
+-- The oscillators and macros of preset `i` of expansion file `x`, as said: plainly, as everything
+-- the database has on a preset placed (WHAT IT MAY DO).
 local function oscText(x, i)
   local names = {}
   for k, o in ipairs(P.oscillators(x, i)) do names[k] = o.name end
-  return string.format("%d oscillator%s, %s: %s", #names, #names == 1 and "" or "s", DB.MARK,
-    table.concat(names, ", "))
+  return string.format("%d oscillator%s: %s", #names, #names == 1 and "" or "s", table.concat(names, ", "))
 end
 
 local function macroText(x, i)
@@ -757,21 +761,22 @@ local function macroText(x, i)
     for k, m in ipairs(tab.buttons) do buttons[k] = m.name end
     return table.concat(knobs, ", ") .. "; buttons: " .. table.concat(buttons, ", ")
   end
-  if #tabs == 1 then return "Macros, " .. DB.MARK .. ": " .. one(tabs[1]) end
-  local parts = { string.format("%d macro tabs, %s", #tabs, DB.MARK) }
+  if #tabs == 1 then return "Macros: " .. one(tabs[1]) end
+  local parts = { string.format("%d macro tabs", #tabs) }
   for t, tab in ipairs(tabs) do parts[#parts + 1] = string.format("Tab %d: %s", t, one(tab)) end
   return table.concat(parts, ". ")
 end
 
 -- The Preset info: `read` is the name read just now, or nil. Sentences, ". " between them:
 --   the name — as read and snapped (marked when by similarity); "<read>, not in the database";
---     or, nothing read, "the preset name cannot be read now; <anchor's name>, from the database";
---   "Expansion E, category C, k of n, from the database";
---   "m oscillators, from the database: …" — a tab not named is said as Avenger shows it, OSC n;
---   "Macros, from the database: three knobs; buttons: two", or per tab when there are several.
+--     or, nothing read, "the preset name cannot be read now; <anchor's name>, from the database",
+--     the database's guess and marked as one (WHAT IT MAY DO);
+--   "Expansion E, category C, k of n";
+--   "m oscillators: …" — a tab not named is said as Avenger shows it, OSC n;
+--   "Macros: three knobs; buttons: two", or "N macro tabs" and each tab when there are several.
 -- A name in several places the anchor cannot tell apart names its expansions instead: "<name>, in
--- 3 expansions, from the database: A, B and C" — the marker before the list, as everywhere. Placing
--- the name sets the anchor, as every read does.
+-- 3 expansions: A, B and C". All but a guessed name plainly: what the database has on the preset
+-- is what Preset info is for. Placing the name sets the anchor, as every read does.
 function DB.info(read)
   if not catalog() then return "the preset database cannot be read" end
   local p, first
@@ -797,9 +802,9 @@ function DB.info(read)
         end
       end
       if #names == 1 then
-        return string.format("%s, %d times in %s, %s", first, #res.positions, names[1], DB.MARK)
+        return string.format("%s, %d times in %s", first, #res.positions, names[1])
       end
-      return string.format("%s, in %d expansions, %s: %s", first, #names, DB.MARK, listOf(names))
+      return string.format("%s, in %d expansions: %s", first, #names, listOf(names))
     end
   else
     if not anchor then return "the preset name cannot be read now" end
@@ -813,15 +818,15 @@ function DB.info(read)
   if not ok then x, bad = nil, tostring(x) end
   if not x then
     host.log.info(string.format("[avenger] 'Preset info': %s's file cannot be read: %s", e, tostring(bad)))
-    parts[#parts + 1] = string.format("Expansion %s, %s; its categories, oscillators and macros cannot be "
-      .. "read from it", e, DB.MARK)
+    parts[#parts + 1] = string.format("Expansion %s; its categories, oscillators and macros cannot be read "
+      .. "from it", e)
     return table.concat(parts, ". ")
   end
   local cname, k, count = P.category(x, I(p))
   if cname then
-    parts[#parts + 1] = string.format("Expansion %s, category %s, %d of %d, %s", e, cname, k, count, DB.MARK)
+    parts[#parts + 1] = string.format("Expansion %s, category %s, %d of %d", e, cname, k, count)
   else
-    parts[#parts + 1] = string.format("Expansion %s, %s", e, DB.MARK)
+    parts[#parts + 1] = "Expansion " .. e
   end
   parts[#parts + 1] = oscText(x, I(p))
   parts[#parts + 1] = macroText(x, I(p))

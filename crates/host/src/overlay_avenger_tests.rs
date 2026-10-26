@@ -30,12 +30,13 @@
 //!
 //! And for the preset database, the same day's later decision: the module may orient itself on the
 //! avenger_control project's database, installed as an optional data module
-//! (`modules/vps-avenger-presets`), and marks whatever it says that was not read off the screen.
-//! Its scenarios load the data module's real reader against a small fixture catalog (`T.FIXTURE`),
-//! never the real data: without the module the ring and the steps are stage 1's; a database that
-//! cannot be read changes nothing but Preset info's answer; a name read is placed in the catalog
-//! the tool's way; ◀ and ▶ say what was read and add the database's neighbour, marked, when the
-//! read failed or disagrees; and the position is forgotten when the preset may have changed.
+//! (`modules/vps-avenger-presets`) — and since 2026-10-26 says what it gives plainly, marking only
+//! a name the database put where the screen's read is not. Its scenarios load the data module's
+//! real reader against a small fixture catalog (`T.FIXTURE`), never the real data: without the
+//! module the ring and the steps are stage 1's; a database that cannot be read changes nothing but
+//! Preset info's answer; a name read is placed in the catalog the tool's way; ◀ and ▶ say what was
+//! read and add the database's neighbour, marked, when the read failed or disagrees; and the
+//! position is forgotten when the preset may have changed.
 //!
 //! And for the first Mac test of the page (2026-10-14): ◀ and ▶ are unavailable where the name read
 //! is Init Preset, which Avenger steps no preset from — said as Tab reaches them, and a press
@@ -3071,9 +3072,11 @@ fn avenger_in_a_reaper_fx_chain_on_a_mac() {
 
 // ---------------------------------------------------------------------------------------------
 // The preset database (modules/vps-avenger-presets), an optional dependency: the maintainer's
-// decisions of 2026-09-28 — the module may orient itself on it, and says what it did not read off
-// the screen marked "from the database". Against T.FIXTURE, a catalog of four small expansions,
-// never the real data.
+// decisions of 2026-09-28 — the module may orient itself on it — and of 2026-10-26: what it gives
+// is said plainly, and "from the database" follows only a name it put where the screen's read is
+// not (a read taken for a catalog name by similarity, the neighbour where the read failed or
+// disagrees, the last position's name where Preset info reads nothing). Against T.FIXTURE, a
+// catalog of four small expansions, never the real data.
 // ---------------------------------------------------------------------------------------------
 
 /// Not installed: the module is stage 1's — ten stops and no Preset info, and a step says the name
@@ -3161,55 +3164,54 @@ fn the_preset_databases_reader_interprets_its_format() {
 /// first in the expansion Avenger was last known in, then in the whole catalog, where it also has
 /// to stand out from every other name by 0.05; a name that begins with a catalog name and goes on,
 /// and "Init Preset", are not in it. A name in several expansions is placed in the one Avenger was
-/// last known in, and otherwise names them, the marker before the list. Preset info says where the
-/// preset is, its oscillators and its macros, each part marked.
+/// last known in, and otherwise names them. Preset info says where the preset is, its oscillators
+/// and its macros, plainly (the maintainer's decision of 2026-10-26).
 #[test]
-fn preset_info_places_the_name_read_in_the_catalog_and_marks_what_the_database_says() {
+fn preset_info_places_the_name_read_in_the_catalog_and_says_what_the_database_has() {
     run_mac(r##"
         local S = T.S
         T.presets()
         local header = T.avengerAt80("AR Band Pass Slide")
-        local band = "AR Band Pass Slide. Expansion Alpha, category Arp, 1 of 2, from the database. 3 oscillators, "
-          .. "from the database: Arp, OSC 2, Lead. Macros, from the database: Tone, Macro 2, Drive; buttons: +12, MacroBtn 2"
+        local band = "AR Band Pass Slide. Expansion Alpha, category Arp, 1 of 2. 3 oscillators: Arp, OSC 2, Lead. "
+          .. "Macros: Tone, Macro 2, Drive; buttons: +12, MacroBtn 2"
         T.ok(T.info(header, "AR Band Pass Slide") == band, T.said())
         T.ok(T.info(header, "ar band pass slide") == band, T.said())
         T.ok(T.info(header, "AR Bond Pess Slide") == "AR Band Pass Slide, from the database"
           .. string.sub(band, #"AR Band Pass Slide" + 1), T.said())
         T.ok(T.count("[avenger] 'Preset info': read 'AR Bond Pess Slide' — Alpha 1 of 6 (by similarity 0.89)") == 1, T.dump())
-        T.ok(T.info(header, "LD Palm's Lead 1") == "LD Palm's Lead 1. Expansion Alpha, category Leads, 1 of 1, from the "
-          .. "database. 2 oscillators, from the database: Lead, Sub. Macros, from the database: Glide, Macro 2, Macro 3; "
-          .. "buttons: MacroBtn 1, MacroBtn 2", T.said())
-        T.ok(T.info(header, "AR Deep Arp") == "AR Deep Arp. Expansion Alpha, category Arp, 2 of 2, from the database. "
-          .. "1 oscillator, from the database: One Osc. 2 macro tabs, from the database. Tab 1: Cut, Res, Env; buttons: "
-          .. "Hold, Gate. Tab 2: Macro 4, Wobble, Macro 6; buttons: MacroBtn 3, MacroBtn 4", T.said())
-        T.ok(T.info(header, "PD  Soft Pad") == "PD Soft Pad. Expansion Beta, category Pads, 1 of 1, from the database. "
-          .. "1 oscillator, from the database: Soft. Macros, from the database: Air, Macro 2, Macro 3; buttons: "
-          .. "MacroBtn 1, MacroBtn 2", T.said())
-        T.ok(T.starts(T.info(header, "pl üsch"), "PL Üsch. Expansion Gamma, category Plucked, 1 of 1, from the database"), T.said())
+        T.ok(T.info(header, "LD Palm's Lead 1") == "LD Palm's Lead 1. Expansion Alpha, category Leads, 1 of 1. "
+          .. "2 oscillators: Lead, Sub. Macros: Glide, Macro 2, Macro 3; buttons: MacroBtn 1, MacroBtn 2", T.said())
+        T.ok(T.info(header, "AR Deep Arp") == "AR Deep Arp. Expansion Alpha, category Arp, 2 of 2. 1 oscillator: One Osc. "
+          .. "2 macro tabs. Tab 1: Cut, Res, Env; buttons: Hold, Gate. Tab 2: Macro 4, Wobble, Macro 6; buttons: "
+          .. "MacroBtn 3, MacroBtn 4", T.said())
+        T.ok(T.info(header, "PD  Soft Pad") == "PD Soft Pad. Expansion Beta, category Pads, 1 of 1. 1 oscillator: Soft. "
+          .. "Macros: Air, Macro 2, Macro 3; buttons: MacroBtn 1, MacroBtn 2", T.said())
+        T.ok(T.starts(T.info(header, "pl üsch"), "PL Üsch. Expansion Gamma, category Plucked, 1 of 1. "), T.said())
         -- Not in the catalog: somebody's own variant, and Avenger's blank preset.
         T.ok(T.info(header, "BA Deep Sub mine") == "BA Deep Sub mine, not in the database", T.said())
         T.ok(T.count("read 'BA Deep Sub mine' — a name of its own that begins with 'BA Deep Sub'") == 1, T.dump())
         T.ok(T.info(header, "Init Preset") == "Init Preset, not in the database", T.said())
         -- In three expansions, with none known: named, not placed.
-        T.ok(T.info(header, "BA Deep Sub") == "BA Deep Sub, in 3 expansions, from the database: Alpha, Beta and Gamma", T.said())
+        T.ok(T.info(header, "BA Deep Sub") == "BA Deep Sub, in 3 expansions: Alpha, Beta and Gamma", T.said())
         -- Known to be in Beta: placed there.
         T.info(header, "SQ Feel It")
-        T.ok(T.starts(T.info(header, "BA Deep Sub"), "BA Deep Sub. Expansion Beta, category Bass, 1 of 1, from the database. "), T.said())
-        -- Nothing read: the position the last read placed, marked.
+        T.ok(T.starts(T.info(header, "BA Deep Sub"), "BA Deep Sub. Expansion Beta, category Bass, 1 of 1. "), T.said())
+        -- Nothing read: the position the last read placed — its name marked, the database's guess
+        -- for the preset shown, and what it has on that preset plain.
         T.ok(T.starts(T.info(header, nil), "the preset name cannot be read now; BA Deep Sub, from the "
-          .. "database. Expansion Beta, category Bass, 1 of 1, from the database. "), T.said())
+          .. "database. Expansion Beta, category Bass, 1 of 1. "), T.said())
         -- One case apart from Alpha's "BA Reese": exact is Gamma's; any case is both.
-        T.ok(T.starts(T.info(header, "Ba Reese"), "Ba Reese. Expansion Gamma, category Bass, 1 of 2, from the database. "), T.said())
+        T.ok(T.starts(T.info(header, "Ba Reese"), "Ba Reese. Expansion Gamma, category Bass, 1 of 2. "), T.said())
         T.info(header, "Init Preset")
-        T.ok(T.info(header, "BA REESE") == "BA Reese, in 2 expansions, from the database: Alpha and Gamma", T.said())
+        T.ok(T.info(header, "BA REESE") == "BA Reese, in 2 expansions: Alpha and Gamma", T.said())
         T.ok(T.info(header, nil) == "the preset name cannot be read now", T.said())
         -- A name the catalog does not have, as like three of its names as like each: none of them.
         T.ok(T.info(header, "LD Lead 4") == "LD Lead 4, not in the database", T.said())
         T.ok(T.count("[avenger] 'Preset info': read 'LD Lead 4' — not in the catalog: 'LD Lead 1' (0.89) is no "
           .. "closer than another name (0.89)") == 1, T.dump())
-        -- Found by similarity, and in three expansions: each part marked.
-        T.ok(T.info(header, "BA Dcep Sub") == "BA Deep Sub, from the database, in 3 expansions, from the database: "
-          .. "Alpha, Beta and Gamma", T.said())
+        -- Found by similarity, and in three expansions: the name marked, the expansions plain.
+        T.ok(T.info(header, "BA Dcep Sub") == "BA Deep Sub, from the database, in 3 expansions: Alpha, Beta and Gamma",
+          T.said())
         -- A poor read like names in two expansions: over the whole catalog, the one it is clearly
         -- closer to; in the expansion Avenger was last known in, that one's, by the threshold alone.
         T.ok(T.starts(T.info(header, "PD Sarm Pad"), "PD Warm Pad, from the database. Expansion Alpha, category Pads, "), T.said())
@@ -3226,8 +3228,8 @@ fn preset_info_places_the_name_read_in_the_catalog_and_marks_what_the_database_s
         for k, v in pairs(T.FIXTURE) do if k ~= "data/expansions/gamma.json" then files[k] = v end end
         T.presets(files)
         local header = T.avengerAt80("PL Üsch")
-        T.ok(T.info(header, "PL Üsch") == "PL Üsch. Expansion Gamma, from the database; its categories, oscillators "
-          .. "and macros cannot be read from it", T.said())
+        T.ok(T.info(header, "PL Üsch") == "PL Üsch. Expansion Gamma; its categories, oscillators and macros cannot be "
+          .. "read from it", T.said())
         T.ok(T.count("[avenger] 'Preset info': Gamma's file cannot be read: data/expansions/gamma.json cannot be read") == 1, T.dump())
     "##);
     run_mac(r##"
@@ -3239,8 +3241,53 @@ fn preset_info_places_the_name_read_in_the_catalog_and_marks_what_the_database_s
         T.presets({ ["data/index.json"] = '{"format":1,"exported":"2026-09-26 18:57","factoryStandard":[],'
           .. '"expansions":[' .. table.concat(rows, ",") .. ']}' })
         local header = T.avengerAt80("PD Everywhere")
-        T.ok(T.info(header, "PD Everywhere") == "PD Everywhere, in 7 expansions, from the database: E1, E2, E3, E4, E5 "
-          .. "and 2 more", T.said())
+        T.ok(T.info(header, "PD Everywhere") == "PD Everywhere, in 7 expansions: E1, E2, E3, E4, E5 and 2 more", T.said())
+    "##);
+}
+
+/// The maintainer's decision of 2026-10-26, in place of 2026-09-28's mark on everything not read
+/// off the screen: what the database has on a preset placed by its words is said with no "from
+/// the database" anywhere in a Preset info — its expansion, category, oscillators and macros, one
+/// macro tab or two, and the expansions a name is in. The mark stays after each name the database
+/// put where the screen's read is not, once per such name: a read taken for a catalog name by
+/// similarity, the last position's name where Preset info reads nothing, the neighbour where a
+/// step reads nothing after its click, and the neighbour beside a read that disagrees with it.
+#[test]
+fn the_databases_values_are_said_plainly_and_only_its_guesses_are_marked() {
+    run_mac(r##"
+        local S = T.S
+        T.presets()
+        local header = T.avengerAt80("AR Band Pass Slide")
+        local function marks(said)
+          local n = 0
+          for _ in string.gmatch(said, "from the database") do n += 1 end
+          return n
+        end
+        -- Read by their words: no mark, with one macro tab or two, and in several expansions.
+        for _, name in ipairs({ "AR Band Pass Slide", "AR Deep Arp", "LD Palm's Lead 1", "PD Soft Pad", "PL Üsch" }) do
+          local said = T.info(header, name)
+          T.ok(marks(said) == 0 and string.find(said, ". Expansion ", 1, true) ~= nil
+            and string.find(said, " oscillator", 1, true) ~= nil, said)
+        end
+        T.info(header, "Init Preset")
+        local several = T.info(header, "BA Deep Sub")
+        T.ok(several == "BA Deep Sub, in 3 expansions: Alpha, Beta and Gamma", several)
+        -- A read the database took for a catalog name by similarity: that name marked, once.
+        local fuzzy = T.info(header, "AR Bond Pess Slide")
+        T.ok(marks(fuzzy) == 1 and T.starts(fuzzy, "AR Band Pass Slide, from the database. Expansion Alpha, "), fuzzy)
+        T.info(header, "Init Preset")
+        several = T.info(header, "BA Dcep Sub")
+        T.ok(marks(several) == 1 and T.starts(several, "BA Deep Sub, from the database, in 3 expansions: "), several)
+        -- Nothing read: the last position's name marked, once, and the rest plain.
+        T.info(header, "AR Deep Arp")
+        local kept = T.info(header, nil)
+        T.ok(marks(kept) == 1 and T.starts(kept, "the preset name cannot be read now; AR Deep Arp, from the database. "
+          .. "Expansion Alpha, category Arp, 2 of 2. 1 oscillator: One Osc. 2 macro tabs. Tab 1: "), kept)
+        -- ◀ and ▶: the neighbour read as it stands, plain; the neighbour where nothing was read
+        -- after the click, and beside a read that disagrees, marked.
+        T.ok(T.step(header, 3, "AR Band Pass Slide", "AR Deep Arp") == "AR Deep Arp", T.said())
+        T.ok(T.step(header, 3, "AR Deep Arp", nil) == "BA Deep Sub, from the database", T.said())
+        T.ok(T.step(header, 3, "PD Warm Pad", "PD Soft Pad") == "PD Soft Pad; LD Palm's Lead 1, from the database", T.said())
     "##);
 }
 

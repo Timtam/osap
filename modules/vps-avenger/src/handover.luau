@@ -346,17 +346,13 @@ local function renameTab(o, trip, i, n, pl, label, before)
       -- this count (Open.keptNames) — kept as read under them again — and holes otherwise.
       local w = E.plugin()
       local count = va.oscCount or n
-      local keptNames, keptSnapped = Open.keptNames(S.values(w and w.id), preset, count)
-      local names, snapped = {}, {}
-      for j = 1, count do
-        names[j] = keptNames and keptNames[j]
-        snapped[j] = keptSnapped and keptSnapped[j]
-      end
-      names[i], snapped[i] = name, false
-      va.oscNames, va.oscSnapped = names, snapped
+      local keptNames = Open.keptNames(S.values(w and w.id), preset, count)
+      local names = {}
+      for j = 1, count do names[j] = keptNames and keptNames[j] end
+      names[i] = name
+      va.oscNames = names
       va.oscNamesOf = { preset = preset, count = count, at = S.changes() }
       keys[#keys + 1] = "oscNames"
-      keys[#keys + 1] = "oscSnapped"
       keys[#keys + 1] = "oscNamesOf"
       return { part = part, facts = facts, focus = "osc-rename-" .. i }
     end,
@@ -434,14 +430,11 @@ function Hv.renameMacro(o, trip, index)
       local va, keys = Open.part(now, "macros", { pl = pl2, macroCount = vb.macroCount })
       local name = textIn(pl2, now, M.FIELD_NAMES[field])
       log("'macro %s': %s — %s", field, tostring(info.key), name and ("read '" .. name .. "'") or "nothing read")
-      local labels, snapped = {}, {}
-      for j = 1, 5 do
-        labels[j] = vb.macroLabels and vb.macroLabels[j]
-        snapped[j] = vb.macroSnapped and vb.macroSnapped[j]
-      end
-      if name then labels[index], snapped[index] = name, false end
-      va.macroCount, va.macroLabels, va.macroSnapped = vb.macroCount, labels, snapped
-      for _, k in ipairs({ "macroCount", "macroLabels", "macroSnapped" }) do keys[#keys + 1] = k end
+      local labels = {}
+      for j = 1, 5 do labels[j] = vb.macroLabels and vb.macroLabels[j] end
+      if name then labels[index] = name end
+      va.macroCount, va.macroLabels = vb.macroCount, labels
+      for _, k in ipairs({ "macroCount", "macroLabels" }) do keys[#keys + 1] = k end
       local part = { keys = keys, values = va }
       if not name then return { part = part, error = Hv.NOT_READ } end
       return { part = part, focus = focus }

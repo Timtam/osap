@@ -886,7 +886,7 @@ fn the_grid_whose_header_reads_none_opens_by_place_where_the_picture_says_grid()
         local st = T.st()
         T.ok(st.expansion_open == true and st.selected_expansion == "Cinematic Pads" and st.selected_expansion_from_database == nil
           and T.lastPost().id == "open-expansion-name", "open, by its header: " .. tostring(st.selected_expansion))
-        T.ok(#st.expansion_categories == 12 and st.expansion_lists_from_database == true, "its lists, the database's")
+        T.ok(#st.expansion_categories == 12, "its lists, the database's")
         T.ok(T.count("gate 'Opening an expansion': window " .. tostring(W.id) .. " at 98,84, zoom 80 % (factor 1.60); view "
           .. "8 per Row (as stored); name crop none ") == 1, T.dump())
         -- The page key's gate line and Open's.
@@ -1101,8 +1101,9 @@ fn the_picture_tests_thresholds_and_the_name_crop_above_the_grid() {
 /// scrollbar, the tile clicked at the tool's point for its place, and the header's name after the
 /// click confirms it. Where the header names another, that one is closed again and said so, and the
 /// grid's page is not kept. Where the title band is lit after the click and the header reads no
-/// name, the one at the place clicked is posted open, marked as the database's, and the reads after
-/// it keep it by that place until one names another.
+/// name, the one at the place clicked is posted open — by its name alone, as everything the
+/// database gives since 2026-10-26, the answer saying the header did not read it — and the reads
+/// after it keep it by that place until one names another.
 #[test]
 fn an_expansion_is_opened_by_its_place_confirmed_by_the_header() {
     run_mac(&scenario(r##"
@@ -1131,19 +1132,19 @@ fn an_expansion_is_opened_by_its_place_confirmed_by_the_header() {
           .. "by its place in the list chosen; it was closed again", T.err())
         T.ok(T.count("clicked (" .. T.at80(133, 68) .. "), Synthwave in the header, closed again") == 1, T.dump())
         T.ok(T.st().expansion_open == false, "the grid posted")
-        -- Its title lit, its name not read: the one at the place clicked, marked, and kept by the key.
+        -- Its title lit, its name not read: the one at the place clicked, unmarked, and kept by the key.
         T.event()
         T.tripFrom({ action = "open_expansion", args = { index = T.indexIn("Deep House") }, focused = true }, W)
         T.settle(4)
         T.ok(T.st().expansion_open == true and T.st().selected_expansion == "Deep House"
-          and T.st().selected_expansion_from_database == true, "by its place: " .. tostring(T.st().selected_expansion))
+          and T.st().selected_expansion_from_database == nil, "by its place: " .. tostring(T.st().selected_expansion))
         T.ok(T.err() == "Opening an expansion: VPS Avenger shows an expansion open where Deep House lies by its place in the "
           .. "list chosen; its name cannot be read in the header now", T.err())
         T.event()
         T.back(W)
         T.openPage()
         T.event()
-        T.ok(T.st().selected_expansion == "Deep House" and T.st().selected_expansion_from_database == true,
+        T.ok(T.st().selected_expansion == "Deep House" and T.st().selected_expansion_from_database == nil,
           "the key keeps it by its place: " .. tostring(T.st().selected_expansion))
         T.ok(T.count("— Deep House, the one opened here by its place in the list chosen") >= 1, T.dump())
         T.ok(T.held() == 0, "every picture released: " .. T.held())
@@ -1344,8 +1345,7 @@ fn an_expansion_on_a_later_page_is_reached_by_the_tools_scrollbar_clicks_on_the_
         local st = T.st()
         T.ok(st.expansion_open == true and st.selected_expansion == "Quantum State" and st.selected_expansion_from_database == nil,
           "open, named by its header: " .. tostring(st.selected_expansion))
-        T.ok(table.concat(st.expansion_categories, "|") == "Arp|Bass|Bells|Chords|Drums|Effects|Leads|Organ|Pads|Piano & Keys|Plucked"
-          and st.expansion_lists_from_database == true,
+        T.ok(table.concat(st.expansion_categories, "|") == "Arp|Bass|Bells|Chords|Drums|Effects|Leads|Organ|Pads|Piano & Keys|Plucked",
           "its lists: " .. table.concat(st.expansion_categories or {}, "|"))
         T.ok(#S.scrolls == 0, "the wheel never turned")
         T.ok(T.held() == 0, "every picture released: " .. T.held())
@@ -1354,8 +1354,7 @@ fn an_expansion_on_a_later_page_is_reached_by_the_tools_scrollbar_clicks_on_the_
         T.presets(T.SHIPPED)
         local header = T.avengerAt80("AR Analog Pop (Avenger)")
         T.ok(T.info(header, "AR Analog Pop (Avenger)") == "AR Analog Pop (Avenger). Expansion Quantum State, category Arp, "
-          .. "1 of 42, from the database. 1 oscillator, from the database: OSC 1. Macros, from the database: Envelope, "
-          .. "Saturation, Space FX; buttons: FM, RATE", T.said())
+          .. "1 of 42. 1 oscillator: OSC 1. Macros: Envelope, Saturation, Space FX; buttons: FM, RATE", T.said())
         T.ok(T.count("[avenger] 'Preset info': read 'AR Analog Pop (Avenger)' — Quantum State 1 of 197 (exactly)") == 1, T.dump())
         T.ok(T.count("[avenger] the preset database: 129 expansions, 18446 presets, exported 2026-09-26 18:57") == 1, T.dump())
     "##));
@@ -1574,7 +1573,7 @@ fn a_preset_is_loaded_at_its_place_and_confirmed_by_its_name() {
           .. T.clicksSince(0))
         T.nameReads("X17 Arp Line 02")
         local st = T.st()
-        T.ok(st.preset == "X17 Arp Line 02" and st.expansion == "Synthwave" and st.expansion_from_database == true
+        T.ok(st.preset == "X17 Arp Line 02" and st.expansion == "Synthwave"
           and st.loaded_expansion_preset_index == 1 and st.selected_preset_category == "Arp" and T.err() == "", tostring(st.preset))
         T.ok(S.snaps >= snaps + 3, "the browser, the strip and the macros pictured")
         T.ok(T.count("[avenger] [browser] 'Loading a preset': double-clicking X17 Arp Line 02 at (325,200), the tool's row 2 "
@@ -1915,7 +1914,7 @@ fn go_to_category_is_the_databases_and_makes_no_trip() {
         for _, case in ipairs({
           { "", "the preset's name has not been read" },
           { "My Own Sound", "the preset loaded is not in the database" },
-          { "X1 Arp Line 01", "the preset loaded is in another expansion, Acid Breaks, from the database" },
+          { "X1 Arp Line 01", "the preset loaded is in another expansion, Acid Breaks" },
         }) do
           keyWith({ preset = case[1] })
           T.pageMsg({ action = "go_to_loaded_preset_category", args = {}, focused = true })

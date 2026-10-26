@@ -6,11 +6,11 @@
 -- oscillator, macro tab 1, every switch off — and its page showed them as if they were Avenger's.
 -- Here a value nobody has read is not there: it is left out of the state, or a hole in a list,
 -- and the page says it as "not read". A state goes whole, so a key that is missing from it was not
--- read. Values that come from the preset database rather than the screen are marked as such: the
--- expansions list (`expansions_from_database`), the expansion the preset is in
--- (`expansion_from_database`), an open expansion's categories and presets
--- (`expansion_lists_from_database`), and a name read that the database's spelling replaced
--- (`names_from_database`, `labels_from_database`).
+-- read. Values that come from the preset database rather than the screen — the expansions list,
+-- the expansion the preset is in, an open expansion's categories and presets, the database's
+-- spelling of a name read near it, a count of the OSC tabs — are posted as they are, with no key
+-- that marks them: the maintainer's decision of 2026-10-26 (src/presets.luau, WHAT IT MAY DO).
+-- Only a count the user confirmed is said so (`count_from`).
 --
 -- The values are read/open.luau's, all of them at the page key: the preset's name and the zoom,
 -- the browser's view, an open expansion and FAV; the oscillator strip — the count, the names, the
@@ -32,14 +32,13 @@
 --
 -- The browser's (src/actions/browser.luau, src/read/browser.luau): its view, an open expansion and
 -- its name read in the header — or, where the header did not read it after this session's own click
--- on its tile, the one the database's list has at the place clicked (`selectedFromDatabase`, posted
--- as `selected_expansion_from_database`, a key of the port's) — FAV, the stars of the rows shown
--- where this session's own clicks placed them (`favoriteStates`, by the preset's place in the
--- expansion's list, from 0), and the category the page asked for (`pageCategory`, a category or
--- "__all__", posted as `selected_preset_category`). What this session's own clicks did in the
--- browser, which no read shows — nothing below its header is read as text — is kept as facts by
--- window: the grid confirmed by the user (S.confirmGrid), and the category clicked and the presets'
--- page scrolled to (S.browserAt).
+-- on its tile, the one the database's list has at the place clicked, posted as any name is — FAV,
+-- the stars of the rows shown where this session's own clicks placed them (`favoriteStates`, by the
+-- preset's place in the expansion's list, from 0), and the category the page asked for
+-- (`pageCategory`, a category or "__all__", posted as `selected_preset_category`). What this
+-- session's own clicks did in the browser, which no read shows — nothing below its header is read
+-- as text — is kept as facts by window: the grid confirmed by the user (S.confirmGrid), and the
+-- category clicked and the presets' page scrolled to (S.browserAt).
 
 local S = {}
 
@@ -329,8 +328,9 @@ local function oscPanel(v, facts)
   local n = v.oscCount
   local out = {
     count = n,
-    -- Where a count the dots did not give came from (read/open.luau, Open.countElsewhere): the
-    -- page marks it as such, a key of the port's.
+    -- Where a count the dots did not give came from (read/open.luau, Open.countElsewhere),
+    -- "confirmed" or "database", a key of the port's: the page says a confirmed one so, and the
+    -- database's as the count alone (src/presets.luau, WHAT IT MAY DO).
     count_from = v.oscCountFrom,
     copied = facts and facts.oscCopied or nil,
     names = list(v.oscNames, n),
@@ -350,7 +350,6 @@ local function oscPanel(v, facts)
     drum_mode = v.drumMode,
     central_panel_tab = v.central,
   }
-  if n and anyOf(v.oscSnapped, n) then out.names_from_database = list(v.oscSnapped, n) end
   if v.selectedType == "drums" then
     out.selected_label = "Drums"
   elseif v.selectedType == "trig" then
@@ -423,7 +422,6 @@ local function macroPanel(v)
     out.tabs = {}
     out.tabs[sel] = labels
     out.selected_labels = labels
-    if anyOf(v.macroSnapped, 5) then out.labels_from_database = list(v.macroSnapped, 5) end
   end
   return out
 end
@@ -462,26 +460,20 @@ function S.snapshot(id, shown, opts)
     expansion_favorite_view = v.favoriteView,
     osc_panel = oscPanel(v, st and st.facts),
     macro_panel = macroPanel(v),
+    -- The expansion the preset is in: the preset database's, as the lists below and the roster
+    -- are, and posted as they are, unmarked (above).
+    expansion = v.expansion,
   }
-  if v.expansion then
-    out.expansion = v.expansion
-    out.expansion_from_database = true
-  end
   if v.lists then
     out.expansion_categories = v.lists.categories
     out.expansion_presets = v.lists.presets
     out.expansion_preset_categories = v.lists.presetCategories
-    out.expansion_lists_from_database = true
     out.loaded_expansion_preset_index = v.loadedIndex
-  end
-  if v.selectedFromDatabase and v.selectedExpansion and v.selectedExpansion ~= "" then
-    out.selected_expansion_from_database = true
   end
   out.selected_preset_category = v.pageCategory
   out.favorite_preset_states = stars(v.favoriteStates)
   if shown then
     out.expansions = shown.names
-    out.expansions_from_database = true
     -- Every entry true or false, never a hole — a list of few marks far down would be too sparse for
     -- JSON: a roster's expansion the database has no data for (page.luau), a key of the port's.
     if anyOf(shown.noData, #shown.names) then

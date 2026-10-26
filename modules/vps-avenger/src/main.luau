@@ -11,7 +11,7 @@
 --                      marked, when the read fails or disagrees (presets.luau); unavailable
 --                      where the name read is Init Preset, which Avenger steps no preset from
 --   Preset info        only with the preset database: the preset's expansion, category,
---                      oscillator tabs and macro names, each marked as the database's
+--                      oscillator tabs and macro names, said plainly (presets.luau)
 --   Load, Save,        MENU's four items, each chosen in Avenger's own menu once a menu test sees
 --   Save as,           it (O:chooseMenuItem); Save's and Initialize's warning box is an overlay of
 --   Initialize         its own (dialog.luau); after Load's and Save as's file dialog, the name
@@ -544,9 +544,10 @@ end
 -- ── Preset info ──────────────────────────────────────────────────────────────
 -- Only with the preset database: the project's Info. Pressed, it reads the name as a step does
 -- before its click — the press waits for it, one read per press — and says what the database has on
--- it (presets.luau, DB.info): its expansion, category, oscillator tabs and macro names, each part
--- marked as the database's. A button rather than a read-out: the whole of it is a long sentence
--- nobody wants on every Tab past it.
+-- it (presets.luau, DB.info): its expansion, category, oscillator tabs and macro names, plainly,
+-- with "from the database" only after a name the database guessed (presets.luau, WHAT IT MAY DO).
+-- A button rather than a read-out: the whole of it is a long sentence nobody wants on every Tab
+-- past it.
 local function presetInfo(ov)
   ov:addCustomButton({
     label = "Preset info",

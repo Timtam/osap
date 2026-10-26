@@ -96,8 +96,8 @@ end
 -- (ring.luau), so there the names kept and the database's are what the avenger_control developer
 -- asked for (his report of 2026-10-26: the Oscillator stepper said only "OSC 1", "OSC 2" where the
 -- page shows the names). Said as it is, with no "from the database": the maintainer's decision of
--- 2026-10-26 for these names — that is what the database is there for — in place of the mark of
--- 2026-09-28 (src/presets.luau).
+-- 2026-10-26, first for these names and the same day for everything the database gives — that is
+-- what the database is there for — in place of the mark of 2026-09-28 (src/presets.luau).
 local function oscName(i, ...)
   for k = 1, select("#", ...) do
     local v = select(k, ...)

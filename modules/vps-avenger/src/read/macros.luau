@@ -131,19 +131,19 @@ function Mc.count(byName, v)
     v.macroCount and (v.macroCount .. " tab" .. (v.macroCount == 1 and "" or "s")) or "no count")
 end
 
--- The shown tab's five names into `v.macroLabels` (nil where not read) and `v.macroSnapped` (true
--- where the database's spelling replaced a near one). `vocab`: the database's five names of the
--- shown tab, or nil. `counted`: Mc.count's words, said in the same line.
+-- The shown tab's five names into `v.macroLabels` (nil where not read), each in the database's
+-- spelling where the read was near it — said in the log and nowhere else (src/presets.luau, WHAT IT
+-- MAY DO). `vocab`: the database's five names of the shown tab, or nil. `counted`: Mc.count's
+-- words, said in the same line.
 function Mc.labels(byName, v, vocab, counted, log)
   local said = { counted }
-  v.macroLabels, v.macroSnapped = {}, {}
+  v.macroLabels = {}
   for i, f in ipairs(M.FIELD_ORDER) do
     local r = byName["macro " .. f]
     local t = r and r.status == "text" and R.tidy(r.text) or ""
     if t ~= "" then
       local name, snapped, ratio = R.snap(t, vocab and vocab[i])
       v.macroLabels[i] = name
-      v.macroSnapped[i] = snapped
       said[#said + 1] = string.format("%s '%s'%s", f, t, snapped
         and string.format(" -> '%s', the database's (%.2f alike)", name, ratio) or "")
     else

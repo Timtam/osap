@@ -6,8 +6,9 @@
 //     had WebKit's message handler and its Windows build an HTTP post; the page starts empty and
 //     asks for its state ("ready"), and sends no action that is not on ACTIONS;
 //   * a value that was not read is said "not read", where the tool showed a value it assumed —
-//     a state comes whole, so a value missing from it was not read — and what the preset
-//     database gave rather than the screen is said with ", from the database";
+//     a state comes whole, so a value missing from it was not read — while what the preset
+//     database gave is shown as it is, as the tool showed it (the maintainer's decision of
+//     2026-10-26), and only a count of the OSC tabs the user confirmed says so;
 //   * the Windows-only block made the page's Settings section, on both systems: Correct open
 //     Expansion and the module's settings, shown as the module posts them (applySettings);
 //   * left out: the OSC rename dialog no control opened, and the focus retries on timers;
@@ -16,9 +17,7 @@
 //   * Back and Next say they are unavailable where VPS Avenger steps no preset (on Init Preset);
 //   * DRUM SQ claims nothing at a click: no pattern SELECTED and no LENGTH before Avenger is read,
 //     and its PASTE items offered from the module's word that a COPY was taken in Avenger's menu;
-//   * the expansions listed are the database's roster, said so, one it has no presets for marked,
-//     and the open expansion's heading says ", from the database" where only its place in the
-//     database's list named it.
+//   * the expansions listed are the database's roster, one it has no presets for marked so.
 // Text goes into the page as text (textContent), never as HTML.
 (() => {
   'use strict';
@@ -92,15 +91,8 @@
   };
   const ALL_PRESET_CATEGORY = '__all__';
   let currentExpansions = [];
-  // The list is a roster of the preset database's.
-  let currentExpansionsFromDatabase = false;
   // A roster's expansion the database has no presets for (the tool keeps it in its list).
   let currentExpansionsWithoutData = [];
-  // The port's: the open expansion named by its place in the database's list, its name not read
-  // in Avenger's header.
-  let currentSelectedFromDatabase = false;
-  // An open expansion's categories and presets are the preset database's lists.
-  let currentExpansionListsFromDatabase = false;
   let currentExpansionView = null;
   let currentZoom = null;
   let currentExpansionOpen = null;
@@ -183,8 +175,7 @@
       .filter((item) => !q || item.name.toLowerCase().includes(q));
     results.setAttribute(
       'aria-label',
-      `Expansions, ${shown.length} result${shown.length === 1 ? '' : 's'}` +
-        (currentExpansionsFromDatabase ? ', from the database' : '')
+      `Expansions, ${shown.length} result${shown.length === 1 ? '' : 's'}`
     );
     shown.forEach((item) => {
       const btn = document.createElement('button');
@@ -300,9 +291,9 @@
       // or parens in the name itself are rendered literally — no HTML
       // interpretation, no markup injection.
       const exp = (s.expansion || '').trim();
-      // The expansion is the preset database's, never read off Avenger: the module says so.
-      const mark = s.expansion_from_database ? ', from the database' : '';
-      const text = exp ? (s.preset + ', (XP: ' + exp + mark + ')') : s.preset;
+      // The expansion is the preset database's, never read off Avenger, and shown as the tool
+      // showed it: telling it is what the database is there for.
+      const text = exp ? (s.preset + ', (XP: ' + exp + ')') : s.preset;
       if (text !== $('preset-name').textContent) {
         $('preset-name').textContent = text;
       }
@@ -318,7 +309,6 @@
     // The state comes whole: a list or a value missing from it was not read, and nothing of an
     // earlier state is kept in its place.
     currentExpansions = Array.isArray(s.expansions) ? s.expansions : [];
-    currentExpansionsFromDatabase = Array.isArray(s.expansions) && !!s.expansions_from_database;
     currentExpansionsWithoutData = Array.isArray(s.expansions_without_data)
       ? s.expansions_without_data.map((v) => v === true)
       : [];
@@ -356,14 +346,12 @@
         if (presetSearch) presetSearch.value = '';
         currentSelectedExpansion = selected;
       }
-      currentSelectedFromDatabase = !!selected && s.selected_expansion_from_database === true;
+      // The name posted, as it is also where only its place in the database's list named it (the
+      // maintainer's decision of 2026-10-26): the module's answer to Open said the header did not
+      // read it.
       const name = $('open-expansion-name');
       if (name) {
-        name.textContent = (
-          selected
-            ? (currentSelectedFromDatabase ? `${selected}, from the database` : selected)
-            : (currentExpansionOpen ? unknownOpenExpansionText : '')
-        );
+        name.textContent = selected || (currentExpansionOpen ? unknownOpenExpansionText : '');
       }
     }
     if (s.reset_browser_searches) {
@@ -378,7 +366,6 @@
     }
     {
       currentExpansionCategories = Array.isArray(s.expansion_categories) ? s.expansion_categories : [];
-      currentExpansionListsFromDatabase = Array.isArray(s.expansion_categories) && !!s.expansion_lists_from_database;
       if (
         currentExpansionCategories.length &&
         selectedPresetCategory !== ALL_PRESET_CATEGORY &&
@@ -422,9 +409,6 @@
       oscPanel = {
         count: oscCount,
         names: Array.isArray(s.osc_panel.names) ? s.osc_panel.names : [],
-        names_from_database: Array.isArray(s.osc_panel.names_from_database)
-          ? s.osc_panel.names_from_database.map((v) => v === true)
-          : [],
         // Where a count the dots did not give came from: 'confirmed' or 'database'.
         count_from: s.osc_panel.count_from ? String(s.osc_panel.count_from) : null,
         copied: s.osc_panel.copied ? String(s.osc_panel.copied) : '',
@@ -505,9 +489,6 @@
         selected_labels: Array.isArray(s.macro_panel.selected_labels)
           ? s.macro_panel.selected_labels.map(readText)
           : [],
-        labels_from_database: Array.isArray(s.macro_panel.labels_from_database)
-          ? s.macro_panel.labels_from_database.map((v) => v === true)
-          : [],
         button_states: Array.isArray(s.macro_panel.button_states)
           ? s.macro_panel.button_states.map(readFlag)
           : [],
@@ -533,14 +514,14 @@
   }
 
   function renderOpenExpansionDetails() {
-    // By the expansion the module named, not by the heading's text, which may carry a mark.
+    // By the expansion the module named, not by the heading's text, which is a sentence where an
+    // expansion reads open and its name does not.
     const hasKnownExpansion = currentSelectedExpansion !== '';
     const categories = $('open-expansion-categories');
-    const fromDatabase = currentExpansionListsFromDatabase ? ', from the database' : '';
     const caption = $('open-expansion-presets-table') && $('open-expansion-presets-table').caption;
-    if (caption) caption.textContent = `Presets${fromDatabase}`;
+    if (caption) caption.textContent = 'Presets';
     if (categories) {
-      categories.setAttribute('aria-label', `Categories${fromDatabase}`);
+      categories.setAttribute('aria-label', 'Categories');
       categories.hidden = !hasKnownExpansion;
       categories.textContent = '';
       if (hasKnownExpansion) {
@@ -761,23 +742,21 @@
     const count = known ? Math.max(1, Math.min(8, parseInt(oscPanel.count, 10) || 1)) : 0;
     const names = Array.isArray(oscPanel.names) ? oscPanel.names.slice(0, count) : [];
     while (names.length < count) names.push(null);
-    const fromDatabase = Array.isArray(oscPanel.names_from_database) ? oscPanel.names_from_database : [];
     const cols = names.map((name, i) => ({
       type: 'osc',
       index: i + 1,
       label: String(name || `OSC ${i + 1}`),
-      // The tab's own words: a name not read says so, and one the database's spelling replaced
-      // is marked.
-      heading: name == null
-        ? `OSC ${i + 1}, name not read`
-        : `${String(name)}${fromDatabase[i] === true ? ', from the database' : ''}`
+      // The tab's own words — in the database's spelling where the module took it, as it is — and
+      // a name not read says so.
+      heading: name == null ? `OSC ${i + 1}, name not read` : String(name)
     }));
     if (!known) cols.push({ type: 'unread', label: 'OSC tabs, not read' });
-    // A count the dots did not give is said as where it came from, never as read.
+    // A count the dots did not give is a column of its own, never taken for one read: the user's
+    // confirmed one says so, the database's is the count alone.
     if (known && oscPanel.count_from) {
       cols.push({
         type: 'unread',
-        label: `${count} OSC tab${count === 1 ? '' : 's'}, ${oscPanel.count_from === 'confirmed' ? 'as confirmed' : 'from the database'}`
+        label: `${count} OSC tab${count === 1 ? '' : 's'}${oscPanel.count_from === 'confirmed' ? ', as confirmed' : ''}`
       });
     }
     if (known && count < 8) cols.push({ type: 'add', label: 'Add OSC' });
@@ -2696,8 +2675,6 @@
     }
     const idx = Math.max(1, Math.min(4, parseInt(macroPanel.selected_index, 10) || 1));
     const labels = macroTabLabels(idx);
-    // The shown tab's names the database's spelling replaced, marked on their slots.
-    const marked = Array.isArray(macroPanel.labels_from_database) ? macroPanel.labels_from_database : [];
     detail.setAttribute('aria-label', `Macro ${idx}`);
     if (items) {
       items.textContent = '';
@@ -2714,10 +2691,7 @@
           slot.className = 'macro-slot';
           slot.setAttribute('role', 'group');
           slot.setAttribute('tabindex', '0');
-          slot.setAttribute(
-            'aria-label',
-            marked[slotIndex - 1] === true ? `${words.label}, from the database` : words.label
-          );
+          slot.setAttribute('aria-label', words.label);
           const isMacroSlider = slotIndex <= 3;
           const isMacroButton = slotIndex >= 4;
           if (isMacroSlider || isMacroButton) {

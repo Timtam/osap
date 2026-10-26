@@ -228,7 +228,7 @@ fn the_key_away_from_an_identified_avenger_says_why_and_opens_nothing() {
 /// with how many seconds ago they were made once the page has reloaded itself since they were posted
 /// to it — and so does the host's onReady of the reload, since the page's own `ready` may come
 /// first. The expansions come from the preset
-/// database's roster, marked — "Factory Standard" unless the setting says otherwise — and the
+/// database's roster, unmarked — "Factory Standard" unless the setting says otherwise — and the
 /// roster setting's change is posted at once.
 #[test]
 fn ready_gets_one_state_message_from_the_reads_already_made() {
@@ -242,8 +242,8 @@ fn ready_gets_one_state_message_from_the_reads_already_made() {
           "one state, then the settings")
         local st = T.lastPost("state").state
         T.ok(st.preset == nil and st.zoom == nil and st.read_age_seconds == nil, "nothing read before the key")
-        T.ok(table.concat(st.expansions, "|") == "Alpha" and st.expansions_from_database == true,
-          "the database's roster, the tool's default, marked")
+        T.ok(table.concat(st.expansions, "|") == "Alpha" and st.expansions_from_database == nil,
+          "the database's roster, the tool's default, unmarked")
         T.pageReady()
         T.nameIs("LD Lead 1")
         T.openPage()
@@ -512,12 +512,12 @@ fn on_windows_at_150_percent_display_scaling_the_same_picture_reads_the_same() {
 /// DRUMKIT's caption the brighter is SEQUENCE), the central tab, and DRUM SQ on it: PATTERN CHAIN
 /// by its brightness, the patterns that are on by their red, the selected one by its outline. One
 /// macro tab, counted from a caption with no number, is the one shown. And with the preset database
-/// installed: the preset placed in the catalog gives the expansion, marked, and the names its tabs
-/// have there are the vocabulary the names read are checked against — "Laed" is the catalog's
-/// "Lead", "Tane" its "Tone", each marked as the database's — while a name the same as the
-/// catalog's, or Avenger's own caption, is not marked.
+/// installed: the preset placed in the catalog gives the expansion, and the names its tabs have
+/// there are the vocabulary the names read are checked against — "Laed" is the catalog's "Lead",
+/// "Tane" its "Tone" — posted in the catalog's spelling and unmarked, as everything the database
+/// gives since the maintainer's decision of 2026-10-26; the log says which the database replaced.
 #[test]
-fn the_drums_tab_drum_sq_and_the_database_vocabulary_are_read_and_marked() {
+fn the_drums_tab_drum_sq_and_the_database_vocabulary_are_read() {
     run_mac(r##"
         local S = T.S
         T.presets()
@@ -532,12 +532,11 @@ fn the_drums_tab_drum_sq_and_the_database_vocabulary_are_read_and_marked() {
           ["macro btn1"] = "+12", ["macro btn2"] = "MacroBtn 2" })
         T.openPage()
         local st = T.lastPost("state").state
-        T.ok(st.preset == "AR Band Pass Slide" and st.expansion == "Alpha" and st.expansion_from_database == true,
+        T.ok(st.preset == "AR Band Pass Slide" and st.expansion == "Alpha" and st.expansion_from_database == nil,
           "the expansion, the database's: " .. tostring(st.expansion))
         T.ok(st.expansion_view == "List" and st.expansion_open == false, "the view")
         local o = st.osc_panel
-        T.ok(table.concat(o.names, "|") == "Arp|OSC 2|Lead" and o.names_from_database[1] == false
-          and o.names_from_database[2] == false and o.names_from_database[3] == true, table.concat(o.names, "|"))
+        T.ok(table.concat(o.names, "|") == "Arp|OSC 2|Lead" and o.names_from_database == nil, table.concat(o.names, "|"))
         T.ok(o.selected_type == "drums" and o.selected_index == nil and o.selected_label == "Drums", "Drums selected")
         T.ok(o.drum_pattern == true and o.drum_lock == true and o.drum_mode == "sq",
           string.format("the Drums tab: %s %s %s", tostring(o.drum_pattern), tostring(o.drum_lock), tostring(o.drum_mode)))
@@ -550,8 +549,8 @@ fn the_drums_tab_drum_sq_and_the_database_vocabulary_are_read_and_marked() {
         T.ok(o.volume_values == nil, "no oscillator's knobs with Drums selected")
         local m = st.macro_panel
         T.ok(m.count == 1 and m.selected_index == 1, "one macro tab, shown")
-        T.ok(table.concat(m.tabs[1], "|") == "Tone|Macro 2|Drive|+12|MacroBtn 2" and m.labels_from_database[1] == true
-          and m.labels_from_database[3] == false, table.concat(m.tabs[1], "|"))
+        T.ok(table.concat(m.tabs[1], "|") == "Tone|Macro 2|Drive|+12|MacroBtn 2" and m.labels_from_database == nil,
+          table.concat(m.tabs[1], "|"))
         T.ok(m.button_states[1] == false and m.button_states[2] == true, "the buttons")
         T.ok(m.amount_values[1] == 0 and m.amount_values[2] == 50 and m.amount_values[3] == 100,
           string.format("the knobs: %s %s %s", tostring(m.amount_values[1]), tostring(m.amount_values[2]),
@@ -559,6 +558,45 @@ fn the_drums_tab_drum_sq_and_the_database_vocabulary_are_read_and_marked() {
         T.ok(T.count("3 'Laed' -> 'Lead', the database's (0.75 alike)") == 1, T.dump())
         T.ok(T.count("[avenger] [read] drum sq: PATTERN CHAIN mean ") == 1, T.dump())
     "##);
+}
+
+/// The maintainer's decision of 2026-10-26, in place of 2026-09-28's mark: what the preset database
+/// gives is shown on the page as it is. The state carries no key that marks a value as the
+/// database's — the expansion the preset is in, the names its spelling replaced in the OSC tabs and
+/// the macro slots, an open expansion's lists, the roster — and the script says "from the database"
+/// nowhere: the headings, the expansions' list, the open expansion's lists and the macro slots say
+/// their words alone, and a count the dots did not give is the count alone where it is the
+/// database's, "as confirmed" where the user confirmed it.
+#[test]
+fn the_pages_state_and_script_mark_nothing_as_the_databases() {
+    run_mac(r##"
+        local S = T.S
+        T.presets()
+        T.avengerAt80("Init Preset")
+        T.pageReady()
+        T.paintAvenger(98, 84, 1.6, { osc = 3, selected = "osc", index = 1, buttons = { false, true },
+          amounts = { 0, 50, 100 } })
+        T.words({ preset = "AR Band Pass Slide", ["expansion name"] = "Alpha",
+          ["osc 1"] = "Arp", ["osc 2"] = "OSC 2", ["osc 3"] = "Laed", ["macro tabs"] = "Macro",
+          ["macro macro1"] = "Tane", ["macro macro2"] = "Macro 2", ["macro macro3"] = "Drive",
+          ["macro btn1"] = "+12", ["macro btn2"] = "MacroBtn 2" })
+        T.openPage()
+        local st = T.lastPost("state").state
+        T.ok(st.expansion == "Alpha" and table.concat(st.osc_panel.names, "|") == "Arp|OSC 2|Lead"
+          and st.macro_panel.tabs[1][1] == "Tone" and st.expansion_open == true and st.selected_expansion == "Alpha"
+          and #st.expansion_categories > 0 and #st.expansions > 0, "the database's values, posted: " .. T.jsonEncode(st))
+        local json = T.jsonEncode(st)
+        T.ok(string.find(json, "from_database", 1, true) == nil, json)
+        T.ok(T.count("3 'Laed' -> 'Lead', the database's (0.75 alike)") == 1, "the log still says it: " .. T.dump())
+    "##);
+    let js = PANEL_JS.replace("\r\n", "\n");
+    for gone in ["from the database", "from_database", "FromDatabase"] {
+        assert!(!js.contains(gone), "panel.js still marks a value as the database's: {gone}");
+    }
+    assert!(
+        js.contains("label: `${count} OSC tab${count === 1 ? '' : 's'}${oscPanel.count_from === 'confirmed' ? ', as confirmed' : ''}`"),
+        "the count column: the database's alone, a confirmed one so"
+    );
 }
 
 /// What a read could not find is not in the state, or a hole in its list, and the page says each
@@ -640,8 +678,8 @@ fn an_open_expansion_is_read_from_its_header_and_the_grid_from_the_header_and_it
         local st = T.lastPost("state").state
         T.ok(st.expansion_open == true and st.selected_expansion == "Delta" and st.expansion_view == nil
           and st.selected_expansion_from_database == nil, "Delta open, by its header")
-        T.ok(table.concat(st.expansion_categories, "|") == "Leads" and st.expansion_lists_from_database == true,
-          "its lists, the database's")
+        T.ok(table.concat(st.expansion_categories, "|") == "Leads" and st.expansion_lists_from_database == nil,
+          "its lists, the database's, unmarked")
         T.ok(st.loaded_expansion_preset_index == 1 and st.expansion == "Delta", "the preset loaded")
         T.ok(T.count("expansion: the header reads 'Delta' — Delta open (exact)") == 1, T.dump())
         {none_below}
@@ -1798,12 +1836,13 @@ fn the_page_claims_nothing_of_drum_sq_at_a_click_and_reads_the_slot_lists_either
 
 /// The browser's page edits (the plan's slice 9, §7, and the third Mac test of the page,
 /// 2026-10-25): Read Avenger's List is gone — the lists are the preset database's, never read off
-/// the grid (the maintainer's decision) — from the markup, the script and its list of actions; the
-/// state's `selected_expansion_from_database` is read in applyState; the list's label says it is the
-/// database's; a roster's expansion without data is marked in its button's aria-label, never in its
-/// text, so the search still filters by the name; the open expansion's heading carries the mark,
-/// and whether an expansion is known is told by the name the module posted, not by the heading.
-/// Confirm Expansion View's help says it confirms the grid with no expansion open.
+/// the grid (the maintainer's decision) — from the markup, the script and its list of actions; a
+/// roster's expansion without data is marked in its button's aria-label, never in its text, so the
+/// search still filters by the name; the list's label and the open expansion's heading say the
+/// list and the name alone — no "from the database" since the maintainer's decision of 2026-10-26,
+/// also where only its place in the database's list named the expansion open — and whether an
+/// expansion is known is told by the name the module posted, not by the heading. Confirm Expansion
+/// View's help says it confirms the grid with no expansion open.
 #[test]
 fn the_browsers_page_edits_read_the_new_keys_and_mark_in_aria_labels_only() {
     let html = INDEX_HTML.replace("\r\n", "\n");
@@ -1811,23 +1850,25 @@ fn the_browsers_page_edits_read_the_new_keys_and_mark_in_aria_labels_only() {
     for gone in ["read-expansion-list-button", "read_expansion_list", "Read Avenger's List"] {
         assert!(!html.contains(gone) && !js.contains(gone), "{gone} is still on the page");
     }
-    for gone in ["expansions_from_avenger", "expansions_marks", "currentExpansionsFromAvenger", "as VPS Avenger lists them"] {
+    for gone in [
+        "expansions_from_avenger", "expansions_marks", "currentExpansionsFromAvenger", "as VPS Avenger lists them",
+        "selected_expansion_from_database", "currentSelectedFromDatabase", "currentExpansionsFromDatabase",
+    ] {
         assert!(!js.contains(gone), "panel.js still has {gone}");
     }
-    let apply = js.find("function applyState(s) {").expect("panel.js has applyState");
-    let apply_end = apply + js[apply..].find("\n  }\n").expect("applyState ends");
-    let i = js.find("s.selected_expansion_from_database").expect("panel.js reads selected_expansion_from_database");
-    assert!(i > apply && i < apply_end, "selected_expansion_from_database is read outside applyState");
     let search = js.find("function renderExpansionSearch() {").expect("panel.js has renderExpansionSearch");
     let body = &js[search..search + js[search..].find("\n  }\n").unwrap()];
     assert!(
         body.contains("btn.setAttribute('aria-label', `${item.name}, no presets in the database`);")
             && body.contains("btn.textContent = item.name;")
-            && body.contains("(currentExpansionsFromDatabase ? ', from the database' : '')"),
-        "the mark in the aria-label, the text the name, the list the database's: {body}"
+            && body.contains("`Expansions, ${shown.length} result${shown.length === 1 ? '' : 's'}`\n    );"),
+        "the mark in the aria-label, the text the name, the list's label its count alone: {body}"
     );
     assert!(!body.contains("textContent = `${item.name}, "), "the mark in the button's text");
-    assert!(js.contains("(currentSelectedFromDatabase ? `${selected}, from the database` : selected)"), "the heading's mark");
+    assert!(
+        js.contains("name.textContent = selected || (currentExpansionOpen ? unknownOpenExpansionText : '');"),
+        "the heading is the name posted"
+    );
     assert!(js.contains("const hasKnownExpansion = currentSelectedExpansion !== '';"), "known by the name posted");
     let at = html.find("id=\"settings-expansion-view-trigger\"").expect("Confirm Expansion View");
     let tag = &html[at..at + html[at..].find('>').unwrap()];

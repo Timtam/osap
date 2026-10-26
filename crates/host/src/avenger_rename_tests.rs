@@ -166,7 +166,7 @@ fn rename_preset_with_escape_or_the_same_name_keeps_the_database_place() {
               T.ok(st.preset == back and st.expansion == nil, case .. ": " .. tostring(st.preset) .. " " .. tostring(st.expansion))
               T.ok(T.count("the user's own") == 1, T.dump())
             else
-              T.ok(st.preset == back and st.expansion == "Alpha" and st.expansion_from_database == true,
+              T.ok(st.preset == back and st.expansion == "Alpha",
                 case .. ": " .. tostring(st.preset) .. " " .. tostring(st.expansion))
               T.ok(T.count("the name before ('" .. shown .. "') kept") == 1, T.dump())
             end
@@ -650,7 +650,7 @@ fn browse_presets_says_the_tools_sentence_holds_only_return_clicks_nothing_and_r
         T.runDue()
         T.nameReads("AR Deep Arp", 1200)
         local st = T.lastPost("state").state
-        T.ok(st.preset == "AR Deep Arp" and st.expansion == "Alpha" and st.expansion_from_database == true,
+        T.ok(st.preset == "AR Deep Arp" and st.expansion == "Alpha",
           tostring(st.preset) .. " " .. tostring(st.expansion))
         T.ok(T.lastPost().kind == "focus" and T.lastPost().id == "browse-expansion-presets-button", tostring(T.lastPost().id))
         T.ok(T.count("[avenger] [browse] the name at the start 'LD Palm´s Lead 1', after Return 'AR Deep Arp' (read ") == 1,

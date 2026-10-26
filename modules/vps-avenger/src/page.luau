@@ -14,7 +14,7 @@
 --   the state     only what was read (state.luau): the preset's name, the zoom, the browser, the
 --                 oscillator strip and the selected oscillator's knobs, the central tab and DRUM
 --                 SQ with its length, the drumkit table, the sample editor's tab, view and switch,
---                 the macros; what the preset database gives is marked so; everything else "not
+--                 the macros; what the preset database gives, shown as it is; everything else "not
 --                 read"; ◀ and ▶ unavailable where the preset read is Init Preset; and PASTE of
 --                 DRUM SQ's pattern menu offered once a COPY of this session was taken
 --   the actions   the header's, the oscillator strip's, the macros', the Drums tab's, the sample
@@ -27,10 +27,10 @@
 --                 Category is the database's, with no trip, and Correct open Expansion a trip with
 --                 no click; a name the page sends that is none of these is answered "<label> is not
 --                 available in this module yet"
---   the list      the expansions the page lists: the preset database's roster, marked as the
---                 database's (state.luau, S.expansions); an expansion opened from the page is the
---                 one at its place in the list last posted, which is where it is clicked in
---                 Avenger's grid (src/actions/browser.luau, B.byPlace)
+--   the list      the expansions the page lists: the preset database's roster (state.luau,
+--                 S.expansions); an expansion opened from the page is the one at its place in
+--                 the list last posted, which is where it is clicked in Avenger's grid
+--                 (src/actions/browser.luau, B.byPlace)
 --   the watcher   while the page is hidden, DRUM SQ's selected pattern said as AUTO FOLLOW moves it
 --                 (watch.luau), paced by the `drumSqCadence` setting
 --   the settings  six (P.SETTINGS), which the module's settings dialog shows and the page's own

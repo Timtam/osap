@@ -79,8 +79,9 @@ end
 -- `place` (DB.place's) places by its words as they stand — not by similarity, and not after Load
 -- or Save as, where the name may be the user's own file's — as the project's tool prefers its
 -- database's count (its actions.py, _refresh_osc_panel_from_screen). The count and where it came
--- from (Open.FROM's key), or nil. Each is marked as such where it is shown (state.luau,
--- `count_from`), never as read.
+-- from (Open.FROM's key, its words for the log), or nil. Never shown as read: the page says a
+-- confirmed one so, and the database's as the count alone (state.luau, `count_from`; the
+-- maintainer's decision of 2026-10-26, src/presets.luau).
 Open.FROM = { confirmed = "as confirmed for this preset", database = "by the preset database" }
 
 -- Whether `place` (DB.place's) is one the database's tabs may be taken from: placed by its words as
@@ -99,16 +100,15 @@ end
 
 -- The tabs' names `known` (state.luau's values) keeps from an earlier read, where they were read
 -- under the preset's name `preset` — a name, never nil — over `count` tabs, and since the preset
--- last may have changed (`oscNamesOf`, kept with them; S.changes): the names and which the
--- database's spelling replaced, else nil. The values keep a name across ◀ and ▶, Load and Undo,
--- which replace only the preset's (S.set); a name read under another preset's name, or before a tab
--- was added or deleted, is another tab's, and one read before ▶ and ◀ back to the same name may be
--- a name the file does not have.
+-- last may have changed (`oscNamesOf`, kept with them; S.changes): the names, else nil. The values
+-- keep a name across ◀ and ▶, Load and Undo, which replace only the preset's (S.set); a name read
+-- under another preset's name, or before a tab was added or deleted, is another tab's, and one read
+-- before ▶ and ◀ back to the same name may be a name the file does not have.
 function Open.keptNames(known, preset, count)
   local of = known and known.oscNamesOf
   if not (of and preset ~= nil and of.preset == preset and of.count == count and of.at == S.changes()
     and known.oscNames) then return nil end
-  return known.oscNames, known.oscSnapped
+  return known.oscNames
 end
 
 -- The words for the `count` OSC tabs of read `v` (`v.oscWords`), which the module's own sentences
@@ -219,12 +219,13 @@ local function pictures(pl, snap, marks, zoom)
   end
 end
 
--- The OSC tabs' names into `v.oscNames` and `v.oscSnapped`, from `texts` (tab -> text read, nil
--- for none), each cleaned the project's way and checked against the database's names of the
--- preset's tabs (`vocab`, or nil); and in `v.oscNamesOf` what they were read under: the preset's
--- name `preset` (nil: not known), the count and S.changes() (Open.keptNames).
+-- The OSC tabs' names into `v.oscNames`, from `texts` (tab -> text read, nil for none), each
+-- cleaned the project's way and checked against the database's names of the preset's tabs
+-- (`vocab`, or nil) — in the database's spelling where the read was near it, said in the log and
+-- nowhere else (src/presets.luau, WHAT IT MAY DO); and in `v.oscNamesOf` what they were read under:
+-- the preset's name `preset` (nil: not known), the count and S.changes() (Open.keptNames).
 local function oscNames(texts, count, vocab, v, preset)
-  v.oscNames, v.oscSnapped = {}, {}
+  v.oscNames = {}
   v.oscNamesOf = { preset = preset, count = count, at = S.changes() }
   local words = {}
   for i = 1, count do
@@ -232,7 +233,7 @@ local function oscNames(texts, count, vocab, v, preset)
     if raw and R.tidy(raw) ~= "" then
       local clean = R.cleanOscName(raw, i)
       local name, snapped, ratio = R.snap(clean, vocab and vocab[i])
-      v.oscNames[i], v.oscSnapped[i] = name, snapped
+      v.oscNames[i] = name
       words[#words + 1] = string.format("%d '%s'%s%s", i, R.forLog(raw), clean ~= R.tidy(raw) and (" -> '" .. clean .. "'") or "",
         snapped and string.format(" -> '%s', the database's (%.2f alike)", name, ratio) or "")
     else
@@ -426,8 +427,8 @@ local function decide(ctx)
     elseif seen.name and seen.name ~= ctx.opts.expected then
       S.forgetBrowserAt(ctx.window, "the page key reads " .. seen.name)
     end
-    -- Named by its place in the database's list where the header did not read it (Br.state).
-    v.selectedFromDatabase = seen.byPlace or nil
+    -- The name read in the header, or the one at its place in the database's list where the header
+    -- did not read it (Br.state): its lists either way, and posted as any name is.
     if seen.name then
       local ok, lists = pcall(DB.lists, seen.name)
       if ok and lists then
@@ -488,12 +489,11 @@ end
 
 -- Reads Avenger for the page, in a handler where a read may wait: overlay `o` is the header
 -- overlay, active on an identified Avenger. `opts`: { zoom = the zoom read, or nil; mark = o:here()
--- at the key; expected = the expansion last read open in this window, or nil; expectedFromDatabase =
--- whether only the database named it; window = the id of the window the values are kept by (the
--- page's; Open.window() where not given); preset = the name last read, which the OSC tabs' names
--- are kept as read under (`oscNamesOf`) where the picture's own name reads nothing, or nil }.
--- Answers the values read — nil where a
--- read failed — or nil, why nothing was read for the log, and the sentence to say (Open.NO_FACTOR,
+-- at the key; expected = the expansion last read open in this window, or nil; window = the id of
+-- the window the values are kept by (the page's; Open.window() where not given); preset = the name
+-- last read, which the OSC tabs' names are kept as read under (`oscNamesOf`) where the picture's
+-- own name reads nothing, or nil }. Answers the values read — nil where a read failed — or nil,
+-- why nothing was read for the log, and the sentence to say (Open.NO_FACTOR,
 -- NO_PICTURE, FAILED; nil when the user moved on). `values.zoom` is always there, and `values.cut`
 -- is the screen's size when the picture was cut at its edge.
 --
@@ -909,7 +909,7 @@ function Open.part(snap, name, opts)
   end
   if part.strip then
     if opts.text and count then
-      read({ "oscNames", "oscSnapped", "oscNamesOf" })
+      read({ "oscNames", "oscNamesOf" })
       local texts = {}
       for i = 1, count do
         local r = byName["osc " .. i]
@@ -954,7 +954,7 @@ function Open.part(snap, name, opts)
     read({ "macroSelected", "macroButtons", "macroAmounts" })
     local counted = nil
     if opts.text then
-      read({ "macroCount", "macroLabels", "macroSnapped" })
+      read({ "macroCount", "macroLabels" })
       counted = Macros.count(byName, v)
     else
       v.macroCount = opts.macroCount

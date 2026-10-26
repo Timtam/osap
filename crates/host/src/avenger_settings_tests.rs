@@ -346,7 +346,7 @@ fn the_roster_from_the_page_posts_its_list() {
         T.agree("Complete")
         T.set("roster", "Factory Standard")
         T.ok(S.settings.roster == "Factory Standard", "stored")
-        T.ok(T.lastPost("state").state.expansions_from_database == true and T.lastPost("error").text == "",
+        T.ok(type(T.lastPost("state").state.expansions) == "table" and T.lastPost("error").text == "",
           T.lastPost("error").text)
         T.agree("Factory Standard")
         local sets = S.settingSets

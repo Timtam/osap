@@ -779,9 +779,26 @@ oscillator's knobs. Two changes asked for, built in vps-avenger 0.14.0, and two 
       and `avenger_amount_tests.rs`
       (`the_sentence_names_the_tab_by_the_database_and_never_by_the_preset_before`). **The Mac
       tester confirms:** on a preset of the database's, the stepper's and Mute's words are the
-      page's tab names, and after a tab renamed from the page the stepper says its new name. Open:
-      the page's tab heading still marks a name the database's spelling replaced (", from the
-      database", ui/panel.js `oscColumns`) — whether the maintainer's rule takes that mark away too.
+      page's tab names, and after a tab renamed from the page the stepper says its new name.
+      **The other marks (VPS Avenger 0.15.0, 2026-10-26).** Asked whether the rule takes the page's
+      marks away too, the maintainer the same day: "ja, mach die auch weg" — what the preset
+      database gives is said and shown plainly everywhere, in place of the rule of 2026-09-28.
+      Taken off: on the page the OSC tabs' headings, the count's column ("N OSC tabs" alone; "as
+      confirmed" stays, the user's word, not the database's), the macro slots, the expansions'
+      list, the open expansion's lists and heading and the preset heading's expansion, with the
+      state's keys that carried them (`names_from_database`, `labels_from_database`,
+      `expansion_from_database`, `expansion_lists_from_database`, `expansions_from_database`,
+      `selected_expansion_from_database`) and the values only they read (`oscSnapped`,
+      `macroSnapped`, `selectedFromDatabase`); in Preset info the expansion and category, the
+      oscillators, the macros and the expansions a name is in; Go to Category's "in another
+      expansion". Kept, because there the mark tells the screen's read from the database's guess:
+      a read taken for a catalog name by similarity, the neighbour ◀ and ▶ lead to where nothing
+      was read after the click or the read disagrees (both names said), and the last position's
+      name where Preset info reads nothing (src/presets.luau, WHAT IT MAY DO). The log keeps its
+      words. Tests: `overlay_avenger_tests.rs`
+      (`the_databases_values_are_said_plainly_and_only_its_guesses_are_marked`) and
+      `avenger_page_tests.rs` (`the_pages_state_and_script_mark_nothing_as_the_databases`), and
+      the older scenarios changed with them.
 - [ ] **F3. A knob and its reset as one element (his idea, for later).** "Wir könnten später mal
       überlegen, ob wir die Regler und die Buttons zu einem Element mit unterschiedlicher
       Bedienungsart zusammenfügen … würde ich aber später machen, wenn alles andere funktioniert":
@@ -2782,6 +2799,14 @@ See [docs/macos-port.md](docs/macos-port.md) for the decisions and
       settings checkboxes and those of a module's Settings… still read their labels without
       `set_name`, and the Installed tree reads, ticks and refuses Space as before (wxWidgets 3.3.3
       and 3.3.4 changed its colours and its label-edit focus, src/msw/treectrl.cpp).
+      **Heard on Windows with NVDA** (the maintainer, 2026-10-26, build 6f9cd48), all fine: with a
+      review open the modules' hotkeys work, and the quit key ends the review and then the
+      application; the "Installed" and "Updated" messages; the Application and module settings
+      checkboxes read their labels without `set_name`; the Installed tree reads, ticks and refuses
+      Space. His log has a review open 29 s with 1,845 pump iterations inside it, and no
+      `Re-entrant invocation` line. **Left:** a second start while a message is open, a module's
+      page opened for the first time on 0.9.23 (the log then checked for that line after its
+      build), and the Mac half in the next Mac session.
 - [ ] **macOS: the module manager's fields named by the text before them** (wxWidgets 3.3.4, read
       in the sources 2026-10-25, not heard). A native control with no label of its own, made right
       after a StaticText, gets that text as its accessibility title (src/osx/window_osx.cpp,
@@ -8616,7 +8641,8 @@ tester's stage-1 instructions are a text of their own, not in the repository.
          the read failed or disagreed; the lines `[avenger] 'Next preset': the database's
          neighbour: '…'` and `read '…', the database's neighbour exactly` (or `… not the
          database's neighbour`) show whether Avenger steps through the catalog's order. Then
-         **Preset info**: the expansion, category, oscillators and macros, each marked.
+         **Preset info**: the expansion, category, oscillators and macros, said plainly (since
+         VPS Avenger 0.15.0; each was marked before).
       4. **Zoom**, Left one step at a time to 50 %, then Right back: "Zoom, 75 percent, slider" and
          so on, and `[avenger] 'Zoom': 80 % to 75 %, entry 6 … at y … by the list's height, … by
          the table`; the header picture at each zoom; `VPS-Avenger-Zoom-menu-item.png` (the first
@@ -8780,6 +8806,11 @@ tester's stage-1 instructions are a text of their own, not in the repository.
       an allowlist: every other one is still dropped unread, counted and never named. The converter
       has 9 tests now; one browser scenario runs on the shipped data (Quantum State found on the
       grid by its name, opened and named by its presets, a preset of it placed by Preset info).
+      **2026-10-26 (VPS Avenger 0.15.0):** the mark is off what the database gives — Preset info's
+      expansion, category, oscillators and macros, and the page's values — and stays only after a
+      name the database put where the screen's read is not (a read by similarity, the neighbour
+      where the read failed or disagrees, the last position's name where Preset info reads
+      nothing): the maintainer's decision (the feedback of 2026-10-26, F2, above).
 - [x] **The database's licence** (2026-10-02). There is none to wait for: the avenger_control tool
       has not been published and has no licence, and its developer gave the database without
       restriction, to be integrated. The data module is GPL-3.0-or-later like the rest
@@ -8851,10 +8882,11 @@ tester's stage-1 instructions are a text of their own, not in the repository.
       `onGiveUp` — which the database's rule already does for its own part (`decided`).
       Done: it returns silently (vps-avenger main.luau:479), triage 2026-10-24.
 - [ ] **How long Preset info is**: about 220 characters on average over the catalog, up to 440,
-      "from the database" three or four times. Tabs and macros nobody named are said with
-      Avenger's own captions ("OSC 3", "MacroBtn 1"), as the tool's Info shows them; saying
-      "buttons unnamed" instead, or one marker for the whole answer, is a choice for after the
-      tester has heard it (the reader's `default` flag has what it needs).
+      measured while "from the database" was said three or four times in it; since VPS Avenger
+      0.15.0 it is said only after a name the database guessed, which takes 57 characters off an
+      answer about a name read. Tabs and macros nobody named are said with Avenger's own captions
+      ("OSC 3", "MacroBtn 1"), as the tool's Info shows them; saying "buttons unnamed" instead is a
+      choice for after the tester has heard it (the reader's `default` flag has what it needs).
 - [x] **What else the catalog gives, later**: the oscillator and macro names as the vocabulary a
       stage-2 read of the tabs is checked against (five or eight words per preset); stage 4's
       lists of categories and presets, and free-text search over all 17,571 names.
@@ -9593,10 +9625,11 @@ Built and tested against the scripted host only (`overlay_avenger_tests.rs`,
       search; a place of Avenger's list read as two names as often, or two places read as one name,
       keeps nothing (the list read again); a grid's rows are told apart by half its pitch (D14);
       without the preset database an opened expansion is not named (nothing scores it); the open
-      expansion's heading is marked where only the database named it (Q4); the lists in the ring
-      stay stage 4's. **Obsolete with the third Mac test (2026-10-25)** but the regions, the view
-      list's, the star column and the lists in the ring: nothing below the header is read as text,
-      no list is moved by the wheel, and Avenger's own list is gone (T3-3).
+      expansion's heading was marked where only the database named it (Q4; shown plainly since VPS
+      Avenger 0.15.0, 2026-10-26, F2); the lists in the ring stay stage 4's. **Obsolete with the
+      third Mac test (2026-10-25)** but the regions, the view list's, the star column and the lists
+      in the ring: nothing below the header is read as text, no list is moved by the wheel, and
+      Avenger's own list is gone (T3-3).
 - [x] **The page's Settings section and the port's close** (the plan's slice 10; module 0.9.0 on the
       runtime 0.10.0, built 2026-10-18, not run live). The tool's Windows-only Settings block made
       the page's section on both systems, after the macros: Correct open Expansion, Expansions List,
