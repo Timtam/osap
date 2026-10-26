@@ -113,12 +113,15 @@ local function lastRead()
   return S.values(w and w.id) or {}
 end
 
--- The selected OSC tab's name as last read, or the tool's "OSC <i>", for the sentence (#7, #8).
-local function oscName(vb, known)
+-- The selected OSC tab's name for the sentence (#7, #8), as the ring's Oscillator stepper says it
+-- (Osc.oscName), from the strip read before the press `vb`: its words for the tab — a name the
+-- window keeps from a read under the same preset's name and count, else the preset database's, as
+-- the tool's panel names its tabs by its database — else the tool's "OSC <i>". Not from the values
+-- last read (`known`), which keep a name across ◀ and ▶ (state.luau).
+local function oscName(vb)
   local i = vb and vb.selectedIndex
-  local name = i and known and known.oscNames and known.oscNames[i]
-  if name and name ~= "" then return name end
-  return "OSC " .. tostring(i or 1)
+  if not i then return "OSC 1" end
+  return Osc.oscName(i, vb)
 end
 
 -- ── The specs ────────────────────────────────────────────────────────────────
@@ -202,7 +205,7 @@ function Am.osc(args, label, known)
     label = label, name = key, at = at, button = OSC.RIGHT_BUTTON[key] and "right" or nil, axis = "y",
     lo = at[2] - OSC.LIMIT, hi = at[2] + OSC.LIMIT, strip = true, knob = key, box = box,
     sentence = function(vb)
-      return "Please press Page Up or Down to set the " .. spoken .. " of " .. oscName(vb, known)
+      return "Please press Page Up or Down to set the " .. spoken .. " of " .. oscName(vb)
         .. ". To Confirm, press Return."
     end,
     focus = function() return "osc-" .. (string.gsub(key, "_", "-")) end,
@@ -237,7 +240,7 @@ function Am.filter(args, label, known)
     band = FILTER_BAND,
     sentence = function(vb)
       return "Please press Page Up to move " .. band .. " left, or Page Down to move " .. band .. " right for "
-        .. oscName(vb, known) .. ". To Confirm, press Return."
+        .. oscName(vb) .. ". To Confirm, press Return."
     end,
     focus = function() return "osc-" .. (string.gsub(key, "_", "-")) end,
     -- The strip as read before the press: the page shows no value of the filter's.

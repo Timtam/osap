@@ -725,6 +725,72 @@ and to build it as soon as the usage allows.
       does not follow: an error stored in a table's field or an upvalue and handed on from another
       function, and one passed through a helper defined in another function.
 
+## The avenger_control developer's feedback on VPS Avenger 0.13.0 (2026-10-26)
+
+His report of the morning, on main d2ef50e (VPS Avenger 0.13.0), passed on by the maintainer:
+opening an expansion and loading a preset work now, and so do the reset buttons of the
+oscillator's knobs. Two changes asked for, built in vps-avenger 0.14.0, and two things for later:
+
+- [x] **F1. Select is a preview.** On the page's preset table the name is a single click
+      (`select_expansion_preset`) and the Load key a double-click (`load_expansion_preset`). The
+      single click lets the preset be heard and loads none — the header's name stays — so the
+      "unchanged, <name>" the page said after it told nothing: "Das ist auch nicht nötig. Das
+      kannst du rausnehmen." **Built.** Select is the tool's `action_select_expansion_preset`
+      (src/actions/browser.luau, `B.preset`): the category's and the scrollbar's clicks as before,
+      the row's click, a change wait on the presets' list from the picture before it (Avenger draws
+      the row selected; at its bound — the row selected already — it goes on all the same), the
+      stars with FAV on, and the strip and the macros read again with their text (the tool's
+      `_refresh_osc_panel_from_screen`). No name is read before or after it, none watched, no
+      "unchanged" and no error from the name, and nothing is forgotten: not the preset read, not
+      the database's position, not where the lists stand. Load is as it was. This answers T3-4's
+      D16 (below). Tests: `avenger_browser_tests.rs`
+      (`a_preset_selected_is_a_preview_with_no_name_watched_and_nothing_forgotten`, and Load in
+      `a_preset_is_loaded_at_its_place_and_confirmed_by_its_name`).
+- [x] **F2. The ring's Oscillator stepper by the tabs' names.** The page names each OSC tab as his
+      panel does, by the database's names for the preset; the ring's stepper — "der neue Bereich,
+      wo man die einzelnen Oszillatoren mit dem Slider mit Pfeil rechts und links auswählt"; the
+      page has no such slider — said only "OSC 1", "OSC 2". **Built.** `Osc.oscName`
+      (src/actions/osc.luau) says a tab by a read's words for it (`oscWords`, read/open.luau's
+      `wordsFor`): the name read off the screen, else the one the page last read under the same
+      preset's name, over the same count and since the preset last may have changed
+      (`Open.keptNames`, `S.changes`: ▶ and ◀ back to the same name load it again from its file),
+      else the database's for the preset read — only where it is placed by its words, not after
+      Load or Save as, where the strip shows as many tabs as the database has (a tab added or
+      deleted since would shift them), and where this session edited none of its tabs (a rename,
+      Paste, Initialize or Delete: `S.tabsEdited`, until a name read there differs) — else "OSC i".
+      Said plainly: the maintainer, the same day, "nimm den 'from the database' hinweis weg, das
+      ist genau der grund, warum es die datenbank überhaupt gibt" — for these names in place of the
+      mark of 2026-09-28 (src/presets.luau). The same words in Mute and Solo, their answers and a
+      "silenced by …'s Solo", the answer of a tab chosen, a Copy's name and the knobs' sentences
+      (src/amount.luau), each from the reads of that moment, never from what the page last read,
+      which keeps a name across a step; the page's `solo_by` keeps "OSC i", as the page words it
+      by its own tabs. No text is read on a step and nothing more is looked up: the strip's read
+      places the preset anyway. While ▶'s watch is out no name is known (main.luau's `lastName`),
+      and the ring reads its strip again, once, when the name has settled. The review of
+      2026-10-26 found the first build saying the database's names where the page shows others,
+      after the module's own tab edits, and the preset before's after ▶ and in a knob's sentence;
+      all four fixed. Tests: `avenger_osc_macros_tests.rs`
+      (`the_rings_oscillator_stepper_mute_and_solo_say_a_tab_by_its_name`,
+      `the_rings_oscillator_stepper_says_osc_i_where_the_database_names_no_tab`,
+      `the_pages_answers_say_a_tab_as_shown_and_an_edit_takes_the_databases_names_away`,
+      `the_rings_tab_names_wait_for_the_name_a_step_settles_on_and_take_none_after_load`),
+      `avenger_rename_tests.rs`
+      (`the_rings_stepper_says_a_tab_as_the_page_read_it_and_none_of_the_databases_after_a_rename`)
+      and `avenger_amount_tests.rs`
+      (`the_sentence_names_the_tab_by_the_database_and_never_by_the_preset_before`). **The Mac
+      tester confirms:** on a preset of the database's, the stepper's and Mute's words are the
+      page's tab names, and after a tab renamed from the page the stepper says its new name. Open:
+      the page's tab heading still marks a name the database's spelling replaced (", from the
+      database", ui/panel.js `oscColumns`) — whether the maintainer's rule takes that mark away too.
+- [ ] **F3. A knob and its reset as one element (his idea, for later).** "Wir könnten später mal
+      überlegen, ob wir die Regler und die Buttons zu einem Element mit unterschiedlicher
+      Bedienungsart zusammenfügen … würde ich aber später machen, wenn alles andere funktioniert":
+      each knob of the ring's and the page's and its Reset button, two controls now, as one element
+      with two ways to work it. Not before the rest works; to be talked over with him then.
+- [ ] **F4. His report on the scrollbars.** Awaited the same afternoon: whether and how the
+      scrollbars work, in the expansions' grid, the categories and the presets (T3-4's scrollbar
+      points and measured pages, below).
+
 ## The third Mac test of the Avenger page (2026-10-25)
 
 The third Mac test of the Avenger page (build 0f0b19b, Logic, VPS Avenger at 80 % on one 1920x1080
@@ -789,7 +855,8 @@ double-click and O.doubleClick on it (the overlay runtime 0.15.0), the 1,034 ms 
       row and its scrollbar's ends (`Pg.category`), a preset by the tool's measured pages for its
       category's size and its scrollbar clicks (`Pg.presetPlace`, `Pg.presetScroll`), its category
       clicked first where this session's clicks did not leave it shown; Select and Load confirmed by
-      the preset's name read after them, another name said and where the lists stand forgotten; the
+      the preset's name read after them (Select no longer since 0.14.0: a preview, which reads no
+      name — F1 above), another name said and where the lists stand forgotten; the
       stars read at the rows this session's clicks placed. Correct open Expansion reads the header
       only. Where nothing tells, the view list a Close may open is told by its pixels, never read
       (`Br.listSeen`, below A10 part 3). The page key and every browser action log the gate's line
@@ -812,7 +879,8 @@ double-click and O.doubleClick on it (the overlay runtime 0.15.0), the 1,034 ms 
       5. in an expansion of ten categories or more, a category of the first nine and one past them
          (`the list of categories to its top|bottom first`), and whether Avenger shows it;
       6. a preset of a category of twenty or more selected and one loaded (`… click(s) on the presets'
-         scrollbar`, `the name read is … — confirmed`), and one of another category from All;
+         scrollbar`, the loaded one's `the name read is … — confirmed`; a Select says nothing of the
+         name since 0.14.0, F1 above), and one of another category from All;
       7. FAV on, a star marked, FAV off; Correct open Expansion.
       For each: what was heard, and whether Avenger shows what the page says.
 - [ ] **T3-4. Not measured, for the next Mac tests.** The picture test on a Retina capture, in the
@@ -822,7 +890,9 @@ double-click and O.doubleClick on it (the overlay runtime 0.15.0), the 1,034 ms 
       list takes to stand still (its change wait looks 2 s at most, with a still spell of 60 ms:
       the `… clicked at … — the list moved | stood still` lines); whether a click on the category
       shown takes its presets back to their top (the tool takes it so, and so does this module);
-      whether a single click on a row loads the preset (D16: Select's name watch says it); and an
+      whether a single click on a row loads the preset (D16) — **answered** by the avenger_control
+      developer's feedback of 2026-10-26 on 0.13.0: it does not; it lets the preset be heard, and
+      the header's name stays, so Select watches no name since 0.14.0 (F1 above); and an
       expansion the user opens in Avenger with its name unreadable is taken for the one this
       session opened there by its place until a read names another (Correct open Expansion reads
       the header only). And the view list's pixel rule (`Br.listSeen`): a filled change of a list's
@@ -9445,7 +9515,8 @@ Built and tested against the scripted host only (`overlay_avenger_tests.rs`,
       actions find their category or row the same way in an expansion's lists (the database's
       order), a preset of another category has its category clicked first (the read decides, not the
       page's flag); Select is a click and Load a double-click, the name watched after both as after
-      ◀ and ▶, then the strip and the macros read (the tool's refresh) — never the database's name
+      ◀ and ▶ (Select since 0.14.0 a preview, no name watched: the feedback of 2026-10-26),
+      then the strip and the macros read (the tool's refresh) — never the database's name
       posted (the tool wrote it); Mark clicks the star and reads it after a change wait on its box.
       All clicks nothing; Go to Category is the database's with no trip, its five reasons the
       tool's. The port's own `read_expansion_list` ("Read Avenger's List", a button of the view
@@ -9501,13 +9572,15 @@ Built and tested against the scripted host only (`overlay_avenger_tests.rs`,
       grid in <view>: … tiles — col …`), two-line names included, and whether half a pitch tells a
       grid's rows apart; D15, the rectangles of the category and preset columns, the star column and
       FAV's box (`browser-open-<zoom>pct.png`); D16, whether a single click on a row loads the
-      preset (the Select watch's line) and what a double-click does to the browser; D17, Avenger's
+      preset and what a double-click does to the browser; D17, Avenger's
       order of expansions against the catalog's, from Read Avenger's List with a large library; D18,
       whether the rows show more than the name (counts, icons) — such a row is logged as "no name";
       D19, the time per step on the Intel Mac (each step's line), which decides whether a step far
       from the name needs its text read at all. **D13, D14, D17, D18 and D19 obsolete (2026-10-25):**
       no list is moved by the wheel or read as text any more, and Avenger's own list is not read
-      (T3-3); D15's columns are now where a change is watched, and D16 stands (T3-4).
+      (T3-3); D15's columns are now where a change is watched. **D16 answered (2026-10-26)** by the
+      avenger_control developer's feedback on 0.13.0: a single click on a row loads no preset, it
+      lets the preset be heard, and a double-click loads it (F1, T3-4).
 - [ ] **Residuals of slice 9's browser**: the regions — the browser's picture, the columns' text
       regions, the star column, the view list's region, the lists' wheel points and track ends, the
       grid's columns and the join of a two-line name — are starting values (D14, D15); whether 8 per

@@ -83,13 +83,56 @@ end
 -- `count_from`), never as read.
 Open.FROM = { confirmed = "as confirmed for this preset", database = "by the preset database" }
 
+-- Whether `place` (DB.place's) is one the database's tabs may be taken from: placed by its words as
+-- they stand, not by similarity, and not after Load or Save as, with a tab in its file.
+local function trusted(place)
+  return place ~= nil and place.osc ~= nil and place.how ~= "fuzzy" and not place.own
+    and #place.osc >= 1
+end
+
 function Open.countElsewhere(id, preset, place)
   local n = S.oscConfirmed(id, preset)
   if n then return n, "confirmed" end
-  if place and place.osc and place.how ~= "fuzzy" and not place.own and #place.osc >= 1 then
-    return math.min(8, #place.osc), "database"
-  end
+  if trusted(place) then return math.min(8, #place.osc), "database" end
   return nil
+end
+
+-- The tabs' names `known` (state.luau's values) keeps from an earlier read, where they were read
+-- under the preset's name `preset` — a name, never nil — over `count` tabs, and since the preset
+-- last may have changed (`oscNamesOf`, kept with them; S.changes): the names and which the
+-- database's spelling replaced, else nil. The values keep a name across ◀ and ▶, Load and Undo,
+-- which replace only the preset's (S.set); a name read under another preset's name, or before a tab
+-- was added or deleted, is another tab's, and one read before ▶ and ◀ back to the same name may be
+-- a name the file does not have.
+function Open.keptNames(known, preset, count)
+  local of = known and known.oscNamesOf
+  if not (of and preset ~= nil and of.preset == preset and of.count == count and of.at == S.changes()
+    and known.oscNames) then return nil end
+  return known.oscNames, known.oscSnapped
+end
+
+-- The words for the `count` OSC tabs of read `v` (`v.oscWords`), which the module's own sentences
+-- name a tab by (src/actions/osc.luau, Osc.oscName: the ring's Oscillator stepper, Mute and Solo,
+-- a knob's sentence, an action's answer), as the page names its tabs: the name this read took off
+-- the screen, else the one window `window`'s values keep from an earlier read under the same
+-- preset's name `preset` and over the same count (Open.keptNames), else the preset database's for
+-- the preset `place` places — where it is trusted as for the count, the strip shows as many tabs
+-- as the database has (a tab added or deleted since makes every name after it another tab's), and
+-- this session edited none of the preset's tabs (S.tabsEdited) — else a hole, said as Avenger's
+-- "OSC i". Said as they are, unmarked: the maintainer's decision of 2026-10-26 (src/presets.luau).
+-- The ring reads no text of the strip (ring.luau), so these are its names; nothing more is read or
+-- looked up for them: the place is the one the read places anyway, and the rest is kept already.
+local function wordsFor(v, count, preset, place, window)
+  if not count then return nil end
+  local kept = Open.keptNames(S.values(window), preset, count)
+  local db = place and trusted(place) and math.min(8, #place.osc) == count
+    and not S.tabsEdited(window, preset) and place.osc or nil
+  local out = {}
+  for i = 1, count do
+    local read = v.oscNames and v.oscNames[i]
+    out[i] = read or (kept and kept[i]) or (db and db[i]) or nil
+  end
+  return out
 end
 
 -- Where the dots' count `count` and the count from elsewhere disagree, the log says both: the dots'
@@ -178,9 +221,11 @@ end
 
 -- The OSC tabs' names into `v.oscNames` and `v.oscSnapped`, from `texts` (tab -> text read, nil
 -- for none), each cleaned the project's way and checked against the database's names of the
--- preset's tabs (`vocab`, or nil).
-local function oscNames(texts, count, vocab, v)
+-- preset's tabs (`vocab`, or nil); and in `v.oscNamesOf` what they were read under: the preset's
+-- name `preset` (nil: not known), the count and S.changes() (Open.keptNames).
+local function oscNames(texts, count, vocab, v, preset)
   v.oscNames, v.oscSnapped = {}, {}
+  v.oscNamesOf = { preset = preset, count = count, at = S.changes() }
   local words = {}
   for i = 1, count do
     local raw = texts[i]
@@ -320,7 +365,7 @@ local function decide(ctx)
     if count then texts = Strip.namesFromWords(pl, strip and strip.words, count) end
   end
   v.oscCount = count
-  if count then oscNames(texts, count, place and place.osc, v) end
+  if count then oscNames(texts, count, place and place.osc, v, v.preset or opts.preset) end
   if not early then
     Strip.decide(pl, snap, got, count, v, log, marks.strip)
     if v.selectedType == "drums" and not slotNames then
@@ -445,7 +490,9 @@ end
 -- overlay, active on an identified Avenger. `opts`: { zoom = the zoom read, or nil; mark = o:here()
 -- at the key; expected = the expansion last read open in this window, or nil; expectedFromDatabase =
 -- whether only the database named it; window = the id of the window the values are kept by (the
--- page's; Open.window() where not given) }. Answers the values read — nil where a
+-- page's; Open.window() where not given); preset = the name last read, which the OSC tabs' names
+-- are kept as read under (`oscNamesOf`) where the picture's own name reads nothing, or nil }.
+-- Answers the values read — nil where a
 -- read failed — or nil, why nothing was read for the log, and the sentence to say (Open.NO_FACTOR,
 -- NO_PICTURE, FAILED; nil when the user moved on). `values.zoom` is always there, and `values.cut`
 -- is the screen's size when the picture was cut at its edge.
@@ -637,9 +684,10 @@ Open.PARTS = {
 
 -- The keys of state.luau's values each part reads, whether it finds them or not: what it does not
 -- find is not kept from an earlier read (S.part). The OSC names and the macro tabs' count and names
--- only where the part's text is read.
+-- only where the part's text is read; the words for the tabs (wordsFor) and the preset's name they
+-- were taken for with every read of the strip, since they need no text.
 local STRIP_KEYS = { "oscCount", "oscCountFrom", "oscMute", "oscSolo", "selectedType", "selectedIndex", "drumsMute",
-  "drumsSolo", "trigMute", "trigSolo", "drumPattern", "drumLock", "drumMode" }
+  "drumsSolo", "trigMute", "trigSolo", "drumPattern", "drumLock", "drumMode", "oscWords", "oscWordsOf" }
 
 -- ── A part past the screen's edge ────────────────────────────────────────────
 -- The second Mac test's window reached below its 1080-point screen, and what lay there read "not
@@ -726,9 +774,10 @@ end
 -- Reads part `name` off snapshot `snap` (of Open.partRegion's rectangle), in a handler where its
 -- questions wait. `opts`: { pl = the placer the picture was taken with, text = read the part's text
 -- too, macroCount = the macro tabs counted before, for a part read without its text, preset = the
--- preset's name last read, whose tabs' names in the database are the names' vocabulary, fields = a
--- list of the fields to read as text where they are shown (above), window = the id of the window
--- the values are kept by (Open.window() where not given) }. Answers the values read
+-- preset's name last read, whose tabs' names in the database are the names' vocabulary and, text
+-- read or not, the words for the tabs (wordsFor), fields = a list of the fields to read as text
+-- where they are shown (above), window = the id of the window the values are kept by
+-- (Open.window() where not given), whose names kept are words too }. Answers the values read
 -- (state.luau's), and the keys the part read — a key of the list missing from the values was not
 -- found. Nothing clicks; nothing but the snapshot is read. The strip, the central tab, DRUM SQ and
 -- the sample editor's pixels are decided before the part's text is read, so that the text read asks
@@ -860,7 +909,7 @@ function Open.part(snap, name, opts)
   end
   if part.strip then
     if opts.text and count then
-      read({ "oscNames", "oscSnapped" })
+      read({ "oscNames", "oscSnapped", "oscNamesOf" })
       local texts = {}
       for i = 1, count do
         local r = byName["osc " .. i]
@@ -876,9 +925,10 @@ function Open.part(snap, name, opts)
         v.oscCount, v.oscCountFrom = count, from
         Strip.decide(pl, snap, got, count, v, log, marks.strip)
       else
-        oscNames(texts, count, place and place.osc, v)
+        oscNames(texts, count, place and place.osc, v, opts.preset)
       end
     end
+    v.oscWords, v.oscWordsOf = wordsFor(v, v.oscCount, opts.preset, place, window), opts.preset
   end
   if part.knobs then
     read({ "osc" })

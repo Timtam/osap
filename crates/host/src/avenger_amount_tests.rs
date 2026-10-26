@@ -422,6 +422,44 @@ fn osc_volume_reads_the_strip_first_and_the_level_knob_after() {
     "##));
 }
 
+/// The sentence names the tab as the ring's Oscillator stepper does: AR Band Pass Slide's first
+/// tab, its name not read at the key, is the preset database's Arp; after ▶ to a preset the
+/// database does not have it is OSC 1 — the database's name of the preset before is not taken from
+/// what the page last read, which keeps it across the step (the review of 2026-10-26).
+#[test]
+fn the_sentence_names_the_tab_by_the_database_and_never_by_the_preset_before() {
+    run_mac(&scenario(r##"
+        T.presets()
+        local _, _, W = T.avengerAt80("AR Band Pass Slide")
+        T.pageReady()
+        local spec = table.clone(T.OSC)
+        spec.osc = 3
+        T.paintAvenger(98, 84, 1.6, spec)
+        T.words({ preset = "AR Band Pass Slide", ["macro tabs"] = "MACRO 1" })
+        T.openPage()
+        T.event()
+        T.tripFrom({ action = "osc_control", args = { control = "volume" }, focused = true }, W)
+        T.ok(T.lastSaid() == "Please press Page Up or Down to set the volume of Arp. To Confirm, press Return.", T.said())
+        T.key("Escape")
+        T.settle()
+        -- A trip that reads the strip, so that what the page last read holds Arp's words.
+        T.event()
+        T.tripFrom({ action = "select_osc_tab", args = { index = 1 }, focused = true }, W)
+        T.tick(16)
+        T.ok(T.lastPost("error").text == "Choosing an oscillator tab: unchanged, Arp is selected", T.lastPost("error").text)
+        T.event()
+        T.tripFrom({ action = "next_preset", args = {}, focused = true }, W)
+        T.nameReads("My Own Lead", 600)
+        T.ok(T.lastPost("state").state.preset == "My Own Lead", tostring(T.lastPost("state").state.preset))
+        T.event()
+        T.tripFrom({ action = "osc_control", args = { control = "volume" }, focused = true }, W)
+        T.ok(T.lastSaid() == "Please press Page Up or Down to set the volume of OSC 1. To Confirm, press Return.", T.said())
+        T.key("Escape")
+        T.settle()
+        T.ok(T.held() == 0 and T.ups() == 2, "nothing held")
+    "##));
+}
+
 /// Pan and Random Pitch press and let go with the right button, as the tool does, and the host's
 /// record is asked for the right one; their sentences say the control's key with a space. The read
 /// after Return posts both of its knob's values: Pan's press Level's volume and pan, Random Pitch's

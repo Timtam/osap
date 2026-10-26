@@ -11,7 +11,11 @@
 -- and may orient itself on the database as the project's tool does. Whatever it says that was not
 -- read off the screen is MARKED: ", from the database" after the value — or before a list of
 -- names, where a trailing marker would sound like one more name. So a user always hears which
--- words Avenger showed and which the database supplied.
+-- words Avenger showed and which the database supplied. One exception, the maintainer's of
+-- 2026-10-26: the names of the preset's oscillator tabs, by which the module's own sentences name
+-- a tab where its name was not read (src/actions/osc.luau, Osc.oscName — the ring's Oscillator
+-- stepper, Mute and Solo, a knob's sentence), are said as they are, unmarked — naming the tabs
+-- is what the database is there for.
 --
 -- SNAPPING. A name read off the screen is looked up in the catalog, as the project's tool looks
 -- it up (its preset_db.find_match), in this order:

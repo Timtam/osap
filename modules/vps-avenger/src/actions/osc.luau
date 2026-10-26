@@ -13,7 +13,8 @@
 --   osc_menu_item         the tab's menu with the right button, its item at the tool's row: Copy
 --                         (noted for Paste: Avenger's clipboard cannot be read), Paste,
 --                         Initialize, Delete (none with one oscillator); the names, the dots and
---                         the knobs read
+--                         the knobs read, and the last three noted as an edit of the tabs, whose
+--                         database names then name none (state.luau, S.tabsEdited)
 --   drums_menu_item, trig_menu_item   Initialize in the tab's menu; the strip read
 --   reset_osc_control     a double-click on the selected oscillator's knob — with the right
 --                         button for Pan and Random Pitch, as the tool does — never while Drums or
@@ -85,10 +86,37 @@ local function counted(vb, i)
   return n
 end
 
--- The tab the strip reads as selected, in words, or nil.
-local function tabWords(v)
+-- OSC tab `i` in words, from the values `...` in turn — reads of this moment: an action's read
+-- after its click and the one before it, or what the ring read in its stay, never a window's values
+-- kept from earlier (state.luau: a step replaces only the name) — as the page names its tabs: the
+-- name one of them read off the screen (`oscNames`, in the database's spelling where the read was
+-- close to it), else a read's words for the tab (`oscWords`, read/open.luau's wordsFor: a name the
+-- window keeps from a read under the same preset's name and count, else the preset database's for
+-- the preset shown), else Avenger's own "OSC i". The ring reads no text of the strip on a step
+-- (ring.luau), so there the names kept and the database's are what the avenger_control developer
+-- asked for (his report of 2026-10-26: the Oscillator stepper said only "OSC 1", "OSC 2" where the
+-- page shows the names). Said as it is, with no "from the database": the maintainer's decision of
+-- 2026-10-26 for these names — that is what the database is there for — in place of the mark of
+-- 2026-09-28 (src/presets.luau).
+local function oscName(i, ...)
+  for k = 1, select("#", ...) do
+    local v = select(k, ...)
+    local n = v and v.oscNames and v.oscNames[i]
+    if n and n ~= "" then return n end
+  end
+  for k = 1, select("#", ...) do
+    local v = select(k, ...)
+    local n = v and v.oscWords and v.oscWords[i]
+    if n and n ~= "" then return n end
+  end
+  return "OSC " .. i
+end
+
+-- The tab the strip reads as selected in `v`, in words (an OSC tab by oscName, from `v` and then
+-- `...`), or nil.
+local function tabWords(v, ...)
   if not v then return nil end
-  if v.selectedType == "osc" and v.selectedIndex then return "OSC " .. v.selectedIndex end
+  if v.selectedType == "osc" and v.selectedIndex then return oscName(v.selectedIndex, v, ...) end
   if v.selectedType == "drums" then return "Drums" end
   if v.selectedType == "trig" then return "Trig" end
   return nil
@@ -99,8 +127,8 @@ local function sameSelection(vb, va)
 end
 
 -- What a choice of tab says: the tab read as selected after it.
-local function selectedAnswer(_, va, how)
-  local tab = tabWords(va)
+local function selectedAnswer(vb, va, how)
+  local tab = tabWords(va, vb)
   if not tab then return { error = "the selected tab cannot be read now" } end
   if how == "unchanged" then return { note = "unchanged, " .. tab .. " is selected", said = tab .. " is selected, unchanged" } end
   return { said = tab .. " selected" }
@@ -165,9 +193,10 @@ function A.add_osc(_, label)
 end
 
 -- A Mute or Solo LED: `key` the values' list or switch, `title` its word, `point(vb)` where it is
--- (nil and why where it cannot be placed), `who` the tab's words, `kind` the tab's ("osc", "drums",
--- "trig"). A Mute read while another tab's Solo is on is said as silenced by it (Strip.silencedBy).
-local function toggle(label, key, index, title, who, point, kind)
+-- (nil and why where it cannot be placed), `index` an OSC tab's, said by its name (oscName, from
+-- the reads after the click and before it), `kind` the tab's ("osc", "drums", "trig"). A Mute read
+-- while another tab's Solo is on is said as silenced by it (Strip.silencedBy), its tabs named so.
+local function toggle(label, key, index, title, point, kind)
   local function valueOf(v)
     if not v then return nil end
     if index then return v[key] and v[key][index] end
@@ -186,11 +215,14 @@ local function toggle(label, key, index, title, who, point, kind)
       local a = valueOf(va)
       return a ~= nil and a == valueOf(vb)
     end,
-    answer = function(_, va, how)
+    answer = function(vb, va, how)
       local a = valueOf(va)
+      local who = index and oscName(index, va, vb)
       local named = (who and (who .. " ") or "") .. title
       if a == nil then return { error = (who and (who .. "'s ") or "") .. title .. " cannot be read now" } end
-      local silenced = title == "Mute" and Strip.silencedBy(va, kind, index)
+      local silenced = title == "Mute" and Strip.silencedBy(va, kind, index, function(j)
+        return oscName(j, va, vb)
+      end)
       local words = named .. (silenced and (", " .. silenced) or (" " .. (a and "ON" or "OFF")))
       if how == "unchanged" then return { note = "unchanged, " .. words, said = words .. ", unchanged" } end
       return { said = words }
@@ -204,7 +236,7 @@ local function oscToggle(kind)
   return function(args, label)
     local i = whole(args.index)
     if not i then return nil, "no oscillator tab was named" end
-    return toggle(label, key, i, title, "OSC " .. i, function(vb)
+    return toggle(label, key, i, title, function(vb)
       local n, why = counted(vb, i)
       if not n then return nil, why end
       return { T.tabX(i, n) + dx, T.MUTE_Y }
@@ -216,7 +248,7 @@ A.toggle_osc_solo = oscToggle("solo")
 
 local function fixedToggle(key, title, p, kind)
   return function(_, label)
-    return toggle(label, key, nil, title, nil, function() return p end, kind)
+    return toggle(label, key, nil, title, function() return p end, kind)
   end
 end
 A.toggle_drums_mute = fixedToggle("drumsMute", "Mute", T.DRUMS_MUTE, "drums")
@@ -254,17 +286,23 @@ function A.osc_menu_item(args, label)
     end,
     answer = function(vb, va, how)
       if item == "Copy" then
-        local name = vb.oscNames and vb.oscNames[i] or ("OSC " .. i)
+        local name = oscName(i, vb)
         return { facts = { oscCopied = name }, said = "Copy chosen for " .. name }
       end
+      -- Paste, Initialize and Delete, once chosen, edit the preset's tabs — whatever the read after
+      -- shows: the database's names of them name no tab of this preset from now on
+      -- (state.luau, S.tabsEdited), by the name the read before was taken for.
+      local facts = { oscEdited = { preset = vb.oscWordsOf } }
       if item == "Delete" then
         local n = va and va.oscCount
-        if not n then return { error = "Delete chosen; the oscillator tabs cannot be counted now" } end
-        if how == "unchanged" then return { note = "unchanged, " .. plural(n, "oscillator") } end
-        return { focus = "osc-menu-" .. math.min(n, i), said = plural(n, "oscillator") }
+        if not n then return { facts = facts, error = "Delete chosen; the oscillator tabs cannot be counted now" } end
+        if how == "unchanged" then return { facts = facts, note = "unchanged, " .. plural(n, "oscillator") } end
+        return { facts = facts, focus = "osc-menu-" .. math.min(n, i), said = plural(n, "oscillator") }
       end
-      if how == "unchanged" then return { note = item .. " chosen; nothing VPS Avenger shows changed" } end
-      return { said = item .. " chosen" }
+      if how == "unchanged" then
+        return { facts = facts, note = item .. " chosen; nothing VPS Avenger shows changed" }
+      end
+      return { facts = facts, said = item .. " chosen" }
     end,
   }
 end
@@ -339,8 +377,10 @@ function A.reset_osc_control(args, label)
   }
 end
 
--- The tab read as selected, in words (the ring's Oscillator stepper says it).
+-- The tab read as selected, in words (the ring's Oscillator stepper says it), and an OSC tab's name
+-- (its Mute and Solo, the knobs' sentences: ring.luau, src/amount.luau), from reads of this moment.
 A.tabWords = tabWords
+A.oscName = oscName
 -- The count the dots read, and an index within it (the OSC tab's rename, src/handover.luau).
 A.counted = counted
 

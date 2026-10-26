@@ -413,26 +413,28 @@ end
 -- of its own. So while any Solo reads on, the Mute of a tab whose own Solo does not is said as
 -- "silenced by OSC 1's Solo" — never "on" — and an explicit Mute there is told only once the Solo
 -- is off. The tabs whose Solo reads on, by their labels ("OSC 1", "Drums", "Trig"), in the strip's
--- order — empty where none does or none was read.
-function S.soloBy(v)
+-- order — empty where none does or none was read. `nameOf(i)`, where given, words OSC tab i
+-- instead (the module's own sentences, src/actions/osc.luau's Osc.oscName); the page is posted the
+-- labels, and words them by its own tabs.
+function S.soloBy(v, nameOf)
   local out = {}
   for i, on in pairs(v.oscSolo or {}) do
     if on == true then out[#out + 1] = i end
   end
   table.sort(out)
-  for k, i in ipairs(out) do out[k] = "OSC " .. i end
+  for k, i in ipairs(out) do out[k] = nameOf and nameOf(i) or ("OSC " .. i) end
   if v.drumsSolo == true then out[#out + 1] = "Drums" end
   if v.trigSolo == true then out[#out + 1] = "Trig" end
   return out
 end
 
 -- "silenced by OSC 1's Solo" for tab `kind` ("osc", "drums" or "trig"; `index` an OSC tab's) where
--- another tab's Solo reads on and its own does not; nil otherwise.
-function S.silencedBy(v, kind, index)
+-- another tab's Solo reads on and its own does not; nil otherwise. `nameOf` as soloBy's.
+function S.silencedBy(v, kind, index, nameOf)
   local own = kind == "osc" and v.oscSolo and v.oscSolo[index] or (kind == "drums" and v.drumsSolo)
     or (kind == "trig" and v.trigSolo)
   if own == true then return nil end
-  local by = S.soloBy(v)
+  local by = S.soloBy(v, nameOf)
   if #by == 0 then return nil end
   if #by == 1 then return "silenced by " .. by[1] .. "'s Solo" end
   return "silenced by the Solos of " .. table.concat(by, ", ", 1, #by - 1) .. " and " .. by[#by]

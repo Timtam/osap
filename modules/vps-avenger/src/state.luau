@@ -21,9 +21,14 @@
 -- its place and the tab's switch for the slot selected (read/sample.luau); DRUM SQ's length where an
 -- action or the page key read it; the macro tabs, the tab shown, its names, buttons and knobs. A
 -- value read that the page has no place for — a menu's field, DRUM SQ's speed, the envelope's
--- preset name — stays in the values, for the module's answers and the ring. A slot's name not read
--- is a hole, which the page shows by the slot's role in the kit, said as not read — never as the
--- kit's name, as the tool showed its factory names.
+-- preset name — stays in the values, for the module's answers and the ring; so do what the OSC
+-- tabs' names were read under (`oscNamesOf`: the preset's name, the count and S.changes(),
+-- read/open.luau's Open.keptNames) and a strip read's words for its tabs (`oscWords`, and
+-- `oscWordsOf` the name they were taken for), which are never posted — the words are the read's
+-- own, for the sentences of the action that read them, never taken from here later: a step
+-- replaces only the name (S.set), and its words would be the preset's before. A slot's name not
+-- read is a hole, which the page shows by the slot's role in the kit, said as not read — never as
+-- the kit's name, as the tool showed its factory names.
 --
 -- The browser's (src/actions/browser.luau, src/read/browser.luau): its view, an open expansion and
 -- its name read in the header — or, where the header did not read it after this session's own click
@@ -47,8 +52,9 @@ local Strip = host.include("src/read/strip.luau")
 -- this session did that no read can show — the OSC tab Copy was chosen for (`oscCopied`, its name
 -- as read, or "OSC <i>"), which the page's Paste follows: Avenger's own clipboard cannot be read;
 -- the DRUM SQ pattern a COPY of the pattern menu was taken for (`sqCopied`, { pattern, part }),
--- which its PASTE items follow (`drum_sq_pattern_copied`, a key of the port's); and the length
--- LENGTH's action set (`sqLengthSet`, { preset, steps }), posted while the preset read is that one.
+-- which its PASTE items follow (`drum_sq_pattern_copied`, a key of the port's); the length
+-- LENGTH's action set (`sqLengthSet`, { preset, steps }), posted while the preset read is that one;
+-- and the preset whose OSC tabs this session edited (`oscEdited`, { preset }: S.tabsEdited).
 -- A read of the whole of Avenger keeps them.
 local WINDOWS_MAX = 8
 local byWindow, order = {}, {}
@@ -210,6 +216,45 @@ function S.oscConfirmed(id, preset)
     return nil
   end
   return c.count
+end
+
+-- ── The preset changed, maybe ────────────────────────────────────────────────
+-- How often the preset shown may have changed with nothing read since: ◀ and ▶, a choice from
+-- MENU, Undo, the redo list, the overlay leaving the front, and the same from a trip of the
+-- page's (main.luau's `unseen` and its steps) — counted, never timed, and one count for the
+-- module, since one window is in front at a time. The OSC tabs' names a read keeps hold only at the
+-- count they were read at (`oscNamesOf.at`, read/open.luau's Open.keptNames): ▶ and ◀ back to the
+-- same name load that preset again from its file, and the names of a tab renamed before are gone.
+local changes = 0
+
+function S.presetMayHaveChanged()
+  changes += 1
+end
+
+function S.changes()
+  return changes
+end
+
+-- ── The tabs edited ──────────────────────────────────────────────────────────
+-- Whether this session edited an OSC tab of preset `preset` in window `id`: renamed one, or chose
+-- Paste, Initialize or Delete in a tab's menu (handover.luau's rename_osc, src/actions/osc.luau's
+-- osc_menu_item; the fact `oscEdited`, { preset = the name read before }). The database's names
+-- of its tabs are then its file's and no longer Avenger's — a tab's name changed, or every tab
+-- after a deleted one moved up — and name none of them (read/open.luau's wordsFor) until a name
+-- read there differs, which forgets the edit, as the count confirmed is kept by its preset
+-- (S.oscConfirmed). An edit made while no name was known is taken for the next name read. A tab
+-- added needs none: the count then differs from the database's.
+function S.tabsEdited(id, preset)
+  local st = id and byWindow[id] or nil
+  local e = st and st.facts.oscEdited
+  if not e then return false end
+  if preset == nil then return true end
+  if e.preset == nil then e.preset = preset end
+  if e.preset ~= preset then
+    st.facts.oscEdited = nil
+    return false
+  end
+  return true
 end
 
 -- What was last read in window `id`, as it stands (nil: nothing yet) — for words, never changed

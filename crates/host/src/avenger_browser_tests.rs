@@ -11,18 +11,19 @@
 //! categories or the preset rows — every expansion, category and preset is clicked at the tool's
 //! point for its place, its lists scrolled by the tool's scrollbar clicks, each followed by a change
 //! wait and not made again at a point that moved nothing; and the header confirms: its name after an
-//! Open (another closed again), the preset's name after Select and Load (another said, and where the
-//! lists stand forgotten). The browser's state is the header's name, a picture test of its title
-//! band and of the categories' scrollbar (pixels only), and the user's word: Confirm Expansion View
-//! confirms the grid for its window, view and zoom, as the tool's action sets AVGExpansionOpen to 0
-//! — `none` alone, the live log's header, never says the grid, and the user's word never outranks
-//! a text read there. The view is chosen in the list its field opens with the left button; Close is
-//! not clicked where the browser reads closed, and where nothing tells, the view list its click may
-//! open is told by its pixels and closed again. FAV is read before and after
-//! its click; a star is clicked at its row and read after a change wait. All clicks nothing; Go to
-//! Category is the database's with no trip; Correct open Expansion reads the header once. The gate's
-//! line — of every browser action and of the page key — and the path's line are in the log. No
-//! picture is held at the end of any of it.
+//! Open (another closed again), the preset's name after Load (another said, and where the lists
+//! stand forgotten) — a Select is a preview, after which no name is read, nothing is forgotten and
+//! nothing is said of the name. The browser's state is the header's name, a picture test of its
+//! title band and of the categories' scrollbar (pixels only), and the user's word: Confirm
+//! Expansion View confirms the grid for its window, view and zoom, as the tool's action sets
+//! AVGExpansionOpen to 0 — `none` alone, the live log's header, never says the grid, and the
+//! user's word never outranks a text read there. The view is chosen in the list its field opens
+//! with the left button; Close is not clicked where the browser reads closed, and where nothing
+//! tells, the view list its click may open is told by its pixels and closed again. FAV is read
+//! before and after its click; a star is clicked at its row and read after a change wait. All
+//! clicks nothing; Go to Category is the database's with no trip; Correct open Expansion reads the
+//! header once. The gate's line — of every browser action and of the page key — and the path's
+//! line are in the log. No picture is held at the end of any of it.
 //!
 //! And scenarios on the shipped data (the preset database): the four rosters the tool offers, and
 //! Quantum State, the 103rd of Nyhdroe's 129 in 8 per Row, reached by the tool's clicks on the
@@ -121,7 +122,8 @@ end
 --         recognised, over the title drawn there), titleDrawn = false: no title drawn in the band
 --         either, lit = the place (from 1) of the preset row shown lit all over, as Avenger draws the
 --         selected one, litReach = how far it reaches up and down from the row's middle (6; 9 reaches
---         into the next row's star box, as Avenger's corner placed a unit or more high does) }
+--         into the next row's star box, as Avenger's corner placed a unit or more high does),
+--         selectLit = a click on a row draws it lit (`lit`) }
 -- S.browserLater: Avenger answering later — { at, fn }, each fn run on the first turn at or after
 -- `at`, before the host's answers of that turn.
 -- Painted under the popups (T.paintAvenger): each tile and row a small box of its own colour, an
@@ -407,6 +409,11 @@ S.browserClick = function(x, y)
     for _, p in ipairs(T.shownPresets()) do
       if math.abs(ty - p.ty) <= 4 then
         note("preset " .. p.name)
+        -- With `selectLit`, the row clicked drawn selected, as Avenger draws it.
+        if o.selectLit and o.lit ~= p.index then
+          o.lit = p.index
+          T.repaint(S.painted.spec)
+        end
         return
       end
     end
@@ -1443,16 +1450,114 @@ fn a_category_is_clicked_at_its_place_its_list_at_the_end_that_shows_it() {
     "##));
 }
 
-/// Synthwave open, its categories four of two presets: X17 Arp Line 02 selected — its category Arp
-/// clicked first, (42, 66) — (165, 190), where this session's clicks did not leave it shown, nothing
-/// scrolled (two presets, page 0), then its row, (142, 72.5) — (325, 200); the name watched as after
-/// ◀ and ▶, the strip and the macros read after it, and the name the one asked: confirmed, posted
-/// with the database's expansion and its place. Load of the first: Arp is left shown, so only the
-/// row, a double-click at (325, 180). The same name: "unchanged". Another name than the one asked:
-/// said, and where the lists stand forgotten, so the next row's action clicks its category again.
+/// Select is a preview (the avenger_control developer's report of 2026-10-26, on 0.13.0): Avenger
+/// lets the preset be heard and loads none — the header's name stays — so of the page's "unchanged,
+/// <name>" after it he wrote "Das ist auch nicht nötig. Das kannst du rausnehmen." Synthwave open,
+/// X17 Arp Line 01 loaded: X17 Arp Line 02 selected — its category Arp clicked first, (42, 66) —
+/// (165, 190), where this session's clicks did not leave it shown, then its row, (142, 72.5) — (325,
+/// 200), one click; the presets' change waited for (Avenger draws the row selected), then the strip
+/// and the macros read again with their text, as the tool's action_select_expansion_preset
+/// refreshes them. No name read before or after the click, no name watched, nothing said — no
+/// "unchanged" — and nothing forgotten: the preset and its place stay the ones loaded, the
+/// database's position and where the lists stand with them, so the next row's Select clicks only
+/// its row. The row selected already: nothing changes in the list, the wait runs to its bound, and
+/// still nothing is said. With FAV on, the stars read off the picture the wait answered, as the tool
+/// reads the row's star. And a Select where the name is not known — after a Load whose name was not
+/// read — says no error either.
+#[test]
+fn a_preset_selected_is_a_preview_with_no_name_watched_and_nothing_forgotten() {
+    run_mac(&scenario(r##"
+        local _, _, W = T.browserPage({ mode = "open", open = T.openOf("Synthwave", { selectLit = true }) },
+          { words = { preset = "X17 Arp Line 01" } })
+        T.ok(T.st().preset == "X17 Arp Line 01" and T.st().loaded_expansion_preset_index == 0, "the key placed the preset")
+        local function row(action, i)
+          return { action = action, args = { preset_index = i, visible_index = i, category_preset_index = i, category_count = 2,
+            category_index = 0, category_total = 4, keep_preset_category = "Arp" }, focused = true }
+        end
+        -- The name's reads after a click (main.luau's watch, `vps-avenger name`), counted.
+        local function watched()
+          local n = 0
+          for _, r in ipairs(S.reads) do if r.key == "vps-avenger name" then n += 1 end end
+          return n
+        end
+        local function unchangedPage(what)
+          local st = T.st()
+          T.ok(st.preset == "X17 Arp Line 01" and st.expansion == "Synthwave" and st.loaded_expansion_preset_index == 0
+            and st.selected_preset_category == "Arp" and T.err() == "", what .. ": " .. tostring(st.preset) .. " "
+            .. tostring(st.loaded_expansion_preset_index) .. " '" .. tostring(T.err()) .. "'")
+        end
+        local reads, w0, forgotten = #S.recognized, watched(), T.count("is forgotten")
+        T.tripFrom(row("select_expansion_preset", 1), W)
+        T.run(1200)
+        T.ok(T.clicksSince(0) == "165,190 325,200" and S.browser.clicked[#S.browser.clicked] == "preset X17 Arp Line 02",
+          "its category, then the row, one click: " .. T.clicksSince(0))
+        unchangedPage("the preset loaded stays")
+        T.ok(watched() == w0 and T.readNames(reads)["the name"] == nil, "no name read: " .. (watched() - w0))
+        local named = T.readNames(reads)
+        T.ok(named["osc 1"] == 1 and named["macro tabs"] == 1, "the strip and the macros read with their text")
+        T.ok(T.count("is forgotten") == forgotten, "nothing forgotten: " .. T.dump())
+        T.ok(T.count("[avenger] [browser] 'Selecting a preset': clicking X17 Arp Line 02 at (325,200), the tool's row 2 of "
+          .. "page 1 of Arp") == 1 and T.count("'Selecting a preset': the presets' list changed after the click") == 1, T.dump())
+        -- The next row: Arp is left shown, so its row alone.
+        T.event()
+        local clicks, snaps = #S.clicks, S.snaps
+        T.tripFrom(row("select_expansion_preset", 0), W)
+        T.run(1200)
+        T.ok(T.clicksSince(clicks) == "325,180", "its row alone: " .. T.clicksSince(clicks))
+        local pictures = S.snaps - snaps
+        unchangedPage("again")
+        -- The row selected already: the wait to its bound, and nothing said.
+        T.event()
+        clicks = #S.clicks
+        T.tripFrom(row("select_expansion_preset", 0), W)
+        T.run(1200)
+        T.ok(T.count("'Selecting a preset': nothing in the presets' list changed after the click") == 0, "not before the bound")
+        T.run(1500)
+        T.ok(T.clicksSince(clicks) == "325,180" and T.count("'Selecting a preset': nothing in the presets' list changed "
+          .. "after the click") == 1, T.clicksSince(clicks) .. " " .. T.dump())
+        unchangedPage("the same row")
+        T.ok(watched() == w0 and T.count("is forgotten") == forgotten, "still no name watched, nothing forgotten")
+        -- FAV on, X17 Arp Line 02 a favorite: the stars read off the picture the wait answered.
+        T.event()
+        S.browser.open.fav = true
+        S.browser.open.stars["X17 Arp Line 02"] = true
+        T.repaint({})
+        snaps = S.snaps
+        T.tripFrom(row("select_expansion_preset", 1), W)
+        T.run(2400)
+        local states = T.st().favorite_preset_states or {}
+        T.ok(states["1"] == true and states["0"] == false, "the stars: " .. T.jsonEncode(states))
+        T.ok(S.snaps - snaps == pictures, "no picture of its own for the stars: " .. (S.snaps - snaps) .. " against "
+          .. pictures)
+        unchangedPage("FAV on")
+        -- A Load whose name is not read: the preset posted as not read. A Select then says nothing of it.
+        T.event()
+        T.tripFrom(row("load_expansion_preset", 1), W)
+        T.tick(2)
+        T.nameReads(nil)
+        T.ok(T.err() == "Loading a preset: the preset name cannot be read now" and T.st().preset == nil, T.err())
+        T.event()
+        local lists = T.count("where the lists stand is forgotten")
+        T.tripFrom(row("select_expansion_preset", 1), W)
+        -- The row the Load's double-click drew selected: the wait to its bound.
+        T.run(2400)
+        T.ok(T.err() == "" and T.st().preset == nil and T.count("where the lists stand is forgotten") == lists,
+          "no error from the name: '" .. tostring(T.err()) .. "'")
+        T.nothingBelowTheHeader(reads)
+        T.ok(T.held() == 0, "every picture released: " .. T.held())
+    "##));
+}
+
+/// Load, as it was: Synthwave open, X17 Arp Line 02 loaded — Arp clicked first, (42, 66) — (165,
+/// 190), where this session's clicks did not leave it shown, nothing scrolled (two presets, page 0),
+/// then its row double-clicked, (142, 72.5) — (325, 200), both clicks of one gesture; the name
+/// watched as after ◀ and ▶, the strip and the macros read after it, and the name the one asked:
+/// confirmed, posted with the database's expansion and its place. The first: Arp is left shown, so
+/// only the row, at (325, 180). The same name again: "unchanged". Another name than the one asked:
+/// said, and where the lists stand forgotten, so the next row's Load clicks its category again.
 /// Nothing read: the error, the preset posted as not read — never the database's name for the row.
 #[test]
-fn a_preset_is_selected_or_loaded_at_its_place_and_confirmed_by_its_name() {
+fn a_preset_is_loaded_at_its_place_and_confirmed_by_its_name() {
     run_mac(&scenario(r##"
         local _, _, W = T.browserPage({ mode = "open", open = T.openOf("Synthwave") }, { words = { preset = "X17 Arp Line 01" } })
         T.ok(T.st().loaded_expansion_preset_index == 0, "the key placed the preset")
@@ -1462,18 +1567,20 @@ fn a_preset_is_selected_or_loaded_at_its_place_and_confirmed_by_its_name() {
         end
         local reads = #S.recognized
         local snaps = S.snaps
-        T.tripFrom(row("select_expansion_preset", 1), W)
+        T.tripFrom(row("load_expansion_preset", 1), W)
         T.tick(3)
-        T.ok(T.clicksSince(0) == "165,190 325,200" and S.browser.clicked[#S.browser.clicked] == "preset X17 Arp Line 02",
-          "its category, then the row: " .. T.clicksSince(0))
+        T.ok(T.clicksSince(0) == "165,190 325,200 325,200" and S.clicks[#S.clicks].double == 2
+          and S.browser.clicked[#S.browser.clicked] == "preset X17 Arp Line 02", "its category, then the row: "
+          .. T.clicksSince(0))
         T.nameReads("X17 Arp Line 02")
         local st = T.st()
         T.ok(st.preset == "X17 Arp Line 02" and st.expansion == "Synthwave" and st.expansion_from_database == true
           and st.loaded_expansion_preset_index == 1 and st.selected_preset_category == "Arp" and T.err() == "", tostring(st.preset))
         T.ok(S.snaps >= snaps + 3, "the browser, the strip and the macros pictured")
-        T.ok(T.count("[avenger] [browser] 'Selecting a preset': clicking X17 Arp Line 02 at (325,200), the tool's row 2 of "
-          .. "page 1 of Arp") == 1 and T.count("'Selecting a preset': the name read is X17 Arp Line 02 — confirmed") == 1, T.dump())
-        -- Load: Arp left shown — only the row, both clicks of one double-click.
+        T.ok(T.count("[avenger] [browser] 'Loading a preset': double-clicking X17 Arp Line 02 at (325,200), the tool's row 2 "
+          .. "of page 1 of Arp") == 1 and T.count("'Loading a preset': the name read is X17 Arp Line 02 — confirmed") == 1,
+          T.dump())
+        -- The first: Arp left shown — only the row, both clicks of one double-click.
         T.event()
         local clicks = #S.clicks
         T.tripFrom(row("load_expansion_preset", 0), W)
@@ -1482,25 +1589,26 @@ fn a_preset_is_selected_or_loaded_at_its_place_and_confirmed_by_its_name() {
           and S.clicks[clicks + 2].double == 2, "a double-click: " .. T.clicksSince(clicks))
         T.nameReads("X17 Arp Line 01")
         T.ok(T.st().preset == "X17 Arp Line 01" and T.st().loaded_expansion_preset_index == 0, tostring(T.st().preset))
-        -- The same name after the click.
+        -- The same name after the double-click.
         T.event()
-        T.tripFrom(row("select_expansion_preset", 0), W)
+        T.tripFrom(row("load_expansion_preset", 0), W)
+        T.tick(2)
         T.nameReads("X17 Arp Line 01")
-        T.ok(T.err() == "Selecting a preset: unchanged, X17 Arp Line 01", T.err())
+        T.ok(T.err() == "Loading a preset: unchanged, X17 Arp Line 01", T.err())
         -- Another name: said, and the lists' place forgotten.
         T.event()
-        T.tripFrom(row("select_expansion_preset", 1), W)
+        T.tripFrom(row("load_expansion_preset", 1), W)
         T.tick(3)
         T.nameReads("X17 Bass Line 01")
-        T.ok(T.err() == "Selecting a preset: VPS Avenger shows X17 Bass Line 01 where X17 Arp Line 02 lies by its place in Arp",
+        T.ok(T.err() == "Loading a preset: VPS Avenger shows X17 Bass Line 01 where X17 Arp Line 02 lies by its place in Arp",
           T.err())
         T.ok(T.count("where the lists stand is forgotten: the preset read after the click is X17 Bass Line 01, not X17 Arp "
           .. "Line 02") == 1, T.dump())
         clicks = #S.clicks
         T.event()
-        T.tripFrom(row("select_expansion_preset", 1), W)
+        T.tripFrom(row("load_expansion_preset", 1), W)
         T.tick(3)
-        T.ok(T.clicksSince(clicks) == "165,190 325,200", "its category again: " .. T.clicksSince(clicks))
+        T.ok(T.clicksSince(clicks) == "165,190 325,200 325,200", "its category again: " .. T.clicksSince(clicks))
         T.nameReads("X17 Arp Line 02")
         -- Nothing read: never the database's name.
         T.event()
@@ -1526,11 +1634,15 @@ fn a_preset_is_selected_or_loaded_at_its_place_and_confirmed_by_its_name() {
 /// top after it, so the tool's three clicks at the presets' scrollbar's top, (228, 58) — (463, 177),
 /// the first moving nothing and the others not made, and one at its bottom, (228, 227) — (463, 447);
 /// the row at (142, 217.5) — (325, 432). Then its 30th, page 3: from page 1, the top three times —
-/// once moving, then not — and the bottom three times, the row at (142, 222.5) — (325, 440).
+/// once moving, then not — and the bottom three times, the row at (142, 222.5) — (325, 440). A Select
+/// is a preview: the preset loaded stays, and nothing is said.
 #[test]
 fn a_preset_far_down_its_category_is_reached_by_the_tools_scrollbar_clicks() {
     run_mac(&scenario(r##"
-        local _, _, W = T.browserPage({ mode = "open", open = T.openOf("Cinematic Pads") })
+        local _, _, W = T.browserPage({ mode = "open", open = T.openOf("Cinematic Pads") },
+          { words = { preset = "X4 Strings Line 01" } })
+        local preset = T.st().preset
+        T.ok(preset == "X4 Strings Line 01", "the key read the preset: " .. tostring(preset))
         local function pick(within)
           local st = T.st()
           local k = 0
@@ -1549,8 +1661,8 @@ fn a_preset_far_down_its_category_is_reached_by_the_tools_scrollbar_clicks() {
           "the 21st: " .. tostring(S.browser.clicked[#S.browser.clicked]))
         T.ok(T.count("X4 Strings Line 21 is the 21 of 30 in Strings — page 2, row 14; 4 click(s) on the presets' scrollbar")
           == 1, T.dump())
-        T.nameReads("X4 Strings Line 21")
-        T.ok(T.st().preset == "X4 Strings Line 21" and T.err() == "", T.err())
+        T.run(2400)
+        T.ok(T.st().preset == preset and T.err() == "", T.err())
         local n = #S.clicks
         T.event()
         T.tripFrom({ action = "select_expansion_preset", args = { preset_index = pick(30), keep_preset_category = "Strings" },
@@ -1559,32 +1671,36 @@ fn a_preset_far_down_its_category_is_reached_by_the_tools_scrollbar_clicks() {
         T.ok(T.clicksSince(n) == "463,177 463,177 463,447 463,447 463,447 325,440", "from page 1: " .. T.clicksSince(n))
         T.ok(S.browser.open.presetPage == 3 and S.browser.clicked[#S.browser.clicked] == "preset X4 Strings Line 30",
           "the 30th: " .. tostring(S.browser.clicked[#S.browser.clicked]))
-        T.nameReads("X4 Strings Line 30")
-        T.ok(T.st().preset == "X4 Strings Line 30" and T.err() == "", T.err())
+        T.run(2400)
+        T.ok(T.st().preset == preset and T.err() == "", T.err())
         T.ok(T.held() == 0, "every picture released: " .. T.held())
     "##));
 }
 
 /// The page shows every category; the preset asked is X17 Bass Line 01, in Bass: Bass clicked first,
-/// (165, 222), and then the row, (325, 180). The page's category comes back "__all__". Then X17 Arp
-/// Line 01: the category this session's clicks left shown is Bass, so Arp is clicked first.
+/// (165, 222), and then the row, (325, 180). The page's category comes back "__all__", the preset
+/// loaded the one it was (a Select is a preview). Then X17 Arp Line 01: the category this session's
+/// clicks left shown is Bass, so Arp is clicked first.
 #[test]
 fn a_preset_of_another_category_has_its_category_clicked_first() {
     run_mac(&scenario(r##"
-        local _, _, W = T.browserPage({ mode = "open", open = T.openOf("Synthwave") })
+        local _, _, W = T.browserPage({ mode = "open", open = T.openOf("Synthwave") },
+          { words = { preset = "X17 Arp Line 01" } })
         T.tripFrom({ action = "select_expansion_preset", args = { preset_index = 2, keep_preset_category = "__all__" },
           focused = true }, W)
         T.tick(3)
         T.ok(T.clicksSince(0) == "165,222 325,180", "Bass, then the row: " .. T.clicksSince(0))
-        T.nameReads("X17 Bass Line 01")
-        T.ok(T.st().selected_preset_category == "__all__" and T.st().preset == "X17 Bass Line 01", tostring(T.st().selected_preset_category))
+        T.run(2400)
+        local st = T.st()
+        T.ok(st.selected_preset_category == "__all__" and st.preset == "X17 Arp Line 01" and st.loaded_expansion_preset_index == 0
+          and T.err() == "", tostring(st.selected_preset_category) .. " " .. tostring(st.preset) .. " '" .. T.err() .. "'")
         local n = #S.clicks
         T.event()
         T.tripFrom({ action = "select_expansion_preset", args = { preset_index = 0, keep_preset_category = "__all__" },
           focused = true }, W)
         T.tick(3)
         T.ok(T.clicksSince(n) == "165,190 325,180", "Arp, then the row: " .. T.clicksSince(n))
-        T.nameReads("X17 Arp Line 01")
+        T.run(2400)
         T.ok(T.held() == 0, "every picture released: " .. T.held())
     "##));
 }

@@ -441,6 +441,71 @@ fn rename_osc_double_clicks_the_tab_reads_its_name_unsnapped_and_focuses_its_ren
     "##));
 }
 
+/// The ring names a tab as the page last read it (the review of 2026-10-26): on AR Band Pass Slide,
+/// whose tabs the database names Arp, OSC 2 and Lead, the key reads the first as Pluck, and OSC 2
+/// is renamed Wobble from the page. Back in Avenger the Oscillator stepper says Wobble, and Pluck a
+/// step to the left. A rename is an edit of the preset's tabs, so the third, its name not read, is
+/// OSC 3 — not the database's Lead. ▶ to AR Deep Arp forgets the edit, and ◀ back to AR Band Pass
+/// Slide loads it from its file again: the names read before are the preset before's, and the
+/// stepper says the database's Arp.
+#[test]
+fn the_rings_stepper_says_a_tab_as_the_page_read_it_and_none_of_the_databases_after_a_rename() {
+    run_mac(&scenario(r##"
+        T.presets()
+        local header, _, W = T.avengerAt80("AR Band Pass Slide")
+        local SEL1 = { osc = 3, selected = "osc", index = 1 }
+        local SEL2 = { osc = 3, selected = "osc", index = 2 }
+        local SEL3 = { osc = 3, selected = "osc", index = 3 }
+        local i = nil
+        for k, c in ipairs(header.controls) do if c.label == "Oscillator" then i = k end end
+        T.paintAvenger(98, 84, 1.6, SEL2)
+        T.words({ preset = "AR Band Pass Slide", ["osc 1"] = "Pluck" })
+        header.focus = i - 1
+        T.tab()
+        T.ok(T.lastSaid() == "Oscillator, OSC 2, slider", T.said())
+        T.pageReady()
+        T.openPage()
+        T.event()
+        T.ok(T.lastPost("state").state.osc_panel.names[1] == "Pluck", "read at the key")
+        T.reads("AR Band Pass Slide", "Wobble", { preset = "AR Band Pass Slide", ["osc 1"] = "Pluck" })
+        T.renameOpen({ action = "rename_osc", args = { index = 2 }, focused = true }, W, SEL2, { 341.4, 28, 438.6, 42 })
+        T.ok(S.holding["Return"], "handed over")
+        T.commit("Return", SEL2)
+        local o = T.lastPost("state").state.osc_panel
+        T.ok(o.names[1] == "Pluck" and o.names[2] == "Wobble" and o.names[3] == nil, tostring(o.names[2]))
+        T.event()
+        S.focusAtOnce, S.focusLands = true, function() S.front, S.chain = W, { W } end
+        T.pageKey()
+        T.event()
+        T.run(400)
+        T.ok(header.active and S.front == W, "the header again")
+        T.ok(T.lastSaid() == "Oscillator, Wobble, slider", "the arrival: " .. T.said())
+        T.stepAt(header, i, -1)
+        T.repaint(SEL1)
+        T.tick(4)
+        T.ok(string.find(T.lastSaid() or "", "Pluck", 1, true) ~= nil, T.said())
+        T.stepAt(header, i, 1)
+        T.repaint(SEL2)
+        T.tick(4)
+        T.stepAt(header, i, 1)
+        T.repaint(SEL3)
+        T.tick(4)
+        T.ok(string.find(T.lastSaid() or "", "OSC 3", 1, true) ~= nil and string.find(T.lastSaid(), "Lead", 1, true) == nil,
+          T.said())
+        T.repaint({ osc = 1, selected = "osc", index = 1 })
+        T.ok(T.step(header, 3, "AR Band Pass Slide", "AR Deep Arp") == "AR Deep Arp", T.said())
+        header.focus = i - 1
+        T.tab()
+        T.ok(T.lastSaid() == "Oscillator, One Osc, slider", T.said())
+        T.repaint(SEL1)
+        T.step(header, 2, "AR Deep Arp", "AR Band Pass Slide")
+        header.focus = i - 1
+        T.tab()
+        T.ok(T.lastSaid() == "Oscillator, Arp, slider", "the file's names again: " .. T.said())
+        T.ok(T.held() == 0, "every picture released: " .. T.held())
+    "##));
+}
+
 /// The selection is no editor: renaming OSC 2 with OSC 1 selected, Avenger painting the selection
 /// at the first click, the field's picture is taken once the selection has been seen, so the
 /// double-click's open wait sees no change — an editor that never opens is said, with the strip as

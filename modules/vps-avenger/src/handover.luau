@@ -332,24 +332,33 @@ local function renameTab(o, trip, i, n, pl, label, before)
     kind = "osc", label = label, pl = pl, at = { T.tabX(i, n), T.TAB_Y }, field = span, after = "strip",
     part = before,
     read = function(_, _, now, pl2, info)
-      if not now then return { part = before, error = Hv.NOT_READ } end
-      local va, keys = Open.part(now, "strip", { pl = pl2, preset = E.ring.lastName() })
+      local preset = E.ring.lastName()
+      -- Return may have renamed the tab, read back or not: the database's names of the preset's
+      -- tabs name none of them from now on (state.luau, S.tabsEdited). Escape renamed nothing.
+      local facts = info.key ~= "Escape" and { oscEdited = { preset = preset } } or nil
+      if not now then return { part = before, facts = facts, error = Hv.NOT_READ } end
+      local va, keys = Open.part(now, "strip", { pl = pl2, preset = preset })
       local name = textIn(pl2, now, span)
       log("'osc %d': %s — %s", i, tostring(info.key), name and ("read '" .. name .. "'") or "nothing read")
       local part = { keys = keys, values = va }
-      if not name then return { part = part, error = Hv.NOT_READ } end
+      if not name then return { part = part, facts = facts, error = Hv.NOT_READ } end
+      -- The other tabs' names as last read where they were read under this preset's name and over
+      -- this count (Open.keptNames) — kept as read under them again — and holes otherwise.
       local w = E.plugin()
-      local known = S.values(w and w.id) or {}
+      local count = va.oscCount or n
+      local keptNames, keptSnapped = Open.keptNames(S.values(w and w.id), preset, count)
       local names, snapped = {}, {}
-      for j = 1, va.oscCount or n do
-        names[j] = known.oscNames and known.oscNames[j]
-        snapped[j] = known.oscSnapped and known.oscSnapped[j]
+      for j = 1, count do
+        names[j] = keptNames and keptNames[j]
+        snapped[j] = keptSnapped and keptSnapped[j]
       end
       names[i], snapped[i] = name, false
       va.oscNames, va.oscSnapped = names, snapped
+      va.oscNamesOf = { preset = preset, count = count, at = S.changes() }
       keys[#keys + 1] = "oscNames"
       keys[#keys + 1] = "oscSnapped"
-      return { part = part, focus = "osc-rename-" .. i }
+      keys[#keys + 1] = "oscNamesOf"
+      return { part = part, facts = facts, focus = "osc-rename-" .. i }
     end,
   })
 end
@@ -362,7 +371,8 @@ end
 -- picture, and a double-click that selected it would show the open wait a change that is no editor.
 -- Then the shared flow on the tab, its picture before taken once the selection has been seen. After
 -- it the strip is read again and the tab's name off the same picture: posted as read, never
--- snapped, the other tabs' names as last read.
+-- snapped, the other tabs' names as last read under the same preset's name and count
+-- (Open.keptNames); after Return the tabs are noted as edited (state.luau, S.tabsEdited).
 function Hv.renameOsc(o, trip, i)
   local pl = placer(o)
   if not pl then return trip:done({ error = "VPS Avenger's size cannot be told now" }) end
@@ -386,7 +396,10 @@ function Hv.renameOsc(o, trip, i)
     clicked = click ~= nil
     return click, refusal
   end
-  log("'osc %d': the strip reads %s selected — OSC %d is selected first", i, Osc.tabWords(vb) or "no tab", i)
+  -- The log names an OSC tab as Avenger's own caption does, as the tab it is about here.
+  local shown = vb.selectedType == "osc" and vb.selectedIndex and ("OSC " .. vb.selectedIndex)
+    or Osc.tabWords(vb)
+  log("'osc %d': the strip reads %s selected — OSC %d is selected first", i, shown or "no tab", i)
   Act.run(o, sel, function(result)
     if not trip:inFront() then return end
     -- Nothing clicked: refused, as the double-click would have been.

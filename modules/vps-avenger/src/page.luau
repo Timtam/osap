@@ -405,7 +405,7 @@ local function open(o, answer)
   end
   local ok, err = pcall(Reads.read, o, { zoom = E.zoomOf(origin), mark = mark,
     expected = before and before.selectedExpansion or nil,
-    window = win.id }, function(values, why, words)
+    window = win.id, preset = E.ring.lastName() }, function(values, why, words)
     if not values then
       host.log.info("[avenger] [page] not shown: " .. tostring(why))
       if words then say(words) end

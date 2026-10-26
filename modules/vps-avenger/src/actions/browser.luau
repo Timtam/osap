@@ -5,9 +5,10 @@
 -- presets) and the tool's page and scroll tables (src/tables/pages.luau). Nothing below the browser's
 -- header is read as text: the grid's names, the categories and the preset rows read nothing at
 -- Avenger's sizes, as the tool's developer found. What a click did is read where it can be: the
--- header's name after an Open, the preset's name after Select and Load, a star's pixels after Mark,
--- FAV's pixels, the header and a picture test of its title band after Close, and where nothing told
--- before Close, the view list's pixels (src/read/browser.luau).
+-- header's name after an Open, the preset's name after Load (a Select is a preview, which loads
+-- none: B.preset), a star's pixels after Mark, FAV's pixels, the header and a picture test of its
+-- title band after Close, and where nothing told before Close, the view list's pixels
+-- (src/read/browser.luau).
 -- The tool wrote the state it assumed after every click; here only what was read is posted, and
 -- what this session's own clicks did that nothing shows — the category clicked, the presets' page
 -- scrolled to, the grid's page — is kept as facts by window (state.luau, S.browserAt) and forgotten
@@ -43,8 +44,9 @@
 --                         its category clicked first where this session's clicks did not leave it
 --                         shown, the presets' scrollbar clicked to its page by the tool's measured
 --                         table (Pg.presetPlace, Pg.presetScroll), then a click, a double-click, or a
---                         click on its star at the tool's row — the preset's name watched after the
---                         first two and confirming it, the star read after the third
+--                         click on its star at the tool's row — Select a preview, the strip and the
+--                         macros read after it and no name; Load's double-click confirmed by the
+--                         preset's name watched after it; the star read after Mark's click
 --   align_open_expansion  Correct open Expansion (the plan's slice 10): no click — the name and ONE
 --                         picture of the header read with no expansion expected; what it does not
 --                         settle is "cannot be told now" (the tool read the area twice, 0.45 s apart)
@@ -896,15 +898,20 @@ end
 -- ("mark"), as the tool clicks them: the preset's category clicked first where this session's clicks
 -- did not leave it shown (the tool clicked it where the page showed every category, and assumed it
 -- shown otherwise), the presets' scrollbar clicked to the preset's page by the tool's table, then
--- its row's click, its double-click, or its star's click. `forget` (actions.luau's go) is told
--- before a click that may load a preset. Select and Load are confirmed by the preset's name read
--- after them; one that is not the preset asked is said, and where the lists stand is forgotten.
+-- its row's click, its double-click, or its star's click. Load is confirmed by the preset's name
+-- read after it, `forget` (actions.luau's go) told before its double-click; a name that is not the
+-- preset asked is said, and where the lists stand is forgotten. Select is a PREVIEW: Avenger lets
+-- the preset be heard and loads none — the header's name stays — so, as the tool's
+-- action_select_expansion_preset, no name is read before or after it, nothing is forgotten, and
+-- nothing is said of the name (the avenger_control developer's report of 2026-10-26, of the
+-- "unchanged, <name>" a Select brought: "Das ist auch nicht nötig. Das kannst du rausnehmen.");
+-- the presets' change is waited for, then the strip and the macros read again, the tool's refresh.
 function B.preset(o, trip, forget, kind, arg, label, known)
   local lists, expansion = known.lists, known.selectedExpansion
   local target, cat = arg.target, arg.category
   local pname = lists.presets[target]
   local was = nil
-  if kind ~= "mark" then
+  if kind == "load" then
     was = E.ring.nameNow(o) or E.ring.lastName()
     if not trip:inFront() then return end
   end
@@ -940,31 +947,50 @@ function B.preset(o, trip, forget, kind, arg, label, known)
     S.forgetBrowserAt(ctx.window, "the preset read after the click is " .. tostring(now) .. ", not " .. pname)
   end
 
-  -- Select and Load: the name watched as after ◀ and ▶, then the strip and the macros read with their
-  -- text (the tool's refresh), and with FAV on the stars of the rows shown once more.
-  local function afterName(now, before, changed)
-    -- The watch's end comes on a later turn: the strip and the macros are read only on Avenger.
-    if not trip:inFront() then return end
-    if now == nil then return trip:done({ part = browserPart(nil), error = "the preset name cannot be read now" }) end
+  -- After Select and Load: the strip and the macros read with their text (the tool's
+  -- _refresh_osc_panel_from_screen), and with FAV on the stars of the rows shown once more — off
+  -- picture `s` (taken over) where the caller has one from after the click, else off one taken
+  -- after those reads. The browser's part with them, or nil where the trip has left Avenger.
+  local function refreshed(s)
     local part = browserPart(nil)
+    local states, starred = nil, false
+    -- The stars of the rows shown, off picture `pic`, which is let go of.
+    local function stars(pic)
+      local rows = Br.shownRows(pl, ctx.window, expansion, lists)
+      if rows and trip:inFront() then Br.stars(pic, pl, rows) end
+      pic:release()
+      states, starred = rows and starsOver(rows, known, expansion) or nil, true
+    end
+    if s then
+      if fav then stars(s) else s:release() end
+      if not trip:inFront() then return nil end
+    end
     local function read(name, text)
       local v, keys = Act.partBefore(pl, name, text, function(fmt, ...) log(fmt, ...) end)
       if v then part = merged(part, { keys = keys, values = v }) end
     end
     read("strip", true)
-    if not trip:inFront() then return end
+    if not trip:inFront() then return nil end
     read("macros", true)
-    if not trip:inFront() then return end
-    if fav then
-      local s = picture(ctx)
-      if s then
-        local rows = Br.shownRows(pl, ctx.window, expansion, lists)
-        if rows and trip:inFront() then Br.stars(s, pl, rows) end
-        s:release()
-        if not trip:inFront() then return end
-        part.values.favoriteStates = rows and starsOver(rows, known, expansion) or nil
+    if not trip:inFront() then return nil end
+    if fav and not starred then
+      local p = picture(ctx)
+      if p then
+        stars(p)
+        if not trip:inFront() then return nil end
       end
     end
+    if starred then part.values.favoriteStates = states end
+    return part
+  end
+
+  -- Load: the name watched as after ◀ and ▶, then the refresh.
+  local function afterName(now, before, changed)
+    -- The watch's end comes on a later turn: the strip and the macros are read only on Avenger.
+    if not trip:inFront() then return end
+    if now == nil then return trip:done({ part = browserPart(nil), error = "the preset name cannot be read now" }) end
+    local part = refreshed(nil)
+    if not part then return end
     local loaded = loadedIn(now, expansion)
     part = merged(part, { keys = { "loadedIndex" }, values = { loadedIndex = loaded } })
     local result = { set = E.named(now), part = part }
@@ -1028,21 +1054,34 @@ function B.preset(o, trip, forget, kind, arg, label, known)
       end
       return round(pic)
     end
-    -- Whatever a click on a row does in Avenger — select, load — may change the preset.
-    forget("the page's " .. label)
-    log("'%s': %s %s at (%d,%d), the tool's row %d of page %d of %s", label, kind == "load" and "double-clicking"
-      or "clicking", pname, x, y, place.row + 1, place.page + 1, cat)
-    pic:release()
-    local ok, said
-    if kind == "load" then
-      ok, said = E.ring.doublePoint(o, label, x, y, true, function(okD, saidD)
-        if okD then return E.ring.watchName(o, was, afterName, label) end
-        if trip:inFront() then trip:done({ sentence = saidD }) end
+    if kind == "select" then
+      -- A preview loads nothing (above): nothing is forgotten, and no name is watched for. The
+      -- presets' list is watched from the picture before the click, Avenger drawing the row
+      -- selected — a bound on looking, not a decision: unchanged at it (the row selected already),
+      -- the refresh is made all the same, and nothing is said.
+      log("'%s': clicking %s at (%d,%d), the tool's row %d of page %d of %s", label, pname, x, y, place.row + 1,
+        place.page + 1, cat)
+      local ok, said = E.ring.clickPoint(o, label, x, y, nil, true)
+      if not ok then
+        pic:release()
+        return trip:done({ sentence = said })
+      end
+      return waitFrom(trip, ctx, pic, onScreen(ctx, { X.PRESET_TEXT }), CHANGE_WITHIN, B.SETTLE, function(s, changed)
+        log("'%s': %s after the click", label, changed and "the presets' list changed"
+          or "nothing in the presets' list changed")
+        local part = refreshed(s)
+        if part then trip:done({ part = part }) end
       end)
-    else
-      ok, said = E.ring.clickPoint(o, label, x, y, nil, true)
-      if ok then E.ring.watchName(o, was, afterName, label) end
     end
+    -- A double-click on a row loads the preset.
+    forget("the page's " .. label)
+    log("'%s': double-clicking %s at (%d,%d), the tool's row %d of page %d of %s", label, pname, x, y, place.row + 1,
+      place.page + 1, cat)
+    pic:release()
+    local ok, said = E.ring.doublePoint(o, label, x, y, true, function(okD, saidD)
+      if okD then return E.ring.watchName(o, was, afterName, label) end
+      if trip:inFront() then trip:done({ sentence = saidD }) end
+    end)
     if not ok then return trip:done({ sentence = said }) end
   end
 

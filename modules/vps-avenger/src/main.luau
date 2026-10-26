@@ -56,6 +56,8 @@ local DB = host.include("src/presets.luau")
 local R = host.include("src/read/ocr.luau")
 local Page = host.include("src/page.luau")
 local Ring = host.include("src/ring.luau")
+-- What the page is told; here only that the preset may have changed (S.presetMayHaveChanged).
+local S = host.include("src/state.luau")
 -- Where Avenger's popups are painted, for the drawn menu test (below, the binding).
 local Popups = host.include("src/popups.luau")
 
@@ -315,18 +317,23 @@ local function noted(t)
 end
 
 -- The preset may have changed, and nothing has read it since: and with it everything the ring
--- read of the oscillators and the macros (ring.luau).
+-- read of the oscillators and the macros (ring.luau), and the OSC tabs' names a read keeps
+-- (state.luau, S.presetMayHaveChanged).
 local function unseen()
   names.init = nil
   Ring.forget()
+  S.presetMayHaveChanged()
 end
 
 -- The name last read, for the reads that place it in the database (read/open.luau) — nil from the
 -- moment the preset may have changed with nothing read since (`unseen`): the second Mac test's ring
--- placed "Init Preset" right after Resurrection was loaded from MENU. `names.last` itself stays, for
--- the watch's `was`.
+-- placed "Init Preset" right after Resurrection was loaded from MENU. Nil too while a step's watch
+-- is out (`names.pending`), from its click until the name after it has settled: the ring's strip
+-- read in that time was placed by the name before, and said the preset before's tabs for the rest
+-- of the stay (the review of 2026-10-26; ring.luau reads its strip again once a name is known).
+-- `names.last` itself stays, for the watch's `was`.
 local function lastName()
-  return names.init ~= nil and names.last or nil
+  return names.init ~= nil and names.pending == nil and names.last or nil
 end
 
 local function tidy(text)
@@ -449,8 +456,10 @@ local function presetStep(ov, label, at, dir)
       end
       local was = read or names.last
       if not clickAt(o, label, at) then return end
-      -- Another preset: what the ring read of its oscillators and macros is not Avenger's any more.
+      -- Another preset: what the ring read of its oscillators and macros is not Avenger's any more,
+      -- nor the tabs' names a read keeps.
       Ring.forget()
+      S.presetMayHaveChanged()
       -- The name read before the click places the preset the step starts from; worked out once
       -- the click is sent, so that the first use's index load never holds the click back.
       local step = nil

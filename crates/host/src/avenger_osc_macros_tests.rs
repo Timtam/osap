@@ -1122,6 +1122,256 @@ fn a_mute_under_another_tabs_solo_is_said_as_silenced_by_it() {
     "##));
 }
 
+/// The avenger_control developer's report of 2026-10-26: the ring's Oscillator stepper said only
+/// "OSC 1", "OSC 2", where the page names the tabs. A tab is now said by its name: one read off the
+/// screen first, else the preset database's for the preset read — as it is, with no "from the
+/// database" (the maintainer, 2026-10-26) — else "OSC <i>". AR Band Pass Slide's three tabs are
+/// Arp, OSC 2 (none of the sound designer's) and Lead: the stepper says Arp, and two steps on Lead,
+/// with no text read on a step; Mute and Solo say Lead, and so does Mute's answer; under Arp's
+/// Solo, Mute is silenced by Arp's Solo. Add oscillator reads the names: a name read wins, and the
+/// fourth tab, not read, is OSC 4 — four tabs are not the database's three, whose names are then
+/// not taken. The words come from the stepper's own function, Osc.tabWords, which takes a name read
+/// over the database's.
+#[test]
+fn the_rings_oscillator_stepper_mute_and_solo_say_a_tab_by_its_name() {
+    run_mac(&scenario(r##"
+        T.presets()
+        local header = T.avengerAt80("AR Band Pass Slide")
+        T.paintAvenger(98, 84, 1.6, { osc = 3, selected = "osc", index = 1 })
+        T.words({})
+        local i = T.indexOf(header, "Oscillator")
+        header.focus = i - 1
+        T.tab()
+        T.ok(T.lastSaid() == "Oscillator, Arp, slider", T.said())
+        -- Two steps: the strip read before and after each click, its text never.
+        local reads = #S.recognized
+        T.stepAt(header, i, 1)
+        T.repaint({ osc = 3, selected = "osc", index = 2 })
+        T.tick(4)
+        T.ok(string.find(T.lastSaid() or "", "OSC 2", 1, true) ~= nil, T.said())
+        T.stepAt(header, i, 1)
+        T.repaint({ osc = 3, selected = "osc", index = 3 })
+        T.tick(4)
+        T.ok(string.find(T.lastSaid() or "", "Lead", 1, true) ~= nil and string.find(T.lastSaid(), "OSC", 1, true) == nil,
+          T.said())
+        local texts = {}
+        for k = reads + 1, #S.recognized do texts[#texts + 1] = tostring(S.recognized[k].name) end
+        T.ok(#texts == 0, "no text read on a step: " .. table.concat(texts, ", "))
+        -- Mute and Solo of Lead.
+        local m, s = T.indexOf(header, "Mute"), T.indexOf(header, "Solo")
+        header.focus = m - 1
+        T.tab()
+        T.ok(T.lastSaid() == "Mute, Lead, off, button", T.said())
+        T.pressAt(header, m)
+        T.repaint({ osc = 3, selected = "osc", index = 3, mute = { [3] = true } })
+        T.tick(3)
+        T.ok(T.lastSaid() == "Lead Mute ON", T.said())
+        header.focus = s - 1
+        T.tab()
+        T.ok(T.lastSaid() == "Solo, Lead, off, button", T.said())
+        -- Under Arp's Solo.
+        T.pressAt(header, m)
+        T.repaint({ osc = 3, selected = "osc", index = 3, mute = { [3] = true }, solo = { [1] = true } })
+        T.tick(16)
+        T.ok(T.lastSaid() == "Lead Mute, silenced by Arp's Solo, unchanged", T.said())
+        header.focus = m - 1
+        T.tab()
+        T.ok(T.lastSaid() == "Mute, Lead, silenced by Arp's Solo, button", T.said())
+        -- Add oscillator: the names read, the new fourth tab selected and not read.
+        T.words({ ["osc 1"] = "Arp", ["osc 2"] = "Wobble", ["osc 3"] = "Lead" })
+        reads = #S.recognized
+        T.pressAt(header, T.indexOf(header, "Add oscillator"))
+        T.repaint({ osc = 4, selected = "osc", index = 4 })
+        T.tick(3)
+        T.ok(T.lastSaid() == "4 oscillators", T.said())
+        local named = {}
+        for k = reads + 1, #S.recognized do named[tostring(S.recognized[k].name)] = true end
+        T.ok(named["osc 2"] and named["osc 4"], "the names read after Add oscillator, as a step reads none")
+        header.focus = i - 1
+        T.tab()
+        T.ok(T.lastSaid() == "Oscillator, OSC 4, slider", T.said())
+        T.stepAt(header, i, -1)
+        T.repaint({ osc = 4, selected = "osc", index = 3 })
+        T.tick(4)
+        T.ok(string.find(T.lastSaid() or "", "Lead", 1, true) ~= nil, T.said())
+        header.focus = m - 1
+        T.tab()
+        T.ok(T.lastSaid() == "Mute, Lead, off, button", T.said())
+        -- The stepper's words: a name read over a read's words for the tab (a name kept, or the
+        -- database's), those over Avenger's own.
+        local Osc = S.included["modules/vps-avenger/src/actions/osc.luau"][1]
+        local both = { selectedType = "osc", selectedIndex = 2, oscNames = { [2] = "Wobble" },
+          oscWords = { "Arp", "Bass", "Lead" } }
+        T.ok(Osc.tabWords(both) == "Wobble", tostring(Osc.tabWords(both)))
+        both.oscNames = { [1] = "Arp" }
+        T.ok(Osc.tabWords(both) == "Bass" and Osc.oscName(4, both) == "OSC 4", tostring(Osc.tabWords(both)))
+        T.ok(string.find(T.said(), "database", 1, true) == nil, "no mark: " .. T.said())
+        T.ok(T.held() == 0, "every picture released: " .. T.held())
+    "##));
+}
+
+/// Where the database gives no name, a tab is Avenger's "OSC <i>": for a preset it places by
+/// similarity alone (a poor read of AR Band Pass Slide), for one it does not have, and where the
+/// strip shows another count than the database's three — a tab added or deleted since.
+#[test]
+fn the_rings_oscillator_stepper_says_osc_i_where_the_database_names_no_tab() {
+    for (name, osc) in [("AR Band Pass Slida", 3), ("My Own Lead", 3), ("AR Band Pass Slide", 2)] {
+        let s = r##"
+            T.presets()
+            local header = T.avengerAt80("@NAME@")
+            T.paintAvenger(98, 84, 1.6, { osc = @OSC@, selected = "osc", index = 1 })
+            T.words({})
+            header.focus = T.indexOf(header, "Oscillator") - 1
+            T.tab()
+            T.ok(T.lastSaid() == "Oscillator, OSC 1, slider", "@NAME@, @OSC@ tabs: " .. T.said())
+            header.focus = T.indexOf(header, "Mute") - 1
+            T.tab()
+            T.ok(T.lastSaid() == "Mute, OSC 1, off, button", "@NAME@, @OSC@ tabs: " .. T.said())
+            T.ok(T.held() == 0, "every picture released: " .. T.held())
+        "##
+        .replace("@NAME@", name)
+        .replace("@OSC@", &osc.to_string());
+        run_mac(&scenario(&s));
+    }
+}
+
+/// The page's own answers say a tab as the page shows it (the review of 2026-10-26): the key reads
+/// AR Band Pass Slide's first tab as Pluck, so choosing it, selected already, is "unchanged, Pluck
+/// is selected", and its Mute "Pluck Mute ON" — never the database's Arp, which the page does not
+/// show. After ▶ to a preset the database does not have, the names the key read are the preset
+/// before's, and the tab is OSC 1 again; ◀ back to AR Band Pass Slide loads it from its file again,
+/// and the tab is the database's Arp, not Pluck. A Copy of a tab whose name was not read is the
+/// database's name, as the stepper says it; and a Paste over it is an edit of the preset's tabs,
+/// after which the ring takes none of the database's names for them: back in Avenger the stepper
+/// says OSC 1.
+#[test]
+fn the_pages_answers_say_a_tab_as_shown_and_an_edit_takes_the_databases_names_away() {
+    run_mac(&scenario(r##"
+        T.presets()
+        local _, _, W = T.avengerAt80("AR Band Pass Slide")
+        T.pageReady()
+        T.paintAvenger(98, 84, 1.6, { osc = 3, selected = "osc", index = 1 })
+        T.words({ preset = "AR Band Pass Slide", ["osc 1"] = "Pluck", ["osc 2"] = "OSC 2", ["osc 3"] = "Lead" })
+        T.openPage()
+        T.event()
+        T.ok(T.lastPost("state").state.osc_panel.names[1] == "Pluck", "read at the key")
+        T.tripFrom({ action = "select_osc_tab", args = { index = 1 }, focused = true }, W)
+        T.tick(16)
+        T.ok(T.lastPost("error").text == "Choosing an oscillator tab: unchanged, Pluck is selected", T.lastPost("error").text)
+        T.event()
+        T.tripFrom({ action = "toggle_osc_mute", args = { index = 1 }, focused = true }, W)
+        T.repaint({ osc = 3, selected = "osc", index = 1, mute = { [1] = true } })
+        T.settle()
+        T.ok(T.count("[avenger] [act] 'An oscillator's Mute': changed — Pluck Mute ON") == 1, T.dump())
+        -- ▶ to My Own Lead: the page's state keeps the names, which are the preset before's.
+        T.event()
+        T.tripFrom({ action = "next_preset", args = {}, focused = true }, W)
+        T.nameReads("My Own Lead", 600)
+        T.ok(T.lastPost("state").state.preset == "My Own Lead", tostring(T.lastPost("state").state.preset))
+        T.event()
+        T.tripFrom({ action = "select_osc_tab", args = { index = 1 }, focused = true }, W)
+        T.tick(16)
+        T.ok(T.lastPost("error").text == "Choosing an oscillator tab: unchanged, OSC 1 is selected", T.lastPost("error").text)
+        -- ◀ back to AR Band Pass Slide loads it again from its file: the database's Arp, not Pluck.
+        T.event()
+        T.tripFrom({ action = "prev_preset", args = {}, focused = true }, W)
+        T.nameReads("AR Band Pass Slide", 600)
+        T.event()
+        T.tripFrom({ action = "select_osc_tab", args = { index = 1 }, focused = true }, W)
+        T.tick(16)
+        T.ok(T.lastPost("error").text == "Choosing an oscillator tab: unchanged, Arp is selected", T.lastPost("error").text)
+        T.ok(T.held() == 0, "every picture released: " .. T.held())
+    "##));
+    run_mac(&scenario(r##"
+        T.presets()
+        local header, _, W = T.avengerAt80("AR Band Pass Slide")
+        T.paintAvenger(98, 84, 1.6, { osc = 3, selected = "osc", index = 1 })
+        T.words({ preset = "AR Band Pass Slide" })
+        local i = T.indexOf(header, "Oscillator")
+        header.focus = i - 1
+        T.tab()
+        T.ok(T.lastSaid() == "Oscillator, Arp, slider", T.said())
+        T.pageReady()
+        T.openPage()
+        T.event()
+        T.tripFrom({ action = "osc_menu_item", args = { index = 1, item = "Copy" }, focused = true }, W)
+        T.paintAvenger(98, 84, 1.6, { osc = 3, selected = "osc", index = 1, popup = { 265, 36, 340, 90 } })
+        T.tick(3)
+        T.closePopups()
+        T.repaint({ osc = 3, selected = "osc", index = 1 })
+        T.settle(4)
+        T.ok(T.lastPost("state").state.osc_panel.copied == "Arp" and T.lastPost("error").text == "",
+          tostring(T.lastPost("state").state.osc_panel.copied))
+        T.event()
+        T.tripFrom({ action = "osc_menu_item", args = { index = 1, item = "Paste" }, focused = true }, W)
+        T.paintAvenger(98, 84, 1.6, { osc = 3, selected = "osc", index = 1, popup = { 265, 36, 340, 90 } })
+        T.tick(3)
+        T.ok(T.clickAt() == "522,175", "Paste's row: " .. T.clickAt())
+        T.repaint({ osc = 3, selected = "osc", index = 1 })
+        T.tick(20)
+        T.ok(T.lastPost("error").text == "An oscillator's menu: Paste chosen; nothing VPS Avenger shows changed",
+          T.lastPost("error").text)
+        T.event()
+        -- Back in Avenger with the page key: the arrival on the stepper says OSC 1, not Arp.
+        S.focusAtOnce, S.focusLands = true, function() S.front, S.chain = W, { W } end
+        T.pageKey()
+        T.event()
+        T.run(400)
+        T.ok(header.active and S.front == W, "the header again")
+        T.ok(T.lastSaid() == "Oscillator, OSC 1, slider", "the arrival: " .. T.said())
+        T.ok(T.held() == 0, "every picture released: " .. T.held())
+    "##));
+}
+
+/// After ▶ no name is known until the watch has settled on one (main.luau, lastName): the stepper
+/// read before then — Tab onto it at once — says OSC 1, not the database's Arp of the preset
+/// before, and once the watch has read AR Deep Arp the strip is read again for its one tab, One
+/// Osc. After MENU's Load the preset is most likely the user's own file, whatever its name: AR Band
+/// Pass Slide loaded so is said OSC 1, the database's names not taken.
+#[test]
+fn the_rings_tab_names_wait_for_the_name_a_step_settles_on_and_take_none_after_load() {
+    run_mac(&scenario(r##"
+        T.presets()
+        local header = T.avengerAt80("AR Band Pass Slide")
+        T.paintAvenger(98, 84, 1.6, { osc = 3, selected = "osc", index = 1 })
+        local i = T.indexOf(header, "Oscillator")
+        header.focus = i - 1
+        T.tab()
+        T.ok(T.lastSaid() == "Oscillator, Arp, slider", T.said())
+        T.nameIs("AR Band Pass Slide")
+        T.pressAt(header, 3)
+        header.focus = i - 1
+        T.tab()
+        T.ok(T.lastSaid() == "Oscillator, OSC 1, slider", "before the watch read a name: " .. T.said())
+        T.repaint({ osc = 1, selected = "osc", index = 1 })
+        for _ = 1, 25 do
+          T.run(150)
+          local r = T.lastRead("vps-avenger name")
+          if r and not r.answered then T.answer(r, T.nameRead("AR Deep Arp")) end
+        end
+        T.ok(T.lastSaid() == "AR Deep Arp", T.said())
+        local snaps = S.snaps
+        header.focus = i - 1
+        T.tab()
+        T.ok(T.lastSaid() == "Oscillator, One Osc, slider" and S.snaps == snaps + 1, "read again: " .. T.said())
+        -- MENU's Load, with no dialog seen: the name read after it all the same.
+        local base = { osc = 3, selected = "osc", index = 1 }
+        T.pressAt(header, T.indexOf(header, "Load preset"))
+        T.paintAvenger(98, 84, 1.6, { osc = 3, selected = "osc", index = 1, popup = { 242, 20, 322, 70 } })
+        T.tick(3)
+        T.ok(T.clickAt() == "549,135", "Load's row: " .. T.clickAt())
+        T.repaint(base)
+        T.nameIs("AR Band Pass Slide")
+        T.run(8200)
+        T.nameReads("AR Band Pass Slide")
+        T.ok(T.lastSaid() == "Load preset: AR Band Pass Slide — no file dialog was seen", T.said())
+        header.focus = i - 1
+        T.tab()
+        T.ok(T.lastSaid() == "Oscillator, OSC 1, slider", "after Load: " .. T.said())
+        T.ok(T.held() == 0, "every picture released: " .. T.held())
+    "##));
+}
+
 /// What the ring read is forgotten where Avenger may have changed with nothing of the ring's read
 /// since: after a trip of the page — the overlay away meanwhile, not told it left — after ▶, which
 /// may load another preset, and after UNDO, which may take it back. Mute says the switch read

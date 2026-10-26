@@ -2,9 +2,18 @@
 -- saying the latest read of its part of Avenger in this stay, and acting through the same specs as
 -- the page's trips (src/actions/osc.luau, src/actions/macros.luau, src/act.luau):
 --
---   Oscillator            a stepper over OSC 1 to n, Drums and Trig: the tab read as selected
---   Mute, Solo            the selected tab's, on or off as read — a Mute under another tab's Solo
---                         said as silenced by it (read/strip.luau, Strip.silencedBy); Return clicks it
+--   Oscillator            a stepper over OSC 1 to n, Drums and Trig: the tab read as selected, an
+--                         OSC tab by its name as the page names it — read off the screen where an
+--                         action of the ring's read the names, else as the page last read it under
+--                         the same preset's name and count, else the preset database's for the
+--                         preset read where this session edited none of its tabs, said as it is,
+--                         else Avenger's "OSC 1" (src/actions/osc.luau, Osc.oscName;
+--                         read/open.luau, wordsFor; the avenger_control developer's report of
+--                         2026-10-26). These cost no read: the strip's read places the preset
+--                         anyway
+--   Mute, Solo            the selected tab's, by the same name, on or off as read — a Mute under
+--                         another tab's Solo said as silenced by it (read/strip.luau,
+--                         Strip.silencedBy); Return clicks it
 --   Add oscillator        Return adds one, none at eight
 --   the Drums tab's group (the plan's slice 8), shown only once the strip read in this stay reads the
 --   Drums tab selected, through the specs of src/actions/drums.luau:
@@ -147,10 +156,23 @@ local function merge(name, keys, values)
   if name == "central" then cache.parts.drumsq = true end
 end
 
--- Part `name` read now, unless it was in this stay — in the handler that asks, where the picture
--- and its questions wait. The values, or nil when nothing could be read.
+-- Whether the words for the OSC tabs this stay's read holds (read/open.luau's wordsFor) were taken
+-- for the preset's name known now — always, for a part that reads no strip. A read made while no
+-- name was known — ▶'s watch out (main.luau, lastName) — is not, once one is: part `name` is read
+-- again, once, for the new preset's tabs.
+local function placedNow(name)
+  if not Open.PARTS[name].strip then return true end
+  local now = R.lastName()
+  return now == nil or cache.values.oscWordsOf == now
+end
+
+-- Part `name` read now, unless it was in this stay with its words taken for the name known now
+-- (placedNow) — in the handler that asks, where the picture and its questions wait. The values,
+-- or nil when nothing could be read.
 local function ensure(o, name, text)
-  if cache.parts[name] and (not text or cache.parts[name .. " text"]) then return cache.values end
+  if cache.parts[name] and (not text or cache.parts[name .. " text"]) and placedNow(name) then
+    return cache.values
+  end
   if pending then return nil end
   local origin = o:origin()
   local k = origin and H.factor(origin)
@@ -302,9 +324,12 @@ local function switch(ov, title)
       elseif kind then
         on = v[kind .. title]
       end
-      local who = kind == "osc" and ("OSC " .. index) or (kind == "drums" and "Drums" or "Trig")
+      -- The tab as the Oscillator stepper says it (Osc.oscName: an OSC tab by its name).
+      local who = Osc.tabWords(v)
       -- Under another tab's Solo, a Mute says nothing of its own (read/strip.luau, Strip.silencedBy).
-      local silenced = lower == "mute" and kind and Strip.silencedBy(v, kind, index)
+      local silenced = lower == "mute" and kind and Strip.silencedBy(v, kind, index, function(j)
+        return Osc.oscName(j, v)
+      end)
       if silenced then return who .. ", " .. silenced end
       if on == nil then return "not read" end
       return who .. ", " .. (on and "on" or "off")
