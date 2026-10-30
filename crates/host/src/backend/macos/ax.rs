@@ -9,7 +9,7 @@
 //! Three rules hold for every function here, taken from the Windows implementation because
 //! the host depends on them: never panic and never propagate an error (a failure is `None`,
 //! `false` or empty); bound every traversal by nodes and by depth, since an unbounded walk
-//! against an unresponsive plugin hangs the thread that carries the keyboard; and return
+//! against an unresponsive plugin hangs the event loop every captured key waits for; and return
 //! `None` for an element whose rectangle is collapsed or off-screen, so nothing ever clicks
 //! the centre of a zero-size box.
 //!
@@ -123,11 +123,13 @@ const CHILDREN_MAX: usize = 256;
 /// 2026-09-04: after its per-call timeout went in, one window still took thirty seconds to
 /// walk, because a budget that counts nodes cannot see a clock.
 ///
-/// **300 ms is not a guess.** It is the figure this file already names as the point past
-/// which macOS stops waiting for the event tap and switches it off — see the pump's own
-/// warning line. A walk that crosses it has already cost the user their keyboard, so there is
-/// nothing to be gained by letting it finish. Twenty times the pump's 15 ms budget, so it
-/// cannot fire on a healthy tree.
+/// **300 ms is what a person waits for one question.** It was first given as the point past
+/// which macOS stops waiting for the event tap and switches it off; the logs measured that point
+/// at about a second, and since 2026-10 the tap answers on a thread of its own, so a walk no longer
+/// holds the keyboard at all (`tap.rs`). What it still holds is the overlay: every captured key,
+/// every hotkey and every spoken line waits on the main thread while it runs, so a walk that has
+/// not found its answer in 300 ms is stopped rather than let finish. Twenty times the pump's 15 ms
+/// budget, so it cannot fire on a healthy tree.
 const HOT_DEADLINE: Duration = Duration::from_millis(300);
 
 /// And how long the DIAGNOSTIC dump may take, which is a different trade.
@@ -1814,8 +1816,8 @@ pub fn windows_of(pid: u32) -> Vec<crate::backend::WindowSpot> {
 ///
 /// The process-wide timeout is a second, and the unfiltered listing asks every running
 /// application in turn, so one process that never answers costs the whole second on the
-/// thread that carries the event tap — measured on the third Mac session at 2.0-2.3 s of a
-/// 3 s stall per probe press, four presses out of four, each of them switching the tap off.
+/// main thread — measured on the third Mac session at 2.0-2.3 s of a 3 s stall per probe press,
+/// four presses out of four, each of them switching the tap off while it shared that thread.
 /// A quarter second is what the messaging timeout used to be before a slow-but-alive plugin
 /// on a 2015 Air needed the full second, and that plugin is exactly the case this bound does
 /// NOT touch: an application a matcher names is asked through `enumerate_windows_of`, at the
@@ -2222,13 +2224,15 @@ pub fn active_window() -> Option<WinInfo> {
                 Some(w) => {
                     remember_front(pid, w.hwnd, Some(w.clone()));
                     // The key tap holds a NUMBER rather than asking this question itself —
-                    // asking it inside the tap callback is the one cross-process call that
-                    // must never happen there. That number is told to it by two
+                    // asking an application inside the tap callback is the cross-process call
+                    // that must never happen there. That number is told to it by two
                     // notifications, and a notification that arrives while the application
                     // is quarantined tells it nothing, so it can go stale and stay stale:
                     // no further notification is due while the user works inside one plugin.
                     // This is the same fact, resolved fresh, on the tick, for free. It costs
-                    // one atomic store and it is what makes the gate self-heal.
+                    // a lock held for a comparison — and a call into the system when the window's
+                    // application changed (`note_foreground`) — and it is what makes the gate
+                    // self-heal.
                     //
                     // Only on this arm on purpose: a REMEMBERED window is an answer about
                     // geometry, not about which window has the keyboard now, and writing it
@@ -2903,7 +2907,7 @@ pub fn window_focus_chain() -> Vec<ControlInfo> {
     // The quarantine applies here too, and this is the one read that could never record it.
     // The question goes to the SYSTEM-WIDE element, whose pid is 0, so a timeout here marked
     // nobody busy: while REAPER was not answering, every overlay recheck paid the full messaging
-    // timeout again — once per epoch, on the thread that carries the event tap, while the
+    // timeout again — once per epoch, on the main thread, while the
     // library overlays' 500 ms landmark polls turn epochs over constantly with a Kontakt window
     // in front. The frontmost application is asked of the workspace, which is local, and it is
     // the application the system-wide read would have been waiting on. Empty is the honest

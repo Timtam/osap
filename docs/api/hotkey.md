@@ -139,8 +139,10 @@ A module the application [stopped](../module-runtime-and-lifecycle.md#limits) �
 ran too long or out of memory — gives up its combinations at once, as a disabled one does, so
 they go to the program in front or to a waiting claim. Presses of a hotkey made while that
 callback held the application are dropped, with a `[keys]` line, rather than delivered all at
-once when it ends — on Windows; on a Mac a press during the stall is not dropped (not checked
-on a Mac yet). The application's own keys are the exception: pressed during the stall, the
+once when it ends — on a Mac too, by the moment the event tap saw the press's key-down on its
+own thread; a press the tap did not see, as before any module captured a key, is not dropped
+there (neither checked on a Mac yet). The application's own keys are the exception: pressed
+during the stall, the
 reload key reloads every module after the stop, and the quit key quits the application then. A
 stall that ends without a stop drops nothing.
 
@@ -276,7 +278,7 @@ A Carbon event hotkey — deliberately **not** an event tap, so this needs no In
 
 `{ foreground = true }` is accepted and changes nothing: a Carbon hotkey is the system's own delivery already, and there is no hook on its path.
 
-**Quick repeats** are timed when Carbon hands the press to the application's main thread, which also carries the event tap, so a press and a captured key are timed alike, and a press made while that thread was busy is timed late. The interval is `NSEvent.doubleClickInterval`, the double-click speed of the Mac's pointer settings. A key typed between two presses ends the count only while the event tap is in — that is, while some module captures a key with [`host.keys.capture`](./keys.md#host-keys-capture): Carbon alone sees nothing but its own combinations. A key `host.input.send` posted does not end it either way: its events carry a mark in their event-source user data ([`host.input.send`](./input.md#host-input-send-macos)), which the tap counts apart. The tap sees a hotkey's own key-down before Carbon matches it and counts it as let through, so a press may move that count by its own key-down and no more (not checked on a Mac yet).
+**Quick repeats** are timed by when the event tap saw the press's key-down, on its own thread, as a captured key is timed, so a press made while the main thread was busy is timed when it was made. A press the tap did not see is timed when Carbon hands it to the main thread, late after a stall; so is the second of two presses of one hotkey during one stall of the main thread, while the first carries the second's moment and counts ([`host.keys.capture`](./keys.md#host-keys-capture-macos), *Quick repeats*). The interval is `NSEvent.doubleClickInterval`, the double-click speed of the Mac's pointer settings. A key typed between two presses ends the count only while the event tap is in — that is, while some module captures a key with [`host.keys.capture`](./keys.md#host-keys-capture): Carbon alone sees nothing but its own combinations. A key `host.input.send` posted does not end it either way: its events carry a mark in their event-source user data ([`host.input.send`](./input.md#host-input-send-macos)), which the tap counts apart. The tap sees a hotkey's own key-down before Carbon matches it and counts it as let through, so a press may move that count by its own key-down and no more (not checked on a Mac yet).
 
 A chord that holds Control and Option together registers and never arrives while VoiceOver runs with its default modifier; the log says so once per chord, and [`host.keys.check`](./keys.md#host-keys-check) says so before you register. In a spec that is `Meta+Alt`, and the four-modifier chord holds it too. Ctrl+Alt without Win is Command+Option here, which is off it. A key that must be free system-wide is best Command+Shift with a function key (`"Cmd+Shift+F6"`): Command+Shift with a letter is the application-menu layer, and a hotkey there takes it from every application.
 

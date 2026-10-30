@@ -50,8 +50,8 @@ const FIRST_SWEEP: usize = 4096;
 /// application, on the pump; a table with more windows than this is swept further next time.
 const WINDOWS_PER_SWEEP: usize = 256;
 
-/// How long one sweep may spend asking windows whether they still exist, on the thread that
-/// carries the event tap. The rest are asked at the next sweep. A single read can still take
+/// How long one sweep may spend asking windows whether they still exist, on the main thread,
+/// which carries the pump. The rest are asked at the next sweep. A single read can still take
 /// the messaging timeout (`ax::MESSAGING_TIMEOUT`, a second) from an application that stops
 /// answering; it then goes into the busy quarantine and is not asked again this sweep.
 const SWEEP_BUDGET: Duration = Duration::from_millis(150);

@@ -457,8 +457,8 @@ fn ask_for_screen_recording(trigger: Trigger) -> Asked {
     Asked { open_pane: false, say: Some(SAY_SCREEN_LAST) }
 }
 
-/// The capture requests, on the request's own thread: nothing here may hold the thread that
-/// carries the event tap, and the wait for ScreenCaptureKit is bounded. `pause_first` when a
+/// The capture requests, on the request's own thread: nothing here may hold the main thread,
+/// which carries the pump, and the wait for ScreenCaptureKit is bounded. `pause_first` when a
 /// request was made the moment before; `fallback` is the line the log ends with, whatever came
 /// back — ScreenCaptureKit handing the content over is a strong sign, not a proof.
 fn capture_requests(macos_major: u64, pause_first: bool, fallback: String) {

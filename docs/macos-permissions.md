@@ -281,8 +281,8 @@ notices two ways:
   a second (since it was installed, re-enabled or created again), has seen no key at all.
   Nothing is concluded while secure keyboard entry is on (a password field, Terminal's *Secure
   Keyboard Entry*), which keeps every tap from the keys and leaves the shortcuts working, nor
-  while the system has the tap switched off: a stall of the main thread does that, and the key
-  then becomes the shortcut without passing the tap.
+  while the system has the tap switched off: a Mac too busy to run the tap's own thread does
+  that, and the key then becomes the shortcut without passing the tap.
 
 From then on it counts as needed — the page's line says why, and its head counts it — and the
 log says once:

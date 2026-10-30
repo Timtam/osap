@@ -111,7 +111,7 @@ const REFUSAL_RETRIES: u8 = 3;
 /// one the user is in, and the only one whose notifications matter until they switch, at
 /// which point the activation path asks anyway — and never while it is in the busy
 /// quarantine, because a subscription attempt against a wedged process is a messaging
-/// timeout paid on the thread that carries the event tap.
+/// timeout paid on the main thread, which carries the pump.
 const RETRY_FIRST: Duration = Duration::from_secs(2);
 const RETRY_CAP: Duration = Duration::from_secs(60);
 const RETRY_MAX: u8 = 10;
@@ -427,8 +427,10 @@ fn activated(app: &NSRunningApplication, announce: bool) {
             &format!("resolving the frontmost window of {name} (pid {pid}) took {took} ms"),
         );
     }
-    // The key tap compares against this rather than resolving it itself; doing that inside
-    // its callback would be a cross-process call on the one path that must not make any.
+    // The key tap compares against this rather than resolving the window itself: an
+    // accessibility question inside its callback would wait on the application in front, and every
+    // key of the Mac with it. (The one question it asks there is the window server's, which
+    // application is in front, for a key it would take: `tap::front_moved`.)
     //
     // Not told anything when the application did not answer. Storing the 0 would say "no
     // window is in front", which closes the scope gate for every hotkey an overlay owns; not
@@ -506,7 +508,7 @@ fn ensure_observer(pid: i32, app: &str) {
 
     // Not while it is in the busy quarantine. The activation path reads the frontmost window
     // first, and when that times out, subscribing straight after is a second messaging timeout
-    // against the same wedged process on the thread that carries the event tap. It also spent
+    // against the same wedged process on the main thread. It also spent
     // the retry budget: Kontakt 8 at start-up went from attempt 1 to attempt 8 of 10 almost
     // entirely on activations, not on the clock. So the application is put on the clock
     // WITHOUT using an attempt, and `retry_refused` asks once the quarantine has cleared.
@@ -915,8 +917,8 @@ fn on_notification(pid: i32, name: &CFString) {
         // sticky: nothing else is due to correct it while the user stays in the plugin, and
         // every scoped hotkey stops matching in the meantime. `active_window` refreshes the
         // same fact from the pump, which is what closes the gap this leaves open.
-        // Timed like the same read in `on_app_activated`: it runs inside the run loop that
-        // also carries the event tap, and was the one call on this path nobody measured.
+        // Timed like the same read in `on_app_activated`: it runs on the main run loop, which
+        // carries the pump, and was the one call on this path nobody measured.
         let started = Instant::now();
         let answered = super::ax::foreground_window_id();
         let took = started.elapsed().as_millis();

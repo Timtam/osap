@@ -10,9 +10,13 @@
 //! every hotkey and each has to demultiplex anyway, so this way is both cheaper and the
 //! documented arrangement.
 //!
-//! The handler itself does exactly one thing — push the id onto [`super::queue`] — for the
-//! same reason the event tap does: it runs on the thread that carries speech, detection and
-//! the pump, and anything it does is time the next keystroke waits for.
+//! The handler itself does exactly one thing — push the id onto [`super::queue`] — because it
+//! runs on the thread that carries speech, detection and the pump, and anything it does is time
+//! the next keystroke waits for.
+//!
+//! The keys the shortcuts are registered on are told to the event tap after every change
+//! ([`tell_tap`]): the tap, on its own thread, stamps each one's key-down with its counts and its
+//! moment, and the handler hands the press over with that stamp (`tap_queue::Shortcuts`).
 
 use core::ffi::c_void;
 use std::cell::{Cell, RefCell};
@@ -229,6 +233,7 @@ fn register_on_key(id: i32, spec: &str, vk: u32, mask: u8) -> Result<(), KeyRefu
             Registration { reference, spec: spec.to_string(), vk, mask, code: Some(code) },
         )
     });
+    tell_tap();
     crate::logging::trace("macos", || {
         format!("hotkey {id} registered: '{spec}' is key code {code:#04X} + mods {modifiers:#06X}")
     });
@@ -317,6 +322,7 @@ pub fn unregister(id: i32) {
     else {
         return;
     };
+    tell_tap();
     if reference.is_null() {
         // Parked: nothing is registered with Carbon to release.
         crate::logging::trace("macos", || format!("hotkey {id} unregistered while parked"));
@@ -334,6 +340,22 @@ pub fn unregister(id: i32) {
         return;
     }
     crate::logging::trace("macos", || format!("hotkey {id} unregistered"));
+}
+
+/// Tells the event tap the keys the shortcuts are held on now, as (key code, mask): every
+/// registration not parked (`tap::set_shortcut_keys`). After every registration and release —
+/// tens per window switch, each a copy of as many pairs.
+fn tell_tap() {
+    let keys: Vec<(u16, u8)> = REGISTERED.with(|m| {
+        m.borrow().values().filter(|r| !r.reference.is_null()).filter_map(|r| r.code.map(|c| (c, r.mask))).collect()
+    });
+    super::tap::set_shortcut_keys(&keys);
+}
+
+/// The key hotkey `id` is held on now, as (key code, mask); `None` for a parked one or an id not
+/// registered here. For the handler, which hands it over with the press.
+fn held_on(id: i32) -> Option<(u16, u8)> {
+    REGISTERED.with(|m| m.borrow().get(&id).filter(|r| !r.reference.is_null()).and_then(|r| r.code.map(|c| (c, r.mask))))
 }
 
 /// Installs the one process-wide handler, on first use.
@@ -412,8 +434,10 @@ unsafe extern "C" fn hotkey_handler(
         return eventNotHandledErr;
     }
     // The id went out as a `u32` and comes back as one; host ids are small and positive
-    // (allocated by a counter that starts at 1), so the round trip is exact.
-    queue::push_hotkey(hot_key_id.id as i32);
+    // (allocated by a counter that starts at 1), so the round trip is exact. With the key it is
+    // held on, whose key-down the tap stamped.
+    let id = hot_key_id.id as i32;
+    queue::push_hotkey(id, held_on(id));
     // Its key passed the event tap's place first: whether the tap saw it is Input Monitoring's
     // evidence. A few relaxed loads once anything is known.
     super::tap::note_shortcut();

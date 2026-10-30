@@ -6073,17 +6073,17 @@ impl Manager {
                             // The hazard is different on each platform, and the line has to
                             // name the right one: a Mac tester's log full of "Windows stops
                             // waiting for our keyboard hook" was a puzzle before it was a
-                            // diagnosis. On macOS the system switches off an event tap whose
-                            // thread stops answering; the watchdog in tap.rs re-enables it
-                            // and logs that it did, so the two lines can be read together.
+                            // diagnosis. Since 2026-10 the Mac's event tap answers on a thread
+                            // of its own as the Windows hook does, and the hazard is the same:
+                            // the keys wait for their callbacks, not for the tap.
                             #[cfg(windows)]
                             let hazard = "every captured key and hotkey pressed meanwhile \
                                           waited this long for its callback (the keyboard hook \
                                           itself answers on its own thread)";
                             #[cfg(target_os = "macos")]
-                            let hazard = "a stall this long is what gets the event tap \
-                                          switched off, and keys go uncaptured until the \
-                                          watchdog re-enables it";
+                            let hazard = "every captured key and hotkey pressed meanwhile \
+                                          waited this long for its callback (the event tap \
+                                          itself answers on its own thread)";
                             #[cfg(not(any(windows, target_os = "macos")))]
                             let hazard = "keys can be delivered without us while the pump \
                                           is this busy";

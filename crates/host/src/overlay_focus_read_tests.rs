@@ -3,7 +3,7 @@
 //! `overlay_menu_tests.rs`.
 //!
 //! Written for the maintainer's decisions of 2026-10-01. The reads were `host.ocr.recognize`, on the
-//! event loop, which on a Mac also carries the keyboard's event tap: an Intel MacBook Air spent 143
+//! event loop, which on a Mac also carried the keyboard's event tap then: an Intel MacBook Air spent 143
 //! to 786 ms in each of sforzando's focus reads, with every key waiting behind it. Now they are one
 //! `host.ocr.recognize` per announcement, under one key per overlay, and the announcement is ONE
 //! sentence — name, what follows it, value — said when the answer comes, as it was said before,

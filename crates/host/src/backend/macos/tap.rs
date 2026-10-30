@@ -1,20 +1,42 @@
-//! Capturing and suppressing keys, through a `CGEventTap`.
+//! Capturing and suppressing keys, through a `CGEventTap` on a thread of its own.
 //!
-//! This is the fragile one. A tap that takes too long inside its callback is switched off
-//! by the system and stays off, so the callback matches against a table and pushes; anything
-//! else happens later, on the pump. A watchdog re-enables it and says so in the log, because
-//! a tap that has quietly died looks exactly like an overlay that stopped working for no
-//! reason.
+//! This is the fragile one. Every key of the Mac passes the tap before any application sees it,
+//! and a tap that takes too long inside its callback is switched off by the system and stays off,
+//! so the callback matches against a table and pushes; anything else happens later, on the pump.
+//! A watchdog re-enables it and says so in the log, because a tap that has quietly died looks
+//! exactly like an overlay that stopped working for no reason.
+//!
+//! **Its own thread** (`key-tap`, at user-interactive priority, running a run loop of its own), as
+//! the Windows hook has one (`backend/hotkey_hook.rs`). On the main run loop, where it was until
+//! 2026-10, every stall of the main thread held every key of the Mac, VoiceOver's included, and
+//! from about a second on the system switched the tap off: the second Mac tester's log has 128
+//! late-key lines and 68 switch-offs, each after a stall of ours. Now:
+//!
+//! - the callback decides alone, from what the main thread told it — the captured set and the
+//!   scopes (one mutex, which the main thread holds for a copy), the window in front, the menu and
+//!   own-window gates and the layout's letters (atomics) — and never waits for the main thread's
+//!   work;
+//! - a key it takes is suppressed at once and queued (`tap_queue::Handover`, `queue.rs`): while the
+//!   main thread is busy the key waits there, never reaching the application underneath, and the
+//!   rest of the keyboard is not held at all;
+//! - so that a busy main thread cannot have keys taken for a window the user has left, the tap asks
+//!   the window server which application is in front for each key it would take for a capture
+//!   pinned to a window, and lets the key through to another one ([`front_moved`], `tap_front.rs`);
+//! - nothing on the tap's thread writes a line, the callback least of all — the log's lock is held
+//!   for the main thread's file writes: what a line needs is left in atomics and small queues
+//!   (`tap_handoff.rs`, `tap_queue::Notes`), and an observer on the main run loop writes it
+//!   ([`report_observer`]);
+//! - the watchdog and a re-creation run on the tap's thread, whose run loop holds the port.
 //!
 //! **Over days of uptime** the tap can fail in four ways, and each has an answer here:
 //!
 //! - *Switched off, and the system says so* (`kCGEventTapDisabledByTimeout`,
 //!   `kCGEventTapDisabledByUserInput`, delivered through the callback): re-enabled in the
-//!   callback at once; the log line is written afterwards, by the run-loop observer, because a
-//!   file write inside the callback — just after a wake, with the disk still spinning up — is
-//!   the kind of delay that switches a tap off again.
-//! - *Switched off without a word*: the watchdog asks `CGEventTapIsEnabled` at most every two
-//!   seconds and re-enables it.
+//!   callback at once; the log line is written afterwards, by the observer on the main run loop,
+//!   because a file write inside the callback — just after a wake, with the disk still spinning
+//!   up — is the kind of delay that switches a tap off again.
+//! - *Switched off without a word*: the watchdog, a two-second timer on the tap's run loop, asks
+//!   `CGEventTapIsEnabled` and re-enables it.
 //! - *Its mach port invalid* — the tap is gone, and re-enabling a dead port does nothing, so a
 //!   watchdog that only re-enabled would announce a repair every two seconds while no key
 //!   arrived: the tap is created again (`recreate`). One that stays off after being re-enabled
@@ -24,8 +46,8 @@
 //! - *Asleep, locked, switched away from* — the moments the tap is most likely to have been
 //!   touched: when the Mac wakes, the screen is unlocked or this user's session becomes active
 //!   again after fast user switching (`system.rs` hears all three and calls [`recheck_soon`]),
-//!   the watchdog checks at the next turn of the run loop without waiting for its two seconds,
-//!   and says what it found. While the screen is locked, or another user's session is in front,
+//!   the watchdog checks at once, woken on the tap's run loop, without waiting for its two
+//!   seconds, and says what it found. While the screen is locked, or another user's session is in front,
 //!   the tap sees no keys at all; that is the system's secure input, not a fault, and nothing is
 //!   done about it.
 //!
@@ -43,21 +65,20 @@
 //! does not swallow Command-Tab. Both halves of a suppressed key are swallowed — letting
 //! the key-up through hands the application underneath an orphan release.
 //!
-//! The state lives in atomics and one small mutex rather than in a `thread_local`, even
-//! though everything here runs on the main thread today. The captured set is written by the
-//! pump and read by the callback, and if the tap ever has to move to a run loop of its own —
-//! the escape hatch if the main loop turns out to be too slow to service it — a thread-local
-//! would go silently empty rather than fail to compile.
+//! The state the two threads share lives in atomics and in `std` mutexes held for a copy, a push
+//! or a swap, never across a call out of the process, and never in a `thread_local`, which the
+//! other thread would find silently empty.
 
 use std::ffi::c_void;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicPtr, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock, TryLockError};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::Instant;
 
 use objc2_core_foundation::{
-    kCFRunLoopCommonModes, CFMachPort, CFRetained, CFRunLoop, CFRunLoopActivity, CFRunLoopMode,
-    CFRunLoopObserver,
+    kCFRunLoopCommonModes, kCFRunLoopDefaultMode, CFAbsoluteTimeGetCurrent, CFMachPort, CFRetained,
+    CFRunLoop, CFRunLoopActivity, CFRunLoopObserver, CFRunLoopSource, CFRunLoopSourceContext,
+    CFRunLoopTimer, Type,
 };
 use objc2_core_graphics::{
     CGEvent, CGEventField, CGEventFlags, CGEventMask, CGEventTapInformation, CGEventTapLocation,
@@ -65,6 +86,8 @@ use objc2_core_graphics::{
     CGGetEventTapList,
 };
 
+use super::tap_front::{self, FrontCheck};
+use super::tap_queue::{Notes, Shortcuts, Stamp};
 use super::{key_age, keys, queue, tap_handoff, watch};
 use crate::backend::{capture_decision, menu_flag_owners, Capture, Captured, OwnerKeys, PassWhy, Pressed, Taken, MASK_TAP};
 use crate::errors::HostError;
@@ -144,10 +167,6 @@ static GATE_PASSED: [AtomicU64; tap_handoff::REASONS.len()] = [const { AtomicU64
 /// When the observer last said each reason's line, for its quiet three seconds ([`due`]).
 static GATE_SAID_MS: [AtomicU64; tap_handoff::REASONS.len()] = [const { AtomicU64::new(0) }; tap_handoff::REASONS.len()];
 
-/// Keys let through because the captured set was locked when they came ([`decide`]), since the
-/// observer last wrote it down ([`report_locked_out`]).
-static LOCKED_OUT: AtomicU32 = AtomicU32::new(0);
-
 static INSTALLED: AtomicBool = AtomicBool::new(false);
 
 // What the key capture has shown about Input Monitoring, for [`keys_seen`]: the evidence by which
@@ -176,13 +195,25 @@ fn note_on() {
 /// The tap's mach port, kept as a raw pointer so the callback and the watchdog can re-enable
 /// it. The retain taken at creation is released only by [`recreate`], after it has swapped a
 /// new port in: the tap lives as long as the process, and a dangling port here would be
-/// dereferenced from inside an OS callback.
+/// dereferenced from inside an OS callback. The callback, the watchdog and [`recreate`] run on the
+/// tap's thread, so none of them can hold the old port while it goes; the one reader on another
+/// thread, [`note_shortcut`] on the main thread, reads it under [`PORT_LOCK`], which [`recreate`]
+/// holds while it swaps and releases.
 static PORT: AtomicPtr<CFMachPort> = AtomicPtr::new(std::ptr::null_mut());
+static PORT_LOCK: Mutex<()> = Mutex::new(());
+
+/// The tap's run loop and the source that wakes its watchdog at once ([`recheck_soon`]), for the
+/// main thread to signal. Retained for the life of the process — the tap's thread never ends — so
+/// the main thread can use them through these pointers at any time.
+static TAP_LOOP: AtomicPtr<CFRunLoop> = AtomicPtr::new(std::ptr::null_mut());
+static RECHECK_SOURCE: AtomicPtr<CFRunLoopSource> = AtomicPtr::new(std::ptr::null_mut());
 
 /// The captures the modules currently want, each with its module, and what each module set with
 /// `host.keys.scope` and `host.keys.menuOpen`: what [`crate::backend::capture_decision`] decides
 /// every key by. Replaced by the host, each half wholesale; one lock, so the callback never
-/// reads a set and the owners from two different moments.
+/// reads a set and the owners from two different moments. The main thread holds it for a copy of
+/// a few pairs, and the tap's thread for one decision, so the callback waits for it — a
+/// microsecond at most — rather than let a key through untaken.
 static KEY_STATE: Mutex<KeyState> = Mutex::new(KeyState { set: Vec::new(), owners: Vec::new() });
 
 /// The tap's copy of the host's key table — see [`KEY_STATE`].
@@ -194,6 +225,52 @@ struct KeyState {
 /// The frontmost window as `watch` last saw it: the window every module's scope is compared
 /// with, read rather than asked — see [`decide`].
 static FOREGROUND: AtomicIsize = AtomicIsize::new(0);
+
+/// The application the main thread named with the window it last told the tap of
+/// ([`note_foreground`]): the window, its application's pid, and that application as the Process
+/// Manager names it, for the tap's question which application is in front ([`front_moved`]).
+static TOLD: Mutex<Told> = Mutex::new(Told { window: 0, pid: None, psn: None });
+
+struct Told {
+    window: isize,
+    pid: Option<i32>,
+    psn: Option<u64>,
+}
+
+/// What the tap's question which application is in front ([`front_moved`]) found, for the observer
+/// to write ([`report_front`]): the first answer's time in µs plus one (0 before it, and once said),
+/// the answers of a millisecond or more since the last line and the worst of them, the run of
+/// answers too slow in a row (`tap_front::slow_run`, the tap's thread alone), a question switched
+/// off by that run (the last answer's time in ms plus one; cleared by [`health_check`] after a
+/// wake, an unlock or the session back), and a key it let through — its key and mask packed
+/// (`tap_handoff::pack`), and the application the window server named.
+static FRONT_FIRST_US: AtomicU64 = AtomicU64::new(0);
+static FRONT_FIRST_SAID: AtomicBool = AtomicBool::new(false);
+static FRONT_SLOW: AtomicU32 = AtomicU32::new(0);
+static FRONT_SLOW_WORST_US: AtomicU64 = AtomicU64::new(0);
+static FRONT_SLOW_SAID_MS: AtomicU64 = AtomicU64::new(0);
+static FRONT_SLOW_RUN: AtomicU32 = AtomicU32::new(0);
+static FRONT_OFF_MS: AtomicU64 = AtomicU64::new(0);
+static FRONT_OFF_SAID: AtomicBool = AtomicBool::new(false);
+static FRONT_PASSED: AtomicU64 = AtomicU64::new(0);
+static FRONT_PASSED_PSN: AtomicU64 = AtomicU64::new(0);
+static FRONT_PASSED_SAID_MS: AtomicU64 = AtomicU64::new(0);
+
+/// The keys this application's shortcuts are registered on, with the stamp of each one's last
+/// key-down (`tap_queue::Shortcuts`), and their keycodes as a bitmap over the 128 keycodes in two
+/// words, for the callback to look before it takes the lock. Written by `hotkey.rs` on the main
+/// thread ([`set_shortcut_keys`]); stamped by the callback, claimed by Carbon's handler.
+static SHORTCUTS: Mutex<Shortcuts> = Mutex::new(Shortcuts::new());
+static SHORTCUT_CODES: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
+
+/// What the tap's thread found about the tap, for the observer to write ([`report_notes`]).
+static NOTES: Notes<TapNote> = Notes::new(16);
+/// The watchdog's timer or its wake-up source could not be made on the tap's thread
+/// ([`install_watchdog`]), for [`install`] to say.
+static WATCHDOG_MISSING: AtomicBool = AtomicBool::new(false);
+/// The trace lines of the callback, for the observer to write while tracing is on
+/// ([`report_traces`]).
+static TRACES: Notes<TraceNote> = Notes::new(64);
 
 /// Keycode + 1 of the modifier held with nothing pressed since, 0 when none is.
 static TAP_ARMED: AtomicU32 = AtomicU32::new(0);
@@ -274,37 +351,33 @@ static RECREATE_FAILURE_SAID: AtomicBool = AtomicBool::new(false);
 /// would keep every new one off too, and each round would cost a line and a port.
 static STAYS_OFF: AtomicBool = AtomicBool::new(false);
 
-/// Why the tap is to be checked at the next turn of the run loop rather than within the
-/// watchdog's two seconds: bits set through [`recheck_soon`] when `system.rs` hears of a wake,
-/// an unlock or the session coming back.
+/// Why the tap is to be checked at once rather than within the watchdog's two seconds: bits set
+/// through [`recheck_soon`] when `system.rs` hears of a wake, an unlock or the session coming back.
 static RECHECK: AtomicU32 = AtomicU32::new(0);
 pub(super) const RECHECK_WAKE: u32 = 1;
 pub(super) const RECHECK_UNLOCK: u32 = 2;
 pub(super) const RECHECK_SESSION: u32 = 4;
 
-static LAST_HEALTH_MS: AtomicU64 = AtomicU64::new(0);
-static LAST_LOCK_FAIL_MS: AtomicU64 = AtomicU64::new(0);
-
 /// Key presses that reached this callback late, and how late the worst of them was.
 ///
-/// The question behind it: does a busy main thread delay keys? The tap runs on the main run
-/// loop, and the pump that also runs there stalls for about a second at a time against an
-/// application that does not answer. The fifth session's two switch-offs were the probe's own
-/// long hotkey callback; during the ordinary one-second stalls the system did not switch the tap
-/// off, and nothing could say whether keys arrived late meanwhile. Moving the tap to its own
-/// thread is a real rebuild (the pump's queues are thread-local), so it waits for this answer.
+/// The question behind it was whether a busy main thread delays keys, while the tap ran on the
+/// main run loop: the second Mac tester's log answered it — 128 such lines, each beside a stall
+/// of ours — and the tap moved to a thread of its own. The line stays, and now measures that
+/// thread: no work of the main thread can make a key late here any more, so a late key is the
+/// system's delay in handing it over — App Nap, or a Mac too busy to run the tap's thread
+/// (`activity.rs`). What a busy main thread still costs an overlay's user is measured where the
+/// key is handed to its module (`queue.rs`, "waited for the event loop").
 ///
 /// Recorded in the callback — three relaxed atomic writes and a keycode lookup, nothing that
-/// locks, allocates or logs — and written by the run-loop observer
-/// once the loop is idle again, because a log line from inside the callback is exactly the kind
-/// of slowness that gets a tap switched off.
+/// locks, allocates or logs — and written by the observer on the main run loop, because a log
+/// line from inside the callback is exactly the kind of slowness that gets a tap switched off.
 static LATE_KEYS: AtomicU32 = AtomicU32::new(0);
 static LATE_WORST_MS: AtomicU64 = AtomicU64::new(0);
 static LATE_LAST_VK: AtomicU32 = AtomicU32::new(0);
 static LAST_LATE_REPORT_MS: AtomicU64 = AtomicU64::new(0);
 
-/// A key press this much older than the callback is reported. Well above a normal run-loop
-/// turn and well below the ~1 s at which the system gives up on a tap.
+/// A key press this much older than the callback is reported. Well above a normal hand-over
+/// and well below the ~1 s at which the system gives up on a tap.
 const LATE_KEY_MS: u64 = 250;
 
 // The two clocks an event timestamp can be in; see `key_age`. Declared here rather than taken
@@ -335,7 +408,7 @@ fn note_lateness(ev: &CGEvent, keycode: u16) {
     LATE_LAST_VK.store(keys::keycode_to_vk(keycode).unwrap_or(0), Ordering::Relaxed);
 }
 
-/// Writes what `note_lateness` gathered, at most once a second, from the idle run loop.
+/// Writes what `note_lateness` gathered, at most once a second, from the idle main run loop.
 fn report_lateness() {
     if LATE_KEYS.load(Ordering::Relaxed) == 0 || !due(&LAST_LATE_REPORT_MS, 1000) {
         return;
@@ -350,8 +423,9 @@ fn report_lateness() {
         "macos",
         &format!(
             "{n} key press(es) reached the event tap late, the worst {worst} ms after it was \
-             pressed (last vk {vk:#04x}) — the main thread was busy; the pump line nearby says \
-             with what"
+             pressed (last vk {vk:#04x}) — the tap's own thread was late, which no work of the main \
+             thread delays: the system handed the key over late (App Nap, or a Mac too busy to run \
+             the tap's thread)"
         ),
     );
 }
@@ -375,11 +449,21 @@ fn due(last: &AtomicU64, gap_ms: u64) -> bool {
     true
 }
 
+/// Installs the tap on a thread of its own, once: called on the main thread by `host.keys.capture`,
+/// which waits here until the thread has created the tap or failed to — a few milliseconds — and
+/// answers what it said. A thread that could not create the tap ends, and the next capture starts
+/// another.
 pub fn install() -> Result<(), HostError> {
     if INSTALLED.swap(true, Ordering::SeqCst) {
         return Ok(()); // already installed; `host.keys.capture` re-arms this on every call
     }
-    let (port, run_loop, enabled) = match create_and_attach() {
+    let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+    let spawned = std::thread::Builder::new().name("key-tap".into()).spawn(move || tap_thread(ready_tx));
+    let answer = match spawned {
+        Err(e) => Err(HostError::with(&crate::errors::keys::TAP_THREAD, format!("could not start the event tap's thread: {e}"))),
+        Ok(_) => ready_rx.recv().unwrap_or_else(|_| Err(HostError::of(&crate::errors::keys::TAP_ENDED))),
+    };
+    let (enabled, qos) = match answer {
         Ok(created) => created,
         Err(e) => {
             INSTALLED.store(false, Ordering::SeqCst);
@@ -387,13 +471,8 @@ pub fn install() -> Result<(), HostError> {
             return Err(e);
         }
     };
-    note_on();
     report_tap_list();
-
-    // The run loop retains the source, so letting ours go is right. The port is kept by
-    // hand: `tap_enable` needs it from inside the callback, where there is nothing to own it.
-    PORT.store(CFRetained::into_raw(port).as_ptr(), Ordering::SeqCst);
-    install_watchdog(&run_loop, unsafe { kCFRunLoopCommonModes });
+    install_report_observer();
 
     // Creation succeeding is not proof that keys will arrive: on the versions where Input
     // Monitoring is a separate switch, a tap can be created and simply never fire. The line
@@ -402,8 +481,9 @@ pub fn install() -> Result<(), HostError> {
     logging::line(
         "macos",
         &format!(
-            "event tap installed on the main run loop (enabled = {enabled}); if no key is \
-             ever captured after this, check Input Monitoring"
+            "event tap installed on its own thread (enabled = {enabled}{}); if no key is ever \
+             captured after this, check Input Monitoring",
+            if qos == 0 { String::new() } else { format!("; its priority could not be raised ({qos})") }
         ),
     );
     if !enabled {
@@ -413,12 +493,53 @@ pub fn install() -> Result<(), HostError> {
              not be captured; this is a permission or a secure-input session",
         );
     }
+    if process_calls().is_none() {
+        logging::line(
+            "macos",
+            "the Process Manager's GetFrontProcess is not in this macOS: the event tap cannot ask \
+             which application is in front, and decides every key by the window the main thread \
+             last told it of — while the main thread is busy, keys can be taken for a window the \
+             user has left",
+        );
+    }
     Ok(())
 }
 
-/// Creates the tap, puts its source on the main run loop and enables it: the port, the run
-/// loop, and whether the tap reports itself enabled. `Err` is what `host.keys.capture` answers,
-/// and the line for the log.
+/// The tap's thread: creates the tap and attaches it to this thread's run loop, with the watchdog
+/// and the source that wakes it ([`install_watchdog`]); tells [`install`] whether the tap reports
+/// itself enabled, and how raising the thread's priority went (0 when it took); then runs the run
+/// loop for the rest of the process. A tap it cannot create is what it tells [`install`] instead,
+/// and the thread ends.
+///
+/// User-interactive priority, the class the system gives the work a user is waiting for: every
+/// key of the Mac waits for this thread's callback.
+fn tap_thread(ready: std::sync::mpsc::SyncSender<Result<(bool, i32), HostError>>) {
+    let qos = super::ocr::set_thread_qos(libc::qos_class_t::QOS_CLASS_USER_INTERACTIVE);
+    let (port, run_loop, enabled) = match create_and_attach() {
+        Ok(created) => created,
+        Err(e) => {
+            let _ = ready.send(Err(e));
+            return;
+        }
+    };
+    // The run loop retains the source, so letting ours go is right. The port is kept by
+    // hand: `tap_enable` needs it from inside the callback, where there is nothing to own it.
+    PORT.store(CFRetained::into_raw(port).as_ptr(), Ordering::SeqCst);
+    note_on();
+    install_watchdog(&run_loop);
+    let _ = ready.send(Ok((enabled, qos)));
+    loop {
+        // Returns only when no source or timer is left in the default mode, and the watchdog's
+        // timer is never removed; were it ever to return, a pause keeps this from spinning.
+        CFRunLoop::run();
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+}
+
+/// Creates the tap, puts its source on the calling thread's run loop — the tap's own — and
+/// enables it: the port, the run loop, and whether the tap reports itself enabled. `Err` is what
+/// `host.keys.capture` answers, and the line for the log. The tap's thread only: [`tap_thread`]
+/// and [`recreate`].
 ///
 /// Created with `Default` rather than `ListenOnly`, which is the whole point: a listening
 /// tap sees the key and cannot stop it, and an overlay that speaks the control under Tab
@@ -461,15 +582,13 @@ fn create_and_attach() -> Result<(CFRetained<CFMachPort>, CFRetained<CFRunLoop>,
     let Some(source) = CFMachPort::new_run_loop_source(None, Some(&port), 0) else {
         return Err(HostError::of(&crate::errors::keys::TAP_SOURCE));
     };
-    // The MAIN run loop, which wxWidgets already runs: a tap only fires while a run loop is
-    // running in a mode its source was added to, and this application has no other loop to
-    // put it on. Common modes rather than the default one, because AppKit switches the main
-    // loop into its own modes while a menu is tracking or a modal panel is up — the moments
-    // an overlay most needs its keys.
-    let Some(run_loop) = CFRunLoop::main().or_else(CFRunLoop::current) else {
+    // The tap's own run loop, which runs nothing but the tap and its watchdog, in the default mode
+    // only: the main loop's common modes were for AppKit, which switches it into modes of its own
+    // while a menu is tracking or a modal panel is up, and this thread runs no AppKit.
+    let Some(run_loop) = CFRunLoop::current() else {
         return Err(HostError::of(&crate::errors::keys::TAP_NO_RUN_LOOP));
     };
-    run_loop.add_source(Some(&source), unsafe { kCFRunLoopCommonModes });
+    run_loop.add_source(Some(&source), unsafe { kCFRunLoopDefaultMode });
     CGEvent::tap_enable(&port, true);
     let enabled = CGEvent::tap_is_enabled(&port);
     REFUSED_TRUSTED.store(false, Ordering::Relaxed);
@@ -497,11 +616,9 @@ pub(super) fn keys_seen() -> super::evidence::Keys {
 /// thread). Its key passed the event tap's place on its way, so a tap that has been on for at
 /// least [`DEAF_AFTER_MS`] and has seen no key-down at all is not being handed the keyboard —
 /// unless secure input is on, which keeps every tap from the keys and leaves Carbon's shortcuts
-/// working, or the tap is off now: then nothing is concluded. Off is what a stall of this thread
-/// leaves (the log has shown iterations of a second): the system gives up on the tap, switches it
-/// off and hands the key on, so the key becomes the shortcut without the tap ever being called
-/// for it; the switch-off reaches the callback only when the thread is free again, before this or
-/// after it, and either way the tap was not deaf. Said once, the first time.
+/// working, or the tap is off now: then nothing is concluded. Off is what a tap the system gave up
+/// on leaves: it switches the tap off and hands the key on, so the key becomes the shortcut without
+/// the tap ever being called for it, and the tap was not deaf. Said once, the first time.
 pub(super) fn note_shortcut() {
     if CALLED.load(Ordering::Relaxed) || DEAF.load(Ordering::Relaxed) {
         return;
@@ -510,12 +627,16 @@ pub(super) fn note_shortcut() {
     if on_since == 0 || now_ms() + 1 < on_since + DEAF_AFTER_MS {
         return;
     }
-    // Switched off by the system, and the callback not yet told: on the main thread, as `PORT`'s
-    // every reader is.
-    let port = PORT.load(Ordering::Relaxed);
-    // SAFETY: the pointer came from a `CFRetained` whose retain only `recreate` releases, on this
-    // same thread, after swapping it out of `PORT`.
-    if port.is_null() || !CGEvent::tap_is_enabled(unsafe { &*port }) {
+    // Switched off by the system, and the callback not yet told. Under `PORT_LOCK`: this is the
+    // main thread, and the tap's thread may be creating the tap again.
+    let enabled = {
+        let _held = port_lock();
+        let port = PORT.load(Ordering::Acquire);
+        // SAFETY: the pointer came from a `CFRetained` whose retain only `recreate` releases, under
+        // `PORT_LOCK`, after swapping it out of `PORT`.
+        !port.is_null() && CGEvent::tap_is_enabled(unsafe { &*port })
+    };
+    if !enabled {
         return;
     }
     match secure_input() {
@@ -550,76 +671,170 @@ fn secure_input() -> Option<bool> {
     f.map(|p| unsafe { core::mem::transmute::<usize, IsSecureEventInputEnabledFn>(p)() } != 0)
 }
 
+/// [`PORT_LOCK`], whatever a panic elsewhere left it as: it guards no data.
+fn port_lock() -> MutexGuard<'static, ()> {
+    PORT_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Creates the tap again, because the one we have cannot be brought back: its mach port is
 /// invalid, or it stays switched off after being re-enabled. The new tap is at the head of the
 /// taps again; the captured set, the scope and the menu flag are statics it reads as the old one
 /// did, and what the old one remembered of held keys is forgotten.
 ///
-/// Main thread only (the observer and the pump), never inside the callback — the old port is
-/// invalidated here, which removes its source from the run loop and the tap from the system.
-/// Its retain is then released: [`PORT`] no longer holds it, and everything that reads
-/// [`PORT`] — the callback, the watchdog, this — runs on the main thread, so nothing can be
-/// holding the old pointer while it goes.
+/// The tap's thread only (its watchdog), never inside the callback: the new tap's source goes on
+/// this thread's run loop, and the old port is invalidated here, which removes its source from
+/// the run loop and the tap from the system. Its retain is then released: [`PORT`] no longer holds
+/// it, the callback and the watchdog run on this thread, and the main thread's one reader holds
+/// [`PORT_LOCK`] as this does, so nothing can be holding the old pointer while it goes.
 ///
 /// When the new tap reports itself off as well, [`STAYS_OFF`] is set: the watchdog then leaves
 /// it alone until it reports itself on, or a wake, an unlock or this session becoming active
-/// again asks for a fresh look.
-fn recreate(why: &str) {
+/// again asks for a fresh look. Writes no line, as nothing on this thread does: what it did is
+/// left for the observer ([`TapNote`]).
+fn recreate(cause: Cause) {
     match create_and_attach() {
         Ok((port, _run_loop, enabled)) => {
-            let old = PORT.swap(CFRetained::into_raw(port).as_ptr(), Ordering::SeqCst);
-            if let Some(old) = NonNull::new(old) {
-                // SAFETY: the pointer came from `CFRetained::into_raw`, and this is the one
-                // place its retain is given back — after the swap above took it out of `PORT`.
-                let old = unsafe { CFRetained::from_raw(old) };
-                old.invalidate();
-                drop(old);
+            {
+                let _held = port_lock();
+                let old = PORT.swap(CFRetained::into_raw(port).as_ptr(), Ordering::SeqCst);
+                if let Some(old) = NonNull::new(old) {
+                    // SAFETY: the pointer came from `CFRetained::into_raw`, and this is the one
+                    // place its retain is given back — after the swap above took it out of `PORT`.
+                    let old = unsafe { CFRetained::from_raw(old) };
+                    old.invalidate();
+                    drop(old);
+                }
             }
             forget_held_keys();
             note_on();
             RECREATE_FAILURE_SAID.store(false, Ordering::Relaxed);
             let n = RECREATES.fetch_add(1, Ordering::Relaxed) + 1;
-            let stays_off = !enabled;
-            STAYS_OFF.store(stays_off, Ordering::Relaxed);
-            logging::line(
-                "macos",
-                &format!(
-                    "the event tap was created again ({why}) — #{n}, enabled = {enabled}; it is \
-                     at the head of the taps again, and the captured keys carried over{}",
-                    if stays_off {
-                        ". The new tap is off as well — a permission, or secure input: it is not \
-                         created again until it reports itself on, or the Mac wakes, the screen \
-                         is unlocked or this session becomes active again"
-                    } else {
-                        ""
-                    }
-                ),
-            );
+            STAYS_OFF.store(!enabled, Ordering::Relaxed);
+            NOTES.push(TapNote::Recreated { cause, n, enabled });
         }
-        Err(msg) => {
+        Err(e) => {
             if !RECREATE_FAILURE_SAID.swap(true, Ordering::Relaxed) {
-                logging::line(
-                    "macos",
-                    &format!(
-                        "the event tap had to be created again ({why}) and could not be: {msg}. \
-                         Keys are not captured; tried again at every watchdog check, and said \
-                         again only once it works"
-                    ),
-                );
+                NOTES.push(TapNote::NotRecreated { cause, error: e.message().to_string() });
             }
         }
     }
 }
 
-/// Checks the tap at the next turn of the run loop rather than within the watchdog's two
-/// seconds, and writes what was found even when it is fine, because `bits` — a wake, an unlock,
-/// this session active again — is a moment the tap is most likely to have been touched.
-/// Called by `system.rs`, which hears those moments for the whole backend. Nothing is asked
-/// before the tap exists: the first check after its installation would otherwise report on a
-/// wake it never went through.
+/// What the tap's thread found about the tap, left for the observer on the main run loop to write
+/// ([`report_notes`]): the lines [`health_check`] and [`recreate`] wrote themselves while they
+/// ran on the main thread. `who` is the [`RECHECK`] bits the check was asked for, 0 for the
+/// watchdog's own round.
+enum TapNote {
+    /// Found switched off and re-enabled: re-enable `n` of the session.
+    Reenabled { who: u32, n: u32 },
+    /// Created again: re-creation `n`, and whether the new tap reports itself enabled.
+    Recreated { cause: Cause, n: u32, enabled: bool },
+    /// Could not be created again; said once until a re-creation works.
+    NotRecreated { cause: Cause, error: String },
+    /// Checked after a wake, an unlock or the session back, and valid and enabled.
+    Fine { who: u32 },
+    /// The question which application is in front, switched off by answers too slow (the last
+    /// took `took_ms`), asked again after a wake, an unlock or the session back.
+    FrontOn { who: u32, took_ms: u64 },
+}
+
+/// Why the tap was created again.
+enum Cause {
+    /// Its mach port was invalid: the tap was gone.
+    PortInvalid { who: u32 },
+    /// It stayed off when re-enabled (re-enable `n`).
+    StayedOff { who: u32, n: u32 },
+}
+
+/// Who found it: the watchdog, or the check after the moments in `who` ([`recheck_words`]).
+fn who_words(who: u32) -> String {
+    if who == 0 {
+        "the watchdog".to_string()
+    } else {
+        format!("the check after {}", recheck_words(who))
+    }
+}
+
+fn cause_words(cause: &Cause) -> String {
+    match *cause {
+        Cause::PortInvalid { who } => format!("{} found its mach port invalid — the tap was gone", who_words(who)),
+        Cause::StayedOff { who, n } => {
+            format!("{} found it switched off, and it stayed off when re-enabled (#{n})", who_words(who))
+        }
+    }
+}
+
+/// Writes what the tap's thread left ([`TapNote`]). Called by the observer on every turn of the
+/// main run loop: one lock and an empty swap when there is nothing to say.
+fn report_notes() {
+    let (notes, dropped) = NOTES.take();
+    for note in notes {
+        let line = match note {
+            TapNote::Reenabled { who, n } => format!(
+                "the event tap had been switched off and {} found it (re-enable #{n}) — keys were not \
+                 being captured until now; the system switched it off, around a sleep or a lock, or for \
+                 a callback it found too slow",
+                who_words(who)
+            ),
+            TapNote::Recreated { cause, n, enabled } => format!(
+                "the event tap was created again ({}) — #{n}, enabled = {enabled}; it is at the head \
+                 of the taps again, and the captured keys carried over{}",
+                cause_words(&cause),
+                if enabled {
+                    ""
+                } else {
+                    ". The new tap is off as well — a permission, or secure input: it is not \
+                     created again until it reports itself on, or the Mac wakes, the screen \
+                     is unlocked or this session becomes active again"
+                }
+            ),
+            TapNote::NotRecreated { cause, error } => format!(
+                "the event tap had to be created again ({}) and could not be: {error}. Keys are not \
+                 captured; tried again at every watchdog check, and said again only once it works",
+                cause_words(&cause)
+            ),
+            TapNote::Fine { who } => {
+                format!("{}: the event tap was checked and is valid and enabled", recheck_words(who))
+            }
+            TapNote::FrontOn { who, took_ms } => {
+                // A later switch-off is said again.
+                FRONT_OFF_SAID.store(false, Ordering::Relaxed);
+                format!(
+                    "{}: the event tap asks the window server again which application is in front, \
+                     for each key it would take for a capture pinned to a window — switched off \
+                     after answers too slow, the last {took_ms} ms",
+                    recheck_words(who)
+                )
+            }
+        };
+        logging::line("macos", &line);
+    }
+    if dropped > 0 {
+        logging::line("macos", &format!("{dropped} more event-tap line(s) were not kept between two turns of the main run loop"));
+    }
+}
+
+/// Checks the tap at once rather than within the watchdog's two seconds, and writes what was
+/// found even when it is fine, because `bits` — a wake, an unlock, this session active again — is
+/// a moment the tap is most likely to have been touched. Called by `system.rs` on the main thread,
+/// which hears those moments for the whole backend: the bits are left for the tap's thread, and
+/// its run loop is woken through the source that runs the check there ([`install_watchdog`]),
+/// the cross-thread signal Core Foundation documents (`CFRunLoopSourceSignal`, then
+/// `CFRunLoopWakeUp`). Nothing is asked before the tap exists: the first check after its
+/// installation would otherwise report on a wake it never went through.
 pub(super) fn recheck_soon(bits: u32) {
-    if INSTALLED.load(Ordering::SeqCst) {
-        RECHECK.fetch_or(bits, Ordering::Relaxed);
+    if !INSTALLED.load(Ordering::SeqCst) {
+        return;
+    }
+    RECHECK.fetch_or(bits, Ordering::Relaxed);
+    let source = RECHECK_SOURCE.load(Ordering::Acquire);
+    let run_loop = TAP_LOOP.load(Ordering::Acquire);
+    if !source.is_null() && !run_loop.is_null() {
+        // SAFETY: both are retained for the life of the process ([`TAP_LOOP`]).
+        unsafe {
+            (*source).signal();
+            (*run_loop).wake_up();
+        }
     }
 }
 
@@ -638,10 +853,10 @@ fn recheck_words(bits: u32) -> String {
     words.join(", ")
 }
 
-/// The key table, for the host's side: only a panic while the lock was held can poison it, and
-/// nothing here panics. Take the contents anyway rather than give up the key set for the rest of
-/// the session.
-fn key_state() -> std::sync::MutexGuard<'static, KeyState> {
+/// The key table, for the host's side and the callback's: only a panic while the lock was held
+/// can poison it, and nothing here panics. Take the contents anyway rather than give up the key
+/// set for the rest of the session.
+fn key_state() -> MutexGuard<'static, KeyState> {
     match KEY_STATE.lock() {
         Ok(g) => g,
         Err(poisoned) => poisoned.into_inner(),
@@ -683,7 +898,7 @@ pub fn set_key_owners(owners: &[OwnerKeys]) {
     held.owners.extend_from_slice(owners);
     drop(held);
     if !gone.is_empty() {
-        MENU_PASS.with(|m| m.borrow_mut().retain(|p| !gone.contains(&p.0)));
+        menu_pass().retain(|p| !gone.contains(&p.0));
     }
     logging::trace("macos", || {
         let each: Vec<String> = owners
@@ -751,7 +966,7 @@ pub fn note_pinned(window: isize) {
         let stale = FOREGROUND.load(Ordering::Relaxed);
         match super::ax::foreground_window_id() {
             Some(now) => {
-                FOREGROUND.store(now, Ordering::Relaxed);
+                note_foreground(now);
                 logging::line(
                     "macos",
                     &format!(
@@ -785,34 +1000,36 @@ pub fn note_pinned(window: isize) {
     });
 }
 
-/// Is the tap still alive? Re-enables it and says so if not.
+/// Is the tap still alive? Re-enables it, or creates it again, and leaves what it found for the
+/// observer to write ([`TapNote`]).
 ///
-/// Rate-limited internally, so it is safe to call from anywhere that runs often. The
-/// in-callback re-enable below covers the case where the system tells us; this covers the
-/// case where it does not, and where nobody would otherwise notice until the user reported
-/// that the overlay had gone quiet.
+/// The tap's thread only: the watchdog's timer and the source [`recheck_soon`] signals both run
+/// it there ([`install_watchdog`]), so that a busy main thread never delays a re-enable, and a
+/// re-creation is made on the run loop that holds the port. The in-callback re-enable covers the
+/// case where the system tells us; this covers the case where it does not, and where nobody would
+/// otherwise notice until the user reported that the overlay had gone quiet.
 ///
-/// A wake, an unlock or this session becoming active again ([`recheck_soon`]) makes
-/// the next call check at once, past the rate limit, and write what it found even when the tap
-/// is fine — the line a live test of a sleep or a lock looks for.
-pub fn health_check() {
+/// A wake, an unlock or this session becoming active again ([`recheck_soon`]) makes it check at
+/// once, past its two seconds, and say what it found even when the tap is fine — the line a live
+/// test of a sleep or a lock looks for.
+fn health_check() {
     let port = PORT.load(Ordering::Relaxed);
     if port.is_null() {
         return;
     }
+    // Every call checks: the timer that makes most of them is the watchdog's two seconds. A gap
+    // asked of the clock here as well skipped a round whenever a firing came a millisecond early.
     let asked = RECHECK.swap(0, Ordering::Relaxed);
-    if asked == 0 && !due(&LAST_HEALTH_MS, 2000) {
-        return;
-    }
-    let who = if asked == 0 {
-        "the watchdog".to_string()
-    } else {
-        format!("the check after {}", recheck_words(asked))
-    };
     if asked != 0 {
         // A wake, an unlock or the session back: whatever kept the tap off may be over, so a
         // tap that stays off is worth one more new one.
         STAYS_OFF.store(false, Ordering::Relaxed);
+        // And whatever made the window server slow to say which application is in front.
+        let off = FRONT_OFF_MS.swap(0, Ordering::Relaxed);
+        if off != 0 {
+            FRONT_SLOW_RUN.store(0, Ordering::Relaxed);
+            NOTES.push(TapNote::FrontOn { who: asked, took_ms: off - 1 });
+        }
     }
     // SAFETY: the pointer came from a `CFRetained` whose retain only `recreate` releases, on
     // this thread, after swapping it out of `PORT`.
@@ -820,7 +1037,7 @@ pub fn health_check() {
     if !port.is_valid() {
         // Always: an invalid port is a tap that is gone, and nothing but a new one brings it
         // back. The old one's retain is released with it.
-        recreate(&format!("{who} found its mach port invalid — the tap was gone"));
+        recreate(Cause::PortInvalid { who: asked });
         return;
     }
     if !CGEvent::tap_is_enabled(port) {
@@ -831,35 +1048,23 @@ pub fn health_check() {
         if !CGEvent::tap_is_enabled(port) {
             // Created again once; a new tap that is off as well is left alone (STAYS_OFF).
             if !STAYS_OFF.load(Ordering::Relaxed) {
-                recreate(&format!(
-                    "{who} found it switched off, and it stayed off when re-enabled (#{n})"
-                ));
+                recreate(Cause::StayedOff { who: asked, n });
             }
             return;
         }
         STAYS_OFF.store(false, Ordering::Relaxed);
-        logging::line(
-            "macos",
-            &format!(
-                "the event tap had been switched off and {who} found it (re-enable #{n}) — keys \
-                 were not being captured until now; something on this thread is taking too long, \
-                 or the system switched it off around a sleep or a lock"
-            ),
-        );
+        NOTES.push(TapNote::Reenabled { who: asked, n });
         return;
     }
     STAYS_OFF.store(false, Ordering::Relaxed);
     if asked != 0 {
-        logging::line(
-            "macos",
-            &format!("{}: the event tap was checked and is valid and enabled", recheck_words(asked)),
-        );
+        NOTES.push(TapNote::Fine { who: asked });
     }
 }
 
 /// Writes what the callback counted when the system switched the tap off — see the callback
-/// for why not there. Called by the observer on every turn of the run loop: two relaxed loads
-/// when there is nothing to say.
+/// for why not there. Called by the observer on every turn of the main run loop: two relaxed
+/// loads when there is nothing to say.
 fn report_disabled() {
     let timeouts = DISABLED_BY_TIMEOUT.swap(0, Ordering::Relaxed);
     let user_input = DISABLED_BY_USER_INPUT.swap(0, Ordering::Relaxed);
@@ -886,53 +1091,120 @@ fn report_disabled() {
     }
 }
 
-/// A run-loop observer, fired every time the loop is about to sleep.
+/// The watchdog, on the tap's run loop (the calling thread's): a timer that runs [`health_check`]
+/// every two seconds, and a source that runs it at once when [`recheck_soon`] signals it from the
+/// main thread. Both stay for the life of the process, retained here with the run loop, so that
+/// the main thread can reach them through [`TAP_LOOP`] and [`RECHECK_SOURCE`].
 ///
-/// The watchdog needs a heartbeat and this module cannot add one to the pump. An observer on
-/// the loop we are already on costs an atomic load per iteration and, unlike a timer, needs
-/// no extra CoreFoundation feature. It stops when the loop stops — but so does the tap, so
-/// there is nothing to watch at that point either.
-fn install_watchdog(run_loop: &CFRunLoop, mode: Option<&CFRunLoopMode>) {
+/// A timer is the watchdog's clock, as the run-loop observer's turns were on the main loop: it
+/// decides nothing but when to ask the system whether the tap is still on.
+fn install_watchdog(run_loop: &CFRunLoop) {
+    let mode = unsafe { kCFRunLoopDefaultMode };
+    // SAFETY: a plain timer with no context; its callout is `watchdog_timer`.
+    let timer = unsafe {
+        CFRunLoopTimer::new(None, CFAbsoluteTimeGetCurrent() + 2.0, 2.0, 0, 0, Some(watchdog_timer), std::ptr::null_mut())
+    };
+    match timer {
+        Some(timer) => {
+            run_loop.add_timer(Some(&timer), mode);
+            // Kept for the life of the process, as the run loop keeps it.
+            let _ = CFRetained::into_raw(timer);
+        }
+        None => WATCHDOG_MISSING.store(true, Ordering::Relaxed),
+    }
+    let mut context = CFRunLoopSourceContext {
+        version: 0,
+        info: std::ptr::null_mut(),
+        retain: None,
+        release: None,
+        copyDescription: None,
+        equal: None,
+        hash: None,
+        schedule: None,
+        cancel: None,
+        perform: Some(recheck_perform),
+    };
+    // SAFETY: the context is copied by the call and holds no pointer that has to outlive it.
+    match unsafe { CFRunLoopSource::new(None, 0, &mut context) } {
+        Some(source) => {
+            run_loop.add_source(Some(&source), mode);
+            RECHECK_SOURCE.store(CFRetained::into_raw(source).as_ptr(), Ordering::Release);
+        }
+        None => WATCHDOG_MISSING.store(true, Ordering::Relaxed),
+    }
+    // A retain of the main thread's own, for ever: the caller's is the caller's.
+    TAP_LOOP.store(CFRetained::into_raw(run_loop.retain()).as_ptr(), Ordering::Release);
+}
+
+unsafe extern "C-unwind" fn watchdog_timer(_timer: *mut CFRunLoopTimer, _info: *mut c_void) {
+    health_check();
+}
+
+unsafe extern "C-unwind" fn recheck_perform(_info: *mut c_void) {
+    health_check();
+}
+
+/// The observer that writes what the tap's thread and its callback left, on the main run loop,
+/// whenever it is about to sleep, in common modes, so that a menu tracking or a modal panel does
+/// not hold the lines back. Installed once, by [`install`] on the main thread.
+///
+/// An observer rather than a timer: it costs a few relaxed loads and two empty swaps per turn of
+/// the loop, and runs as soon as the loop is idle. It stops while the main thread is busy; the tap
+/// does not, and its lines wait.
+fn install_report_observer() {
+    let Some(main) = CFRunLoop::main() else {
+        return;
+    };
     let observer = unsafe {
         CFRunLoopObserver::new(
             None,
             CFRunLoopActivity::BeforeWaiting.0,
             true, // repeats
             0,
-            Some(watchdog_observer),
+            Some(report_observer),
             std::ptr::null_mut(),
         )
     };
     match observer {
-        Some(observer) => run_loop.add_observer(Some(&observer), mode),
+        Some(observer) => main.add_observer(Some(&observer), unsafe { kCFRunLoopCommonModes }),
         None => logging::line(
             "macos",
-            "could not create the run-loop observer for the tap watchdog — a tap the system \
-             switches off will only recover when it tells us it did",
+            "could not create the run-loop observer that writes the event tap's lines — the tap \
+             works, and its switch-offs, re-creations and late keys go unsaid",
         ),
+    }
+    if WATCHDOG_MISSING.load(Ordering::Relaxed) {
+        logging::line(
+            "macos",
+            "the event tap's watchdog could not be set up on its thread — a tap the system switches \
+             off without a word stays off, and a wake or an unlock is not checked",
+        );
     }
 }
 
-unsafe extern "C-unwind" fn watchdog_observer(
+unsafe extern "C-unwind" fn report_observer(
     _observer: *mut CFRunLoopObserver,
     _activity: CFRunLoopActivity,
     _info: *mut c_void,
 ) {
+    report_notes();
     report_disabled();
     report_first_suppression();
     report_gate_pass();
-    report_locked_out();
-    health_check();
+    report_front();
+    report_traces();
     report_lateness();
 }
 
-/// Everything the callback is allowed to do, and no more: match a table, push, return.
+/// Everything the callback is allowed to do, and no more: match a table, push, return — and,
+/// for a key it would take for a capture pinned to a window, ask the window server which
+/// application is in front ([`front_moved`]).
 ///
 /// Anything slower than that gets the tap switched off by the system, and a switched-off tap
-/// is indistinguishable, from the user's side, from an overlay that has stopped working. So it
-/// writes no line either, but for the trace lines a tester switches on: what a line needs is left
-/// in an atomic, and the run-loop observer writes it at the next turn of the loop
-/// ([`watchdog_observer`]).
+/// is indistinguishable, from the user's side, from an overlay that has stopped working; and every
+/// key of the Mac waits for it. So it writes no line, not even the trace lines a tester switches
+/// on: what a line needs is left in an atomic or a small queue, and the observer on the main run
+/// loop writes it at the next turn of that loop ([`report_observer`]).
 unsafe extern "C-unwind" fn tap_callback(
     _proxy: CGEventTapProxy,
     etype: CGEventType,
@@ -943,7 +1215,7 @@ unsafe extern "C-unwind" fn tap_callback(
 
     // The system announces its own damage through the tap. Neither of these recovers on its
     // own, and both are silent everywhere else. Re-enabled here and now; the line in the log
-    // is written by the run-loop observer (`report_disabled`), not here: the tap is back on
+    // is written by the main run loop's observer (`report_disabled`), not here: the tap is back on
     // the moment `tap_enable` returns, and every key from then on waits for this callback to
     // return — a file write in here, just after a wake with the disk still spinning up, is
     // exactly the delay that switches it off again.
@@ -1046,21 +1318,31 @@ unsafe extern "C-unwind" fn tap_callback(
     // handed to the module either (`swallow_held_repeat`). After everything above is recorded, as
     // the decision below is.
     if crate::backend::swallow_held_repeat(repeat, held_back(keycode), super::own::has_keyboard()) {
-        logging::trace("macos", || format!("tap: keycode {keycode} repeats, held since a capture took it; swallowed"));
+        trace(TraceNote::HeldRepeat(keycode));
         return std::ptr::null_mut();
     }
 
     // The modifiers first: with Command held a letter is named by the layout's Command table.
     let mask = mask_of(flags);
+    // A shortcut of this application's on this key: its key-down is stamped with the counts once
+    // it is counted, for Carbon's delivery to claim (`tap_queue::Shortcuts`). Not a repeat, which
+    // Carbon does not deliver. Two relaxed loads for every other key.
+    let shortcut = !repeat && shortcut_on(keycode);
+    // Every key-down let go from here on: counted, and stamped when it is a shortcut's.
+    let let_go = || {
+        let p = through();
+        if shortcut {
+            stamp_shortcut(keycode, mask);
+        }
+        p
+    };
     let Some(vk) = keys::keycode_to_vk_for(keycode, mask) else {
-        logging::trace("macos", || format!("tap: keycode {keycode} has no Win32 equivalent"));
-        return through();
+        trace(TraceNote::NoVk(keycode));
+        return let_go();
     };
     let front = FOREGROUND.load(Ordering::Relaxed);
     // The keypad's Enter is read as NumpadEnter or as Return by `decide`, which answers with it.
-    let Some((vk, decided)) = decide(vk, mask, front, true) else {
-        return through(); // the pump was mid-replacement; said by `decide`
-    };
+    let (vk, decided, pinned) = decide(vk, mask, front, true);
     let owner = match decided {
         None => {
             // Traced, because the alternative is a whole class of question nobody can answer.
@@ -1068,10 +1350,8 @@ unsafe extern "C-unwind" fn tap_callback(
             // outside: the event never reached this tap, or it reached it and no module had
             // claimed that exact combination. Silence here made them indistinguishable, and the
             // Control-Option experiment turned on precisely that difference.
-            logging::trace("macos", || {
-                format!("tap: saw vk {vk:#04x} mask {mask}, nothing had claimed it")
-            });
-            return through();
+            trace(TraceNote::Unclaimed(vk, mask));
+            return let_go();
         }
         Some(Capture::Pass { why, .. }) => {
             // Said out loud, not traced, because this is the one event that explains a whole
@@ -1089,15 +1369,28 @@ unsafe extern "C-unwind" fn tap_callback(
             if let Some(slot) = GATE_PASSED.get(tap_handoff::slot(why)) {
                 slot.store(tap_handoff::pack(vk, mask), Ordering::Relaxed);
             }
-            return through();
+            return let_go();
         }
         Some(Capture::Take { owner }) => owner,
     };
+    // Taken for a window the main thread told the tap of — and the application the window server
+    // names in front now is another one, which the main thread, busy, has not told it of yet: the
+    // key goes to that application, as it would once the main thread had (`front_moved`).
+    if pinned && front_moved(front) {
+        FRONT_PASSED.store(tap_handoff::pack(vk, mask), Ordering::Relaxed);
+        return let_go();
+    }
     // With the key, whether it repeats (read above) and the press as it was: the window, the counts
     // of keys let through so far, and the keycode itself — the keypad's Enter is not Return,
-    // though both are VK_RETURN to the host where no capture of NumpadEnter is in scope.
-    let pressed = Pressed { front, seq: let_through(), taps_seq: taps_through(), phys: Some(keycode), queued: Some(Instant::now()) };
-    queue::push_key(Taken { vk, mask, owner, repeat, pressed });
+    // though both are VK_RETURN to the host where no capture of NumpadEnter is in scope. Stamped
+    // with the moment it is queued, under the queue's lock (`tap_queue::Handover::push`).
+    queue::push_key(|queued| Taken {
+        vk,
+        mask,
+        owner,
+        repeat,
+        pressed: Pressed { front, seq: let_through(), taps_seq: taps_through(), phys: Some(keycode), queued: Some(queued) },
+    });
     note_suppressed(keycode);
 
     // The first suppression of a run, said out loud once.
@@ -1113,7 +1406,7 @@ unsafe extern "C-unwind" fn tap_callback(
         FIRST_SUPPRESSED.store(tap_handoff::pack(vk, mask), Ordering::Relaxed);
     }
 
-    logging::trace("macos", || format!("tap: captured vk {vk:#04x} mask {mask} for module {owner}"));
+    trace(TraceNote::Captured(vk, mask, owner));
     std::ptr::null_mut()
 }
 
@@ -1169,16 +1462,24 @@ fn modifier_changed(keycode: u16, flags: CGEventFlags) {
     }
     let front = FOREGROUND.load(Ordering::Relaxed);
     match decide(modifier.vk, MASK_TAP, front, false) {
-        Some((_, Some(Capture::Take { owner }))) => {
-            let pressed = Pressed { front, seq: let_through(), taps_seq: taps_through(), phys: None, queued: Some(Instant::now()) };
-            queue::push_key(Taken { vk: modifier.vk, mask: MASK_TAP, owner, repeat: false, pressed });
-            logging::trace("macos", || format!("tap: modifier tap vk {:#04x} for module {owner}", modifier.vk));
+        // Not dispatched for a window the user has left while the main thread was busy, as a key
+        // is not taken then (`front_moved`); the modifier itself went on as ever.
+        (_, Some(Capture::Take { .. }), true) if front_moved(front) => {
+            FRONT_PASSED.store(tap_handoff::pack(modifier.vk, MASK_TAP), Ordering::Relaxed);
         }
-        Some((_, Some(Capture::Pass { why, .. }))) => {
-            logging::trace("macos", || format!("tap: modifier tap not dispatched ({})", pass_words(why)));
+        (_, Some(Capture::Take { owner }), _) => {
+            queue::push_key(|queued| Taken {
+                vk: modifier.vk,
+                mask: MASK_TAP,
+                owner,
+                repeat: false,
+                pressed: Pressed { front, seq: let_through(), taps_seq: taps_through(), phys: None, queued: Some(queued) },
+            });
+            trace(TraceNote::ModifierTap(modifier.vk, owner));
         }
-        // Nothing claims the tap, or the pump was mid-replacement.
-        Some((_, None)) | None => {}
+        (_, Some(Capture::Pass { why, .. }), _) => trace(TraceNote::ModifierTapPassed(why)),
+        // Nothing claims the tap.
+        (_, None, _) => {}
     }
 }
 
@@ -1197,8 +1498,10 @@ fn modifier_changed(keycode: u16, flags: CGEventFlags) {
 /// once: a captured Return is both.
 ///
 /// **What it costs, in the callback whose promptness decides whether the system leaves the tap
-/// switched on.** A `try_lock`, never a wait. One walk of the captured set that stops at the
-/// first capture in scope, the owners looked up by a linear search of one entry per module that
+/// switched on.** The key table's lock, which the main thread holds only to copy a few pairs in
+/// ([`KEY_STATE`]): a key that came while it did waits that microsecond rather than go through
+/// untaken, as it went while the tap shared the main thread and tried the lock instead. One walk
+/// of the captured set that stops at the first capture in scope, the owners looked up by a linear search of one entry per module that
 /// ever set a scope or a flag, and the menu rule only for the modules whose flag is up — tens of
 /// comparisons. Nothing allocates unless a key is filed for a menu. `front` is a number the tap
 /// was told ([`note_foreground`]), never a question to another process: resolving the frontmost
@@ -1221,19 +1524,11 @@ fn modifier_changed(keycode: u16, flags: CGEventFlags) {
 /// the key it was decided as comes back with the decision. A menu's record holds it as Return, as
 /// the Windows hook's does, unless a capture of NumpadEnter let it past.
 ///
-/// `None`: the pump was replacing the table when the key arrived, and the key goes to the
-/// application. It cannot happen while both live on this thread, and it is a key silently not
-/// captured if it ever does, so it is said.
-fn decide(vk: u32, mask: u8, front: isize, menu_keys: bool) -> Option<(u32, Option<Capture>)> {
-    let state = match KEY_STATE.try_lock() {
-        Ok(state) => state,
-        Err(TryLockError::Poisoned(p)) => p.into_inner(),
-        Err(TryLockError::WouldBlock) => {
-            // Said by the observer (`report_locked_out`): this runs inside the callback.
-            LOCKED_OUT.fetch_add(1, Ordering::Relaxed);
-            return None;
-        }
-    };
+/// With the key and the decision comes whether the module that takes it has its captures pinned to
+/// a window rather than everywhere (`host.keys.scope`): the decision then rests on `front` being the
+/// window in front, which the callback asks the window server about ([`front_moved`]).
+fn decide(vk: u32, mask: u8, front: isize, menu_keys: bool) -> (u32, Option<Capture>, bool) {
+    let state = key_state();
     let own = super::own::has_keyboard();
     let keypad_enter = vk == crate::backend::VK_NUMPAD_ENTER;
     let vk = if keypad_enter { crate::backend::keypad_enter_as(&state.set, &state.owners, mask, front) } else { vk };
@@ -1262,7 +1557,8 @@ fn decide(vk: u32, mask: u8, front: isize, menu_keys: bool) -> Option<(u32, Opti
             _ => {}
         }
     }
-    Some((vk, decided))
+    let pinned = matches!(decided, Some(Capture::Take { owner }) if crate::backend::scope_of(&state.owners, owner) != 0);
+    (vk, decided, pinned)
 }
 
 /// The words a let-through says, for the log line.
@@ -1289,17 +1585,21 @@ fn mask_of(flags: CGEventFlags) -> u8 {
     keys::mask_of_cg_flags(flags.0)
 }
 
-thread_local! {
-    // Captured keys let through because a menu was open, as (module, vk, mask), waiting for
-    // each module's overlay runtime to ask. Bounded per module (`crate::backend::file_menu_pass`).
-    static MENU_PASS: std::cell::RefCell<Vec<(u32, u32, u8)>> = const { std::cell::RefCell::new(Vec::new()) };
+/// Captured keys let through because a menu was open, as (module, vk, mask), waiting for each
+/// module's overlay runtime to ask. Bounded per module (`crate::backend::file_menu_pass`). Filed by
+/// the callback, inside [`decide`] with the key table held (that order, never the other); taken and
+/// pruned by the main thread.
+static MENU_PASS: Mutex<Vec<(u32, u32, u8)>> = Mutex::new(Vec::new());
+
+fn menu_pass() -> MutexGuard<'static, Vec<(u32, u32, u8)>> {
+    MENU_PASS.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// A captured key went to the application because a menu was open. Remembered for module
 /// `owner`, so its overlay runtime can log which keys reached the menu, and whether the menu was
 /// still there after an Escape went through.
 fn note_menu_pass(owner: u32, vk: u32, mask: u8) {
-    MENU_PASS.with(|m| crate::backend::file_menu_pass(&mut m.borrow_mut(), owner, vk, mask));
+    crate::backend::file_menu_pass(&mut menu_pass(), owner, vk, mask);
 }
 
 /// Return or Escape — the keys that end a menu, and the two the overlay runtime wants to hear
@@ -1309,9 +1609,9 @@ fn is_menu_key(vk: u32) -> bool {
 }
 
 /// Hands over, and forgets, everything `note_menu_pass` filed for module `owner` since the last
-/// call. Main thread only, like the tap itself.
+/// call. The main thread's.
 pub fn take_menu_pass_through(owner: u32) -> Vec<(u32, u8)> {
-    MENU_PASS.with(|m| crate::backend::take_menu_passes(&mut m.borrow_mut(), owner))
+    crate::backend::take_menu_passes(&mut menu_pass(), owner)
 }
 
 /// Writes the captured keys the callback let through ([`GATE_PASSED`]): one line per reason, at
@@ -1373,32 +1673,325 @@ fn report_first_suppression() {
     );
 }
 
-/// Says the keys [`decide`] let through because the captured set was locked when they came
-/// ([`LOCKED_OUT`]), at most once every five seconds. Called by the observer on every turn of the
-/// run loop: one relaxed load when there is nothing to say.
-fn report_locked_out() {
-    if LOCKED_OUT.load(Ordering::Relaxed) == 0 || !due(&LAST_LOCK_FAIL_MS, 5000) {
-        return;
-    }
-    let n = LOCKED_OUT.swap(0, Ordering::Relaxed);
-    logging::line(
-        "macos",
-        &format!(
-            "the captured-key set was locked when {n} key(s) arrived — they were let through; the tap \
-             and the pump are no longer on one thread"
-        ),
-    );
-}
-
-/// Told to us by [`super::watch`] whenever the frontmost window can have changed.
+/// Told to us by [`super::watch`] whenever the frontmost window can have changed, on the main
+/// thread.
 ///
 /// A number the callback can read rather than a question it has to ask ([`decide`]): `watch`
 /// is already listening to the two notifications that can change the answer — the frontmost
 /// application changing, and the focused window changing within one — so the answer is here
 /// before the key arrives. Deliberately not resolved here: this is called from notification
 /// handlers on the main thread, where the work is already being done for other reasons.
+///
+/// With it, the application it belongs to, for the tap's question which application is in front
+/// ([`front_moved`]): its pid from the handle table (no call out), and that application as the
+/// Process Manager names it — one call, made only when the window or its application changed,
+/// and never with [`TOLD`] held, which the callback waits for. Written before the window, so that
+/// a callback that reads the new window finds its application told; one that reads the window and
+/// the application from two moments compares nothing (`tap_front::told_for`).
 pub fn note_foreground(window: isize) {
+    let pid = super::ax::pid_of_handle(window);
+    let same = {
+        let told = told();
+        told.window == window && told.pid == pid
+    };
+    if !same {
+        let psn = pid.and_then(psn_of);
+        *told() = Told { window, pid, psn };
+    }
     FOREGROUND.store(window, Ordering::Relaxed);
+}
+
+fn told() -> MutexGuard<'static, Told> {
+    TOLD.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// A process serial number, as the Process Manager's calls take one.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct Psn {
+    high: u32,
+    low: u32,
+}
+
+/// The three Process Manager calls the tap's question which application is in front needs,
+/// looked up by name rather than linked, like [`secure_input`]: all three have been deprecated
+/// since macOS 10.9, and a symbol a later macOS drops would otherwise stop the application before
+/// it starts. `None` when any is missing: the tap then decides every key as before it asked.
+///
+/// Why these: `GetFrontProcess` answers which application is in front as the system's process
+/// manager knows it — the application the window server routes keys to, kept by the system and not
+/// by this process, so it is current while this process's main thread is busy. AppKit's answer,
+/// `NSWorkspace.frontmostApplication`, is not: it changes only as this process's main run loop
+/// handles the workspace's notifications, the very thing a busy main thread does not do.
+/// Accessibility's system-wide focused application asks the same system process over a longer road.
+/// The Process Manager's header marks these calls thread-safe (since Mac OS X 10.3), and they take
+/// and give plain values: nothing of this process's main thread is touched.
+struct ProcessCalls {
+    front: unsafe extern "C" fn(*mut Psn) -> i16,
+    pid_of: unsafe extern "C" fn(*const Psn, *mut libc::pid_t) -> i32,
+    of_pid: unsafe extern "C" fn(libc::pid_t, *mut Psn) -> i32,
+}
+
+fn process_calls() -> Option<&'static ProcessCalls> {
+    static CALLS: OnceLock<Option<ProcessCalls>> = OnceLock::new();
+    CALLS
+        .get_or_init(|| {
+            let find = |name: &std::ffi::CStr| {
+                // SAFETY: RTLD_DEFAULT with a NUL-terminated name; dlsym only reads.
+                let p = unsafe { libc::dlsym(libc::RTLD_DEFAULT, name.as_ptr()) };
+                (!p.is_null()).then_some(p)
+            };
+            let (front, pid_of, of_pid) = (find(c"GetFrontProcess")?, find(c"GetProcessPID")?, find(c"GetProcessForPID")?);
+            // SAFETY: the addresses of `OSErr GetFrontProcess(ProcessSerialNumber *)`, `OSStatus
+            // GetProcessPID(const ProcessSerialNumber *, pid_t *)` and `OSStatus
+            // GetProcessForPID(pid_t, ProcessSerialNumber *)`, whose C signatures are the types
+            // they become; `Psn` is `ProcessSerialNumber`'s layout, two 32-bit halves.
+            unsafe {
+                Some(ProcessCalls {
+                    front: std::mem::transmute::<*mut c_void, unsafe extern "C" fn(*mut Psn) -> i16>(front),
+                    pid_of: std::mem::transmute::<*mut c_void, unsafe extern "C" fn(*const Psn, *mut libc::pid_t) -> i32>(pid_of),
+                    of_pid: std::mem::transmute::<*mut c_void, unsafe extern "C" fn(libc::pid_t, *mut Psn) -> i32>(of_pid),
+                })
+            }
+        })
+        .as_ref()
+}
+
+/// The application in front as the Process Manager names it now (`tap_front::psn_word`); `None`
+/// when the call is missing or answers an error. The tap's thread, for each key it would take for
+/// a pinned capture: one call into the system, timed by [`front_moved`].
+fn front_now() -> Option<u64> {
+    let calls = process_calls()?;
+    let mut psn = Psn::default();
+    // SAFETY: a valid pointer to a `ProcessSerialNumber`-shaped value the call fills.
+    let err = unsafe { (calls.front)(&mut psn) };
+    (err == 0).then(|| tap_front::psn_word(psn.high, psn.low)).filter(|w| *w != 0)
+}
+
+/// Process `pid` as the Process Manager names it; `None` when it cannot say. The main thread.
+fn psn_of(pid: i32) -> Option<u64> {
+    let calls = process_calls()?;
+    let mut psn = Psn::default();
+    // SAFETY: a valid pointer the call fills.
+    let err = unsafe { (calls.of_pid)(pid, &mut psn) };
+    (err == 0).then(|| tap_front::psn_word(psn.high, psn.low)).filter(|w| *w != 0)
+}
+
+/// The pid of the application `word` names; `None` when it cannot say. The main thread, for the
+/// log.
+fn pid_of(word: u64) -> Option<i32> {
+    let calls = process_calls()?;
+    let (high, low) = tap_front::psn_halves(word);
+    let psn = Psn { high, low };
+    let mut pid: libc::pid_t = 0;
+    // SAFETY: valid pointers, the first read and the second filled.
+    let err = unsafe { (calls.pid_of)(&psn, &mut pid) };
+    (err == 0 && pid > 0).then_some(pid)
+}
+
+/// Whether a key decided by window `front`, which a capture pinned to a window would take, is to go
+/// to the application in front instead: the window server names another application in front than
+/// the one the main thread named with `front` ([`note_foreground`]) — the user switched while the
+/// main thread was busy, and it has not heard yet (`tap_front.rs`). The tap's thread, inside the
+/// callback.
+///
+/// **What it costs**, per key a pinned capture would take and for no other key: the told
+/// application, under a lock the main thread holds only to write it, and one call into the system
+/// ([`front_now`]), timed — the first answer's time is written once, every answer of a millisecond
+/// or more is counted for a line, and [`tap_front::TOO_SLOW_IN_A_ROW`] answers of
+/// [`tap_front::TOO_SLOW`] or more in a row switch the question off until the Mac wakes, the
+/// screen is unlocked or this session becomes active again ([`health_check`], [`report_front`]):
+/// the keys are then decided by the window alone, as before the tap asked. Nothing is asked when
+/// the told application is not known.
+///
+/// **What it does not see**: another window of the same application in front — one the user
+/// switched to, or the told window closed — while the main thread is busy. The window server names
+/// the active application, not the window its keys go to; that is the application's own key
+/// window, which only the application can say (Accessibility, a question to the very process that
+/// may be the busy one, waited for inside the callback), and the window list's order is not it
+/// (a floating plug-in window stays above the window that has the keys). Such keys are taken for
+/// the window the main thread last told, as before the tap asked (TODO.md).
+fn front_moved(front: isize) -> bool {
+    if FRONT_OFF_MS.load(Ordering::Relaxed) != 0 {
+        return false;
+    }
+    let told = {
+        let t = told();
+        tap_front::told_for((t.window, t.psn), front)
+    };
+    let Some(told) = told else {
+        return false;
+    };
+    let asked = Instant::now();
+    let now = front_now();
+    let took = asked.elapsed();
+    let us = took.as_micros() as u64;
+    let _ = FRONT_FIRST_US.compare_exchange(0, us + 1, Ordering::Relaxed, Ordering::Relaxed);
+    if took >= tap_front::SLOW {
+        FRONT_SLOW.fetch_add(1, Ordering::Relaxed);
+        FRONT_SLOW_WORST_US.fetch_max(us, Ordering::Relaxed);
+    }
+    // The tap's thread alone runs this, so the run is read and written without a race.
+    let (run, off) = tap_front::slow_run(FRONT_SLOW_RUN.load(Ordering::Relaxed), took);
+    FRONT_SLOW_RUN.store(run, Ordering::Relaxed);
+    if off {
+        FRONT_OFF_MS.store(took.as_millis() as u64 + 1, Ordering::Relaxed);
+    }
+    match tap_front::front_check(Some(told), now) {
+        FrontCheck::Other => {
+            FRONT_PASSED_PSN.store(now.unwrap_or(0), Ordering::Relaxed);
+            true
+        }
+        FrontCheck::Same | FrontCheck::Unknown => false,
+    }
+}
+
+/// Writes what [`front_moved`] left: the first answer's time, once; the slow answers, at most every
+/// five seconds; the question switched off, once; and a key it let through, at most every three
+/// seconds. Called by the observer on every turn of the main run loop: a few relaxed loads when
+/// there is nothing to say.
+fn report_front() {
+    let first = FRONT_FIRST_US.load(Ordering::Relaxed);
+    if first != 0 && !FRONT_FIRST_SAID.swap(true, Ordering::Relaxed) {
+        logging::line(
+            "macos",
+            &format!(
+                "the event tap asked the window server which application is in front, for the first \
+                 key it would take for a capture pinned to a window: the answer took {} µs \
+                 (GetFrontProcess, asked for each such key)",
+                first - 1
+            ),
+        );
+    }
+    if FRONT_SLOW.load(Ordering::Relaxed) != 0 && due(&FRONT_SLOW_SAID_MS, 5000) {
+        let n = FRONT_SLOW.swap(0, Ordering::Relaxed);
+        let worst = FRONT_SLOW_WORST_US.swap(0, Ordering::Relaxed);
+        logging::line(
+            "macos",
+            &format!(
+                "the event tap's question which application is in front took a millisecond or more \
+                 {n} time(s), the worst {worst} µs — each key it takes for a pinned capture waits for \
+                 the answer"
+            ),
+        );
+    }
+    let off = FRONT_OFF_MS.load(Ordering::Relaxed);
+    if off != 0 && !FRONT_OFF_SAID.swap(true, Ordering::Relaxed) {
+        logging::line(
+            "macos",
+            &format!(
+                "the window server took {} ms to say which application is in front, inside the event \
+                 tap, {} times in a row — the question is switched off until the Mac wakes, the \
+                 screen is unlocked or this session becomes active again, and keys are decided by \
+                 the window the main thread last told the tap of, as before it asked",
+                off - 1,
+                tap_front::TOO_SLOW_IN_A_ROW
+            ),
+        );
+    }
+    if FRONT_PASSED.load(Ordering::Relaxed) == 0 {
+        return;
+    }
+    let Some((vk, mask)) = tap_handoff::unpack(FRONT_PASSED.swap(0, Ordering::Relaxed)) else {
+        return;
+    };
+    if !due(&FRONT_PASSED_SAID_MS, 3000) {
+        return;
+    }
+    let now = FRONT_PASSED_PSN.load(Ordering::Relaxed);
+    let in_front = pid_of(now).map_or_else(|| "another application".to_string(), |p| format!("pid {p}"));
+    let was = told().pid.map_or_else(|| "an application".to_string(), |p| format!("pid {p}"));
+    logging::line(
+        "macos",
+        &format!(
+            "a key the overlay had claimed went to the application in front instead: vk {vk:#04x} \
+             mask {mask}, because the window server names {in_front} in front, and the main thread, \
+             busy, had last told the event tap of a window of {was} — captured keys go through until \
+             it hears of the change"
+        ),
+    );
+}
+
+/// The keys this application's shortcuts are registered on now, as (keycode, mask): from
+/// `hotkey.rs`, on the main thread, after every registration and release. A key that stays keeps
+/// the stamp of its last key-down (`tap_queue::Shortcuts`).
+pub(super) fn set_shortcut_keys(keys: &[(u16, u8)]) {
+    let codes = {
+        let mut s = shortcuts();
+        s.set_keys(keys);
+        s.codes()
+    };
+    SHORTCUT_CODES[0].store(codes as u64, Ordering::Relaxed);
+    SHORTCUT_CODES[1].store((codes >> 64) as u64, Ordering::Relaxed);
+}
+
+/// The stamp of the last key-down of `code` with `mask` the tap saw, taken: for Carbon's delivery
+/// of that shortcut (`queue::push_hotkey`), which carries its counts and its moment. `None` when the
+/// tap saw none since the last delivery — it was off, or not installed.
+pub(super) fn claim_shortcut(code: u16, mask: u8) -> Option<Stamp> {
+    shortcuts().claim(code, mask)
+}
+
+fn shortcuts() -> MutexGuard<'static, Shortcuts> {
+    SHORTCUTS.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Whether a shortcut is registered on `keycode` with any mask: two relaxed loads, the callback's
+/// look before it takes the lock.
+fn shortcut_on(keycode: u16) -> bool {
+    let word = &SHORTCUT_CODES[usize::from(keycode >= 64)];
+    word.load(Ordering::Relaxed) & (1u64 << (keycode % 64)) != 0
+}
+
+/// Stamps a key-down the callback let go, when a shortcut is registered on its key and mask: the
+/// counts with its own key-down in them, and the moment. The tap's thread.
+fn stamp_shortcut(keycode: u16, mask: u8) {
+    let stamp = Stamp { seq: let_through(), taps_seq: taps_through(), at: Instant::now() };
+    shortcuts().stamp(keycode, mask, stamp);
+}
+
+/// A trace line of the callback's, as values: the words are put together by the main thread
+/// ([`report_traces`]), and only while tracing is on.
+#[derive(Clone, Copy)]
+enum TraceNote {
+    /// A key held since a capture took it repeated into one of our windows, and was swallowed.
+    HeldRepeat(u16),
+    /// A keycode with no Win32 key.
+    NoVk(u16),
+    /// A key nothing had claimed.
+    Unclaimed(u32, u8),
+    /// A key taken for a module.
+    Captured(u32, u8, u32),
+    /// A modifier tap dispatched to a module.
+    ModifierTap(u32, u32),
+    /// A modifier tap let through, and why.
+    ModifierTapPassed(PassWhy),
+}
+
+/// Leaves `note` for the observer while tracing is on: one relaxed load otherwise.
+fn trace(note: TraceNote) {
+    if logging::is_trace() {
+        TRACES.push(note);
+    }
+}
+
+/// Writes the callback's trace lines ([`TraceNote`]). Called by the observer on every turn of the
+/// main run loop: one lock and an empty swap when there is nothing to say.
+fn report_traces() {
+    let (notes, dropped) = TRACES.take();
+    for note in notes {
+        logging::trace("macos", || match note {
+            TraceNote::HeldRepeat(keycode) => format!("tap: keycode {keycode} repeats, held since a capture took it; swallowed"),
+            TraceNote::NoVk(keycode) => format!("tap: keycode {keycode} has no Win32 equivalent"),
+            TraceNote::Unclaimed(vk, mask) => format!("tap: saw vk {vk:#04x} mask {mask}, nothing had claimed it"),
+            TraceNote::Captured(vk, mask, owner) => format!("tap: captured vk {vk:#04x} mask {mask} for module {owner}"),
+            TraceNote::ModifierTap(vk, owner) => format!("tap: modifier tap vk {vk:#04x} for module {owner}"),
+            TraceNote::ModifierTapPassed(why) => format!("tap: modifier tap not dispatched ({})", pass_words(why)),
+        });
+    }
+    if dropped > 0 {
+        logging::trace("macos", || format!("tap: {dropped} more trace line(s) came between two turns of the main run loop than are kept"));
+    }
 }
 
 /// Forgets every key the tap believes is still held.

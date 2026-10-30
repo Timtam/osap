@@ -259,6 +259,19 @@ mod macos_post_click;
 #[path = "macos/tap_handoff.rs"]
 mod macos_tap_handoff;
 
+/// And what the event tap's own thread hands the main thread: the taken keys under one lock with
+/// the moment the drain takes them, the lines it may not write, a shortcut's stamp — run with real
+/// threads, since nothing but a Mac runs the tap.
+#[cfg(all(test, not(target_os = "macos")))]
+#[path = "macos/tap_queue.rs"]
+mod macos_tap_queue;
+
+/// And the tap's question which application is in front, for a key it would take for a pinned
+/// capture: a comparison of the application told with the window server's answer.
+#[cfg(all(test, not(target_os = "macos")))]
+#[path = "macos/tap_front.rs"]
+mod macos_tap_front;
+
 /// And the reads an application could not complete inside one accessibility walk: which element,
 /// which attribute, how many walks of a kind in an application met one — the line the next Mac
 /// session reads to say whether a plug-in that works ever answers so, once in five seconds at most.
@@ -1608,7 +1621,7 @@ pub trait Backend {
     ///
     /// The unfiltered listing asks every running application a question, and on macOS that
     /// is a cross-process call per application with a timeout each; one wedged process
-    /// costs the whole timeout, on the thread that carries the event tap. The third Mac
+    /// costs the whole timeout, on the event loop every captured key waits for. The third Mac
     /// session put a number on it: 2.0-2.3 s of a 3 s stall per press was this listing,
     /// every press, because some unrelated application never answered. A matcher that
     /// names an application — and every shipped one does — has no business asking the
@@ -2030,9 +2043,8 @@ pub trait Backend {
     /// module's made again while the press waits takes it only in the window it was pressed in —
     /// judged as a captured key is. Windows: `GetForegroundWindow`. macOS: the window the tap was
     /// last told is in front. Never the accessibility question [`Backend::resolve_key_scope`]
-    /// asks on a Mac: a hotkey arrives on the thread that also carries the event tap, at the
-    /// moment the frontmost application is most likely to be slow, and that question pins nothing
-    /// here.
+    /// asks on a Mac: a hotkey arrives on the event loop, at the moment the frontmost application
+    /// is most likely to be slow, and that question pins nothing here.
     fn key_front(&self) -> isize;
     /// The keyboard now, for passing key `vk`, pressed with the roles in `mask` on the physical key
     /// `phys` ([`Pressed::phys`]), on to the program in front ([`pass_on_strokes`]) — see
@@ -2143,13 +2155,14 @@ pub const DEFAULT_DOUBLE_CLICK: std::time::Duration = std::time::Duration::from_
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HotkeyPress {
     /// How many key-downs the hook or the tap had let through to the program when it came in
-    /// ([`Pressed::seq`]): as the hook matched it, or as the system delivered it.
+    /// ([`Pressed::seq`]): as the hook matched it, or as the system delivered it; on a Mac as the
+    /// tap stamped its key-down, or, for a press the tap did not see, as Carbon delivered it.
     pub seq: u32,
     /// How many of those end a count of quick repeats ([`Pressed::taps_seq`]): what the count is
     /// decided by.
     pub taps_seq: u32,
     /// How many of those may be the press's own key-down: 1 on a Mac, whose tap sees a hotkey's
-    /// key-down at the HID level and lets it go on before Carbon matches it (queue.rs,
+    /// key-down at the HID level and lets it go on, counted, before Carbon matches it (queue.rs,
     /// `push_hotkey`) — and, with no tap in, counts nothing, so no other key can be in the count
     /// either. On Windows 0 for a press the hook swallowed, or was not called for, which only
     /// `RegisterHotKey` delivered; and 1 for one the hook let through on purpose for
@@ -2158,8 +2171,9 @@ pub struct HotkeyPress {
     /// no other key going down (taps.rs).
     pub own: u32,
     /// When it was pressed, as near as the platform says: Windows from the key event's or the
-    /// message's stamp on the tick clock, a Mac when Carbon handed it over. What the quick repeats
-    /// are timed by, rather than when the pump got to it.
+    /// message's stamp on the tick clock, a Mac when the tap saw its key-down, or, for a press the
+    /// tap did not see, when Carbon handed it over. What the quick repeats are timed by, rather
+    /// than when the pump got to it.
     pub at: std::time::Instant,
 }
 
@@ -4592,11 +4606,14 @@ mod capture_decision_tests {
         assert!(body("fn pass_words(why: PassWhy)").contains("PassWhy::OwnWindow =>"));
     }
 
-    /// The Mac tap's callback writes no line but the trace lines a tester switches on: a captured key
-    /// it let through, the first key it suppressed and a key the locked set let through are left in
-    /// atomics (`macos/tap_handoff.rs`, whose rules are tested in `macos_tap_handoff`), and the
-    /// run-loop observer writes them, as it writes the switch-offs the callback counts. Held where it
-    /// is written, since no test here runs the tap.
+    /// The Mac tap's thread writes no line, nor a trace line a tester switches on — the log's lock is
+    /// held for the main thread's file writes, and every key of the Mac waits for the callback: a
+    /// captured key it let through, the first key it suppressed and a key let through for the
+    /// application in front are left in atomics (`macos/tap_handoff.rs`, whose rules are tested in
+    /// `macos_tap_handoff`), the trace lines and what the watchdog found in small queues
+    /// (`macos/tap_queue.rs`, tested in `macos_tap_queue`), and the observer on the main run loop
+    /// writes them, as it writes the switch-offs the callback counts. Held where it is written, since
+    /// no test here runs the tap.
     #[test]
     fn the_mac_tap_writes_its_lines_from_the_observer() {
         const TAP: &str = include_str!("macos/tap.rs");
@@ -4605,7 +4622,8 @@ mod capture_decision_tests {
             let end = TAP[at..].find("\n}\n").unwrap();
             &TAP[at..at + end]
         };
-        // Everything the callback runs of this file.
+        // Everything the tap's thread runs of this file: the callback and what it calls, the
+        // thread's own start, its watchdog and a re-creation.
         for sig in [
             "unsafe extern \"C-unwind\" fn tap_callback(",
             "fn decide(vk: u32, mask: u8, front: isize, menu_keys: bool)",
@@ -4617,17 +4635,49 @@ mod capture_decision_tests {
             "fn note_suppressed(keycode: u16)",
             "fn take_suppressed(keycode: u16) -> bool",
             "pub(super) fn held_back(keycode: u16) -> bool",
+            "fn front_moved(front: isize) -> bool",
+            "fn front_now() -> Option<u64>",
+            "fn stamp_shortcut(keycode: u16, mask: u8)",
+            "fn shortcut_on(keycode: u16) -> bool",
+            "fn trace(note: TraceNote)",
+            "fn tap_thread(",
+            "fn create_and_attach(",
+            "fn install_watchdog(run_loop: &CFRunLoop)",
+            "unsafe extern \"C-unwind\" fn watchdog_timer(",
+            "unsafe extern \"C-unwind\" fn recheck_perform(",
+            "fn health_check()",
+            "fn recreate(cause: Cause)",
         ] {
-            assert!(!body(sig).contains("logging::line("), "{sig} writes a line");
+            let f = body(sig);
+            assert!(!f.contains("logging::line(") && !f.contains("logging::trace("), "{sig} writes a line");
         }
         let cb = body("unsafe extern \"C-unwind\" fn tap_callback(");
-        assert!(cb.contains("if let Some(slot) = GATE_PASSED.get(tap_handoff::slot(why)) {\n                slot.store(tap_handoff::pack(vk, mask), Ordering::Relaxed);\n            }\n            return through();"));
+        assert!(cb.contains("if let Some(slot) = GATE_PASSED.get(tap_handoff::slot(why)) {\n                slot.store(tap_handoff::pack(vk, mask), Ordering::Relaxed);\n            }\n            return let_go();"));
         assert!(cb.contains("if !FIRST_SUPPRESSION.swap(true, Ordering::Relaxed) {\n        FIRST_SUPPRESSED.store(tap_handoff::pack(vk, mask), Ordering::Relaxed);\n    }"));
-        assert!(body("fn decide(vk: u32, mask: u8, front: isize, menu_keys: bool)").contains("LOCKED_OUT.fetch_add(1, Ordering::Relaxed);\n            return None;"));
-        let observer = body("unsafe extern \"C-unwind\" fn watchdog_observer(");
-        for report in ["report_disabled();", "report_first_suppression();", "report_gate_pass();", "report_locked_out();"] {
+        assert!(cb.contains("if pinned && front_moved(front) {\n        FRONT_PASSED.store(tap_handoff::pack(vk, mask), Ordering::Relaxed);\n        return let_go();\n    }"));
+        // A trace line only while tracing is on, and as values: the words are the main thread's.
+        assert!(body("fn trace(note: TraceNote)").contains("if logging::is_trace() {\n        TRACES.push(note);"));
+        // The key table is waited for, never tried: a key that came while the main thread copied a
+        // set in would otherwise go through untaken.
+        let decide = body("fn decide(vk: u32, mask: u8, front: isize, menu_keys: bool)");
+        assert!(decide.contains("let state = key_state();") && !TAP.contains("try_lock"));
+        let observer = body("unsafe extern \"C-unwind\" fn report_observer(");
+        for report in [
+            "report_notes();",
+            "report_disabled();",
+            "report_first_suppression();",
+            "report_gate_pass();",
+            "report_front();",
+            "report_traces();",
+            "report_lateness();",
+        ] {
             assert!(observer.contains(report), "the observer no longer calls `{report}`");
         }
+        // On the main run loop, installed by `install` there; the watchdog on the tap's.
+        assert!(body("fn install_report_observer()").contains("let Some(main) = CFRunLoop::main() else {"));
+        assert!(body("pub fn install() -> Result<(), HostError> {").contains("install_report_observer();"));
+        assert!(body("fn tap_thread(").contains("install_watchdog(&run_loop);"));
+        assert!(!observer.contains("health_check"), "the watchdog is the tap's thread's");
         // Each slot emptied where its line is written, and nowhere else.
         let gate = body("fn report_gate_pass() {");
         assert!(gate.contains("for why in tap_handoff::REASONS {"));
@@ -4642,8 +4692,108 @@ mod capture_decision_tests {
         );
         assert!(body("fn report_first_suppression() {").contains("tap_handoff::unpack(FIRST_SUPPRESSED.swap(0, Ordering::Relaxed))"));
         assert_eq!(TAP.matches("FIRST_SUPPRESSED.").count(), 3);
-        assert!(body("fn report_locked_out() {").contains("let n = LOCKED_OUT.swap(0, Ordering::Relaxed);"));
-        assert_eq!(TAP.matches("LOCKED_OUT.").count(), 3);
+        assert!(body("fn report_front() {").contains("tap_handoff::unpack(FRONT_PASSED.swap(0, Ordering::Relaxed))"));
+        assert_eq!(TAP.matches("FRONT_PASSED.").count(), 4, "stored for a key and a modifier tap, looked at and taken by the report");
+    }
+
+    /// The Mac tap's thread: the tap is created there, on that thread's own run loop, in the default
+    /// mode, and the watchdog's re-creation runs there too; the main thread's one reader of the port
+    /// holds the lock the re-creation swaps and releases it under; and `recheck_soon` wakes the
+    /// tap's run loop with the signal Core Foundation documents for another thread. Held where it is
+    /// written: only a Mac runs it.
+    #[test]
+    fn the_mac_tap_has_a_thread_and_a_run_loop_of_its_own() {
+        const TAP: &str = include_str!("macos/tap.rs");
+        const MAC: &str = include_str!("macos/mod.rs");
+        let body = |src: &'static str, sig: &str| {
+            let at = src.find(sig).unwrap_or_else(|| panic!("{sig}"));
+            let end = src[at..].find("\n}\n").unwrap();
+            &src[at..at + end]
+        };
+        let install = body(TAP, "pub fn install() -> Result<(), HostError> {");
+        assert!(install.contains("std::thread::Builder::new().name(\"key-tap\".into()).spawn(move || tap_thread(ready_tx))"));
+        assert!(install.contains("Err(HostError::with(&crate::errors::keys::TAP_THREAD,"));
+        assert!(install.contains("ready_rx.recv().unwrap_or_else(|_| Err(HostError::of(&crate::errors::keys::TAP_ENDED)))"));
+        assert!(!install.contains("create_and_attach("), "the tap is not created on the main thread");
+        let thread = body(TAP, "fn tap_thread(");
+        let qos = thread.find("QOS_CLASS_USER_INTERACTIVE").unwrap();
+        let created = thread.find("create_and_attach()").unwrap();
+        let ready = thread.find("let _ = ready.send(Ok((enabled, qos)));").unwrap();
+        assert!(qos < created && created < ready && ready < thread.find("CFRunLoop::run();").unwrap());
+        let attach = body(TAP, "fn create_and_attach(");
+        assert!(attach.contains("CFRunLoop::current()") && !attach.contains("CFRunLoop::main()"));
+        assert!(attach.contains("run_loop.add_source(Some(&source), unsafe { kCFRunLoopDefaultMode });"));
+        // The watchdog's two ways in, both on the tap's run loop.
+        let watchdog = body(TAP, "fn install_watchdog(run_loop: &CFRunLoop)");
+        assert!(watchdog.contains("run_loop.add_timer(Some(&timer), mode);") && watchdog.contains("run_loop.add_source(Some(&source), mode);"));
+        assert!(body(TAP, "unsafe extern \"C-unwind\" fn watchdog_timer(").contains("health_check();"));
+        assert!(body(TAP, "unsafe extern \"C-unwind\" fn recheck_perform(").contains("health_check();"));
+        let soon = body(TAP, "pub(super) fn recheck_soon(bits: u32) {");
+        assert!(soon.contains("(*source).signal();\n            (*run_loop).wake_up();"));
+        // Only the tap's thread checks and re-creates the tap; the pump no longer does.
+        assert_eq!(TAP.matches("health_check();").count(), 2);
+        assert!(!MAC.contains("tap::health_check"));
+        assert_eq!(TAP.matches("recreate(Cause::").count(), 2);
+        let check = body(TAP, "fn health_check()");
+        assert!(check.contains("recreate(Cause::PortInvalid { who: asked });"));
+        // The timer is the watchdog's clock: a gap asked of the clock as well skipped rounds. A wake,
+        // an unlock or the session back asks the window server's question again.
+        assert!(!check.contains("due("), "every round checks");
+        let again = check.find("let off = FRONT_OFF_MS.swap(0, Ordering::Relaxed);").unwrap();
+        assert!(check.find("if asked != 0 {").unwrap() < again && again < check.find("let port = unsafe { &*port };").unwrap());
+        // The port is swapped and released under the lock the main thread reads it under.
+        let recreate = body(TAP, "fn recreate(cause: Cause)");
+        let held = recreate.find("let _held = port_lock();").unwrap();
+        assert!(held < recreate.find("PORT.swap(").unwrap() && held < recreate.find("drop(old);").unwrap());
+        let note = body(TAP, "pub(super) fn note_shortcut() {");
+        assert!(note.find("let _held = port_lock();").unwrap() < note.find("CGEvent::tap_is_enabled(").unwrap());
+        // The record of keys let through for a menu is shared, not the thread's own.
+        assert!(TAP.contains("static MENU_PASS: Mutex<Vec<(u32, u32, u8)>>") && !TAP.contains("thread_local!"));
+    }
+
+    /// The Mac tap asks the window server which application is in front for a key it would take for
+    /// a capture pinned to a window, and only then: after the decision, with the key table let go,
+    /// only for a pinned taker, and only when the application told with the window the key was
+    /// decided by is known. The comparison is `macos/tap_front.rs`'s, tested in `macos_tap_front`.
+    #[test]
+    fn the_mac_tap_asks_which_application_is_in_front_only_for_a_key_it_would_take() {
+        const TAP: &str = include_str!("macos/tap.rs");
+        let body = |sig: &str| {
+            let at = TAP.find(sig).unwrap_or_else(|| panic!("{sig}"));
+            let end = TAP[at..].find("\n}\n").unwrap();
+            &TAP[at..at + end]
+        };
+        let decide = body("fn decide(vk: u32, mask: u8, front: isize, menu_keys: bool)");
+        assert!(decide.contains("let pinned = matches!(decided, Some(Capture::Take { owner }) if crate::backend::scope_of(&state.owners, owner) != 0);"));
+        assert!(!decide.contains("front_moved("), "not with the key table held");
+        let cb = body("unsafe extern \"C-unwind\" fn tap_callback(");
+        let taken = cb.find("Some(Capture::Take { owner }) => owner,").unwrap();
+        let asked = cb.find("if pinned && front_moved(front) {").unwrap();
+        assert!(taken < asked && asked < cb.find("queue::push_key(").unwrap());
+        assert_eq!(cb.matches("front_moved(").count(), 1);
+        let modifier = body("fn modifier_changed(keycode: u16, flags: CGEventFlags)");
+        assert!(modifier.contains("(_, Some(Capture::Take { .. }), true) if front_moved(front) => {"));
+        let moved = body("fn front_moved(front: isize) -> bool");
+        let told = moved.find("tap_front::told_for((t.window, t.psn), front)").unwrap();
+        let none = moved.find("let Some(told) = told else {\n        return false;\n    };").unwrap();
+        let now = moved.find("let now = front_now();").unwrap();
+        assert!(told < none && none < now, "nothing asked without an application told");
+        assert!(moved.contains("tap_front::front_check(Some(told), now)"));
+        assert!(moved.find("if FRONT_OFF_MS.load(Ordering::Relaxed) != 0 {").unwrap() < now, "switched off by slow answers");
+        assert!(moved.contains("tap_front::slow_run(FRONT_SLOW_RUN.load(Ordering::Relaxed), took)"), "in a row, not one");
+        // The application is told with the window, and before it.
+        let note = body("pub fn note_foreground(window: isize) {");
+        let resolved = note.find("let psn = pid.and_then(psn_of);").unwrap();
+        assert!(note.find("let same = {").unwrap() < resolved, "asked with the lock let go");
+        assert!(resolved < note.find("*told() = Told { window, pid, psn };").unwrap());
+        assert!(note.find("*told() = Told { window, pid, psn };").unwrap() < note.find("FOREGROUND.store(window, Ordering::Relaxed);").unwrap());
+        assert!(body("pub fn note_pinned(window: isize) {").contains("note_foreground(now);"));
+        assert_eq!(TAP.matches("FOREGROUND.store(").count(), 1, "the window is told in one place, with its application");
+        // The Process Manager's calls are looked up by name, never linked.
+        let calls = body("fn process_calls() -> Option<&'static ProcessCalls> {");
+        for name in ["c\"GetFrontProcess\"", "c\"GetProcessPID\"", "c\"GetProcessForPID\""] {
+            assert!(calls.contains(name), "{name}");
+        }
     }
 
     /// A key held since a capture took it does not repeat into our own window, which would never
@@ -5388,6 +5538,7 @@ mod pass_on_tests {
         const TAP: &str = include_str!("macos/tap.rs");
         const INPUT: &str = include_str!("macos/input.rs");
         const QUEUE: &str = include_str!("macos/queue.rs");
+        const HOTKEY: &str = include_str!("macos/hotkey.rs");
         let body = |src: &'static str, sig: &str| {
             let at = src.find(sig).unwrap_or_else(|| panic!("{sig}"));
             let end = src[at..].find("\n}\n").unwrap();
@@ -5412,9 +5563,11 @@ mod pass_on_tests {
         let key_down = rest.find("if etype != CGEventType::KeyDown {").unwrap();
         assert_eq!(rest[key_down..].matches("return pass;").count(), 1, "only the check itself, for what is no key-down");
         assert!(rest[key_down..].starts_with("if etype != CGEventType::KeyDown {\n        return pass;\n    }"));
-        assert_eq!(rest[key_down..].matches("return through();").count(), 4);
+        assert_eq!(rest[key_down..].matches("return through();").count(), 0);
+        assert_eq!(rest[key_down..].matches("return let_go();").count(), 4);
+        assert!(rest[key_down..].contains("let let_go = || {\n        let p = through();\n        if shortcut {\n            stamp_shortcut(keycode, mask);\n        }\n        p\n    };"), "every key-down let go is counted, and then stamped");
         assert!(rest.contains("        return through(); // not a keyboard event we can name"));
-        assert!(rest.contains("let pressed = Pressed { front, seq: let_through(), taps_seq: taps_through(), phys: Some(keycode), queued: Some(Instant::now()) };"));
+        assert!(rest.contains("pressed: Pressed { front, seq: let_through(), taps_seq: taps_through(), phys: Some(keycode), queued: Some(queued) },"));
         // `host.input.send`'s mark, read with the pass-on's: a key-down that carries it is counted
         // as let through, and not as ending a count of quick repeats; nothing else asks it.
         assert!(rest.starts_with("    // A key `host.input.send` posted"));
@@ -5434,8 +5587,8 @@ mod pass_on_tests {
         let decide = body(TAP, "fn decide(vk: u32, mask: u8, front: isize, menu_keys: bool)");
         assert!(decide.contains("let vk = if keypad_enter { crate::backend::keypad_enter_as(&state.set, &state.owners, mask, front) } else { vk };"));
         assert!(decide.contains("let menu_vk = if keypad_enter { crate::backend::VK_RETURN } else { vk };"));
-        assert!(decide.contains("Some((vk, decided))"));
-        assert!(cb.contains("let Some((vk, decided)) = decide(vk, mask, front, true) else {"));
+        assert!(decide.ends_with("(vk, decided, pinned)"));
+        assert!(cb.contains("let (vk, decided, pinned) = decide(vk, mask, front, true);"));
         let pass = body(INPUT, "pub fn pass_on(");
         assert!(pass.contains("let code = phys\n        .or_else(|| keys::vk_to_keycode_for(vk, mask))"));
         assert!(pass.contains("let src = pass_source()"));
@@ -5450,14 +5603,37 @@ mod pass_on_tests {
         assert!(now.contains("super::tap::held_back(code)"));
         assert!(now.contains("front: super::ax::foreground_window_id(),"), "asked afresh, not the tap's idea");
         assert!(now.contains("let_through: super::tap::let_through(),"));
-        // A hotkey press carries the count the tap had when Carbon handed it over, and when.
-        assert!(body(QUEUE, "pub fn push_hotkey(").contains("push((id, super::tap::let_through(), super::tap::taps_through(), Instant::now()))"));
+        // A hotkey press carries the counts the tap stamped its key-down with, and when — or, for a
+        // press the tap did not see, the counts when Carbon handed it over, and that moment.
+        let push = body(QUEUE, "pub fn push_hotkey(");
+        assert!(push.contains("key.and_then(|(code, mask)| super::tap::claim_shortcut(code, mask))"));
+        assert!(push.contains("Some(s) => Hotkey { id, seq: s.seq, taps_seq: s.taps_seq, at: s.at, stamped: true },"));
+        assert!(push.contains("seq: super::tap::let_through(),\n            taps_seq: super::tap::taps_through(),\n            at: Instant::now(),\n            stamped: false,"));
+        assert!(body(HOTKEY, "unsafe extern \"C\" fn hotkey_handler(").contains("queue::push_hotkey(id, held_on(id));"));
+        // Stamped only once counted, and only for a shortcut's key.
+        let stamp = body(TAP, "fn stamp_shortcut(keycode: u16, mask: u8)");
+        assert!(stamp.contains("Stamp { seq: let_through(), taps_seq: taps_through(), at: Instant::now() }"));
+        // The keys the shortcuts are on are told to the tap after every registration and release.
+        assert!(body(HOTKEY, "fn register_on_key(").contains("tell_tap();"));
+        assert!(body(HOTKEY, "pub fn unregister(id: i32) {").contains("tell_tap();"));
         // Handed on with its own key-down in that count, which the quick repeats take for no other
-        // key; and after the moment the tick measures a `"final"` sequence's end by.
+        // key, and before the keys; they are taken with the moment the tick measures a `"final"`
+        // sequence's end by, under the queue's lock.
         let drain = body(QUEUE, "pub fn drain(");
-        let taken = drain.find("TAKEN.with(|t| t.set(Some(Instant::now())));").expect("the moment noted");
-        let handed = drain.find("events.on_hotkey(id, crate::backend::HotkeyPress { seq, taps_seq, own: 1, at });").expect("own: 1");
-        assert!(taken < drain.find("in HOTKEYS.with(|q| std::mem::take(").unwrap() && handed < drain.find("events.on_key(").unwrap());
+        let taken = drain.find("let (keys, _taken) = KEYS.take();").expect("the moment noted with the keys");
+        let handed = drain
+            .find("events.on_hotkey(h.id, crate::backend::HotkeyPress { seq: h.seq, taps_seq: h.taps_seq, own: 1, at: h.at });")
+            .expect("own: 1");
+        assert!(drain.find("in HOTKEYS.with(|q| std::mem::take(").unwrap() < taken && handed < taken);
+        assert!(taken < drain.find("for k in keys {").unwrap() && taken < drain.find("events.on_key(").unwrap());
+        assert!(body(QUEUE, "pub fn taken_at() -> Option<Instant> {").contains("KEYS.taken_at()"));
+        assert!(body(QUEUE, "pub fn push_key(").contains("KEYS.push(make);"));
+        // A stop drops the stall's keys, and the hotkey presses the tap stamped during it however
+        // late Carbon hands them over.
+        let drop = body(QUEUE, "pub fn drop_pending(");
+        assert!(drop.contains("KEYS.drop_all()") && drop.contains("DROPPED_AT.with(|d| d.set(Some(Instant::now())));"));
+        assert!(drain.contains("if h.stamped && dropped_at.is_some_and(|d| h.at <= d) {\n            late.push(h.id);\n            continue;\n        }"));
+        assert!(drain.contains("events.on_stall_hotkeys_dropped(late);"));
     }
 }
 

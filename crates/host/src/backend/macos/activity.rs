@@ -3,9 +3,9 @@
 //! This is an accessory application (`LSUIElement`: no Dock icon, no window most of the time),
 //! and macOS naps such an application once it has been in the background for a while: its
 //! timers are coalesced and its main thread runs at background priority. The main thread is
-//! the one that carries the event tap (`tap.rs`) and the pump — so a napped application would
-//! hand captured keys over late, and a tap that answers too late is switched off by the system
-//! (the watchdog switches it back on; the keys in between reach the application).
+//! the one that carries the pump — so a napped application would hand captured keys to their
+//! modules late. The event tap answers on a thread of its own (`tap.rs`), at user-interactive
+//! priority, and is not held to the pump.
 //!
 //! So an activity is held — `UserInitiatedAllowingIdleSystemSleep`, the request macOS offers
 //! against App Nap — while any of the reasons below holds, with `LatencyCritical` as well for
@@ -38,13 +38,20 @@
 //! The Info.plist (`package-macos.sh`) deliberately has no `NSAppSleepDisabled`: that would keep
 //! App Nap away for the whole session, including the hours in which nothing is captured and the
 //! application only waits for a window to come to the front — time a laptop's battery pays for.
-//! Whether a registered hotkey alone, a window trigger waiting, or the event tap with nothing
-//! captured suffers from a nap is not known; the tap's own "reached the event tap late" line is
-//! what would show it (TODO.md, "macOS over days of uptime").
 //!
-//! Main thread only: every caller is on the main thread — the event tap's captured set, the
-//! game controller's listeners and the pump, and the Permissions page's button, which runs in
-//! the GUI's click handler — and the token lives in a thread-local.
+//! **Not held for the event tap as such**, though every key of the Mac passes it, captured or
+//! not (decided 2026-10-30). The second Mac tester's log is the evidence: about four and a half
+//! hours in Ableton Live with nothing captured, so with no activity held, and every one of its
+//! 126 "reached the event tap late" lines there sits beside a stall of the main thread's own work,
+//! which then carried the tap — none came from an otherwise idle application, napped or not. With
+//! the tap on its own thread no work of ours can make a key late there any more, so that line now
+//! measures the nap alone: a late key with no stall nearby, while nothing is captured, is the case
+//! for holding the activity for as long as the tap exists (TODO.md). Whether a registered hotkey
+//! alone, or a window trigger waiting, suffers from a nap is not known.
+//!
+//! Main thread only: every caller is on the main thread — the captured set handed to the event
+//! tap, the game controller's listeners and the pump, and the Permissions page's button, which
+//! runs in the GUI's click handler — and the token lives in a thread-local.
 
 use std::cell::{Cell, RefCell};
 

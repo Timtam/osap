@@ -94,8 +94,7 @@ impl Fallback {
     /// What could speak, as of the last look, and ask for another.
     ///
     /// The caller gets an answer at once — a clone of a small vector — because it is the
-    /// event loop, which every callback, captured key and hotkey waits for (and on macOS the
-    /// event tap, which the system switches off past about 300 ms), and a fresh look was
+    /// event loop, which every callback, captured key and hotkey waits for, and a fresh look was
     /// measured at 35 ms idle and 2.7 s while an engine was opening. For "which screen readers are running" a moment-old answer is the right
     /// kind: it changes when somebody starts or quits one, not between two lines of Luau.
     pub fn engines(&self) -> Vec<super::Engine> {

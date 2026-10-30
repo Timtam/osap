@@ -524,6 +524,8 @@ pub mod keys {
     };
     pub const TAP_SOURCE: Reason = Reason { code: Code::Failed, message: "CFMachPortCreateRunLoopSource failed for the event tap", entries: &["host-keys-capture"] };
     pub const TAP_NO_RUN_LOOP: Reason = Reason { code: Code::Failed, message: "no CFRunLoop to attach the event tap to", entries: &["host-keys-capture"] };
+    pub const TAP_THREAD: Reason = Reason { code: Code::Failed, message: "could not start the event tap's thread: …", entries: &["host-keys-capture"] };
+    pub const TAP_ENDED: Reason = Reason { code: Code::Failed, message: "the event tap's thread ended before it answered", entries: &["host-keys-capture"] };
 }
 
 /// `host.hotkey.register`. The first two answer `nil, err`; the claims made but not held now
@@ -1056,6 +1058,8 @@ pub static REASONS: &[&Reason] = &[
     &keys::TAP_REFUSED,
     &keys::TAP_SOURCE,
     &keys::TAP_NO_RUN_LOOP,
+    &keys::TAP_THREAD,
+    &keys::TAP_ENDED,
     &hotkey::KEPT_BY_SYSTEM,
     &hotkey::NO_KEYCODE,
     &hotkey::NO_VK,

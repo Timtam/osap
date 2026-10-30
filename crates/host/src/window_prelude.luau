@@ -298,7 +298,7 @@ end
 --
 -- `W.list()` with no filter asks every running application for its windows, and on macOS
 -- each of those is a call into another process with a timeout of its own; one that never
--- answers costs the whole timeout, on the thread that carries the keyboard. The third Mac
+-- answers costs the whole timeout, on the event loop every captured key waits for. The third Mac
 -- session measured two seconds of every three-second stall going exactly there, for a
 -- matcher that had named its application all along. So the `app` clauses — the top-level one
 -- and the one in this platform's block, both of which `matches` will test again — are run

@@ -155,10 +155,10 @@ impl Budget {
 ///
 /// The second Mac test (2026-10-24, its finding 5) had Logic's file panel open while seven VMs —
 /// every embedded overlay's — asked their identity questions in it, each walk stopping at its
-/// 300 ms (55c5608) and the next starting from scratch: about 2 s of one turn, on the thread that
-/// carries the event tap, which macOS switches off past its own limit. An application that could
-/// not be walked in 300 ms is not walked again in the turn it showed it; the next turn asks it
-/// afresh. A count of turns, not a clock: nothing here decides how long.
+/// 300 ms (55c5608) and the next starting from scratch: about 2 s of one turn, on the main thread,
+/// which carried the event tap then, and macOS switches a tap off past its own limit. An
+/// application that could not be walked in 300 ms is not walked again in the turn it showed it;
+/// the next turn asks it afresh. A count of turns, not a clock: nothing here decides how long.
 #[derive(Default)]
 pub(crate) struct SlowThisTurn {
     /// The applications whose walk ran out of time in this turn.

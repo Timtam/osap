@@ -14,12 +14,13 @@
 //! **Cocoa's other origin never escapes.** `NSScreen`/`NSWindow` frames and Vision's
 //! normalised boxes are bottom-left. They are flipped where they are read, never later.
 //!
-//! Everything here runs on the main thread with exactly one exception, the capture function
-//! handed to the image worker ([`Backend::capture_fn`]), which is a bare `fn` for that
-//! reason. OS callbacks — the event tap, the Carbon hotkey handler, the accessibility
-//! observers — arrive on the main run loop, which wxWidgets already runs, and they only
-//! ever push onto a queue and return. Dispatching from inside them is what gets an event
-//! tap disabled for being slow.
+//! Everything here runs on the main thread with two exceptions: the capture function handed to
+//! the image worker ([`Backend::capture_fn`]), which is a bare `fn` for that reason, and the
+//! event tap, which answers on a thread and run loop of its own (`tap.rs`) and hands what it
+//! takes over through a queue behind one lock (`tap_queue.rs`). The other OS callbacks — the
+//! Carbon hotkey handler, the accessibility observers — arrive on the main run loop, which
+//! wxWidgets already runs. All of them only ever push onto a queue and return. Dispatching from
+//! inside them is what gets an event tap disabled for being slow.
 
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -91,9 +92,14 @@ mod question;
 /// and handed to the host as `SystemEvent`s. See the file.
 mod system;
 mod tap;
+/// Whether the application in front is still the one the event tap was told of. Pure; see the
+/// file.
+mod tap_front;
 /// What the event tap's callback leaves for the run-loop observer to write down. Pure; see the
 /// file.
 mod tap_handoff;
+/// What the event tap's thread hands the main thread, and how. Pure; see the file.
+mod tap_queue;
 /// The reads an application could not complete inside one accessibility walk, counted for the
 /// log. Pure; see the file.
 mod unanswered;
@@ -118,9 +124,9 @@ impl MacBackend {
         perm::request_screen_recording_once();
         // Vision's first pass in a process costs what no later one does — the warm-up over bars
         // it made until 2026-10 took 0.2–0.33 s on a Mac mini M1 and 1.7–1.8 s on an Intel
-        // MacBook Air. It was made for the reads that ran on the thread that carries the
-        // keyboard, where a first pass could stall the pump long enough for the system to switch
-        // off the event tap; every read runs on the recognise thread now, and whether this
+        // MacBook Air. It was made for the reads that ran on the main thread, which carried the
+        // event tap until 2026-10, where a first pass could stall the pump long enough for the
+        // system to switch off the tap; every read runs on the recognise thread now, and whether this
         // warm-up is still needed is open (TODO.md).
         // Before the recognise thread starts: its own warm-up, once it has read the languages,
         // waits for this one to end (`ocr::warm_up_recognise`), and the two lines time a first
@@ -454,9 +460,9 @@ impl Backend for MacBackend {
         }
     }
 
-    /// Set by the drain just before it takes the hotkeys; the captured keys follow in the same
-    /// drain. The tap and Carbon queue on this thread, which the drain holds, so nothing queued
-    /// before the moment can come after it.
+    /// Set by the drain as it takes the captured keys, under the lock the tap's thread queues them
+    /// under with their moments; the hotkeys Carbon queued on this thread were taken before them,
+    /// in the same drain. So nothing queued before the moment can come after it.
     fn input_taken_at(&self) -> Option<std::time::Instant> {
         queue::taken_at()
     }
@@ -510,10 +516,10 @@ impl Backend for MacBackend {
         ax::listed_window_owns_point(id, x, y)
     }
 
-    /// The keys and hotkeys queued and not drained yet. Expected to be none: the tap and the
-    /// Carbon handler run on the event loop's thread, which the stall held, and the system switches
-    /// the tap off after about 300 ms, so keys typed meanwhile reach the application in front
-    /// (unverified on a Mac: TODO.md).
+    /// The keys and hotkeys queued and not drained yet: the keys the tap took during the stall,
+    /// on its own thread, while this one was held. Carbon's hotkeys reach this thread only after
+    /// the stall; one whose key-down the tap stamped during it is dropped as it is drained
+    /// (`queue::drop_pending`). Unverified on a Mac (TODO.md).
     fn drop_queued_input(&self) -> crate::backend::DroppedInput {
         queue::drop_pending()
     }
@@ -526,10 +532,6 @@ impl Backend for MacBackend {
         // A turn of the event loop begins: an application whose walk ran out of time in the last
         // one is walked again (`ax::next_turn`).
         ax::next_turn();
-        // Belt and braces. The tap re-enables itself from a run-loop observer, but the
-        // moment it most needs to is the moment this thread was too busy to answer — so it
-        // is also asked here, where being busy has just finished. Rate-limited inside.
-        tap::health_check();
         // A busy application owed another subscription attempt gets it here, on the clock,
         // rather than only when the user next switches applications — see watch.rs.
         watch::retry_refused();

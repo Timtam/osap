@@ -125,29 +125,51 @@ diagnostic afterthought.
 
 ## Where the event tap lives
 
-On the **main run loop**, with a watchdog — and this is the decision most likely to have to
-change on real hardware, so it is worth stating the argument on both sides.
+On a **thread of its own** (`key-tap`, at user-interactive priority, running a run loop of its
+own), with a watchdog on that run loop — as the Windows keyboard hook has a thread of its own.
+Until 2026-10 it lived on the main run loop, and that was the decision this section said was
+most likely to have to change on real hardware. It did.
 
-macOS switches off an event tap whose callback does not answer quickly enough, and it does
-not switch it back on by itself. The main run loop is also the pump, and the pump routinely
-spends a long time inside a cross-process accessibility call: one of the state probes the
-modules use costs 60–300 ms by design. So the tap can be disabled during ordinary use.
+macOS switches off an event tap whose callback does not answer quickly enough, and it does not
+switch it back on by itself. Worse, every key of the Mac waits for the tap, which sits at the
+head of the HID taps: a tap on the main run loop held every key of the machine, VoiceOver's
+included, for as long as the pump was busy — and the pump routinely spends a long time inside a
+cross-process accessibility call, a second at a time against an application that does not
+answer. The second Mac tester's log (2026-10-30) has 128 lines of keys that reached the tap late,
+up to 1.4 s, and 68 switch-offs, each beside a stall of ours; the threshold was about a second,
+not the 300 ms first assumed.
 
-What makes that survivable rather than fatal is that the disable is *observable*. The tap
-re-enables itself from a run-loop observer, the pump asks again on every tick, both are
-rate-limited to one cheap query every couple of seconds, and every re-enable is logged. The
-failure is therefore a second or two of lost keys with a line in the log naming it — not a
-platform that quietly stops answering.
+Now:
 
-Its own thread would remove the mechanism entirely, and that is the escalation if a first
-session shows the tap dying repeatedly. It is not free: the tap's callback would then be
-forbidden from touching accessibility at all, and the scope gate currently asks which window
-is frontmost. That has to become a cached value maintained by the activation observer before
-the thread can move. Doing the harder thing first, blind, to fix a problem that may not
-occur, is how a port acquires bugs nobody can find.
+- **The callback decides alone**, from what the main thread told it: the captured set and the
+  scopes (one mutex the main thread holds for a copy), the window in front, the menu and
+  own-window gates and the layout's letters (atomics). It never waits for the main thread's work.
+- **A key it takes is suppressed at once and queued**, behind one lock that the drain empties
+  with one swap and notes its moment under (`tap_queue.rs`). While the main thread is busy the
+  key waits there; it never reaches the application underneath, and the rest of the keyboard is
+  not held at all. A key that waited 250 ms or more for its module is said in the log (`… captured
+  key(s) waited for the event loop …`, at most once a second): what an overlay's user still feels.
+- **The window server is asked which application is in front**, for each key the tap would take
+  for a capture pinned to a window (`GetFrontProcess`, looked up by name): another application
+  than the one the main thread last told the tap of means the user switched while the main
+  thread was busy, and the key goes to that application. The first answer's time is logged, an
+  answer of a millisecond or more is counted, and two of 250 ms or more in a row switch the
+  question off until a wake, an unlock or the session back (`tap_front.rs`). It names an
+  application, not a window: another window of the same application in front during a stall is
+  not seen (TODO.md). The tap decides at the press, so a key pressed before an overlay coming up
+  has set its captures goes to the plug-in, as on Windows.
+- **A shortcut's counts are stamped by the tap**, at its key-down, and Carbon's delivery on the
+  main thread claims the stamp (`tap_queue::Shortcuts`): keys typed after a shortcut during a
+  stall are not counted into it.
+- **Nothing on the tap's thread writes a line**: the log's lock is the main thread's. What a line
+  needs is left in atomics and small queues, and an observer on the main run loop writes it.
+- **The watchdog and a re-creation run on the tap's thread**, which owns the port's run loop: a
+  two-second timer, and a source the main thread signals after a wake, an unlock or the session
+  coming back.
 
-Either way the state is already shared rather than thread-local — atomics and one mutex — so
-the move costs no rewrite.
+What it does not remove: the overlay's own latency. Keys wait for their callbacks, and what an
+overlay says waits for the main thread, as long as accessibility questions are asked there
+(TODO.md, a macOS accessibility thread).
 
 ## How "is a menu open" is answered
 
@@ -314,13 +336,14 @@ Every item here needs a Mac. They are listed in the order a first session should
 3. **Is a capture real** — capture a region over a plugin and compare it with a screenshot.
    Settles Screen Recording and the black-frame detection.
 4. **Does the tap suppress** — a captured key must not reach the application underneath.
-   Settles Input Monitoring and the tap's placement in the run loop.
+   Settles Input Monitoring. (The tap's placement: its own thread since 2026-10, above.)
 5. **Does OCR read plugin text** — the same regions the Windows modules read.
 6. **`_AXUIElementGetWindow`** — whether the private pairing works, or the geometry
    fallback is carrying it.
 7. **The pump budget** — macOS disables an event tap that is too slow (Windows used to drop
    keystrokes past ~300 ms while its keyboard hook shared the pump; the hook has a thread of
-   its own now). The equivalent number here is unmeasured.
+   its own now). Measured here at about a second by the second Mac tester's log, and the tap
+   has a thread of its own as well since 2026-10.
 8. **Does Vision read a lone digit** — the one measurement that decides whether the second
    OCR engine has to become cross-platform. Windows runs a neural fallback specifically
    because the system engine refuses single digits, and that fallback is a Windows-only
@@ -350,12 +373,10 @@ a shared run loop that alone would have exceeded the tap's tolerance and disable
 capture, mid-session, in a way that reads as "it worked and then stopped". Warming Vision on
 a background thread at startup, as the Windows backend already does for its second engine,
 removes the stall. (An earlier draft of this paragraph said the tap "living on its own
-thread removes the mechanism" — it does not live there. The tap runs on the main thread, as
-`tap.rs` says, with a watchdog that re-enables it; a thread of its own is the escalation
-described above, not something that was built. The first tester session showed the main
-thread suffices for ordinary use: the tap was never disabled during minutes of Tab
-navigation, only by stalls of over a second, and the watchdog had it back within about two
-seconds each time.)
+thread removes the mechanism" when it did not live there. The first tester session showed the
+main thread sufficed for ordinary use: the tap was never disabled during minutes of Tab
+navigation, only by stalls of over a second. The second tester's log showed those stalls in
+ordinary use, and since 2026-10 the tap does live on its own thread — see above.)
 
 **`host.ocr.recognize` takes OCR off the pump thread.** It photographs on a thread named
 `screen-capture` (the same `capture_backing` the synchronous calls use) and runs Vision on a

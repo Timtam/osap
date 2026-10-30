@@ -409,9 +409,10 @@ pub fn pick(current: Option<Letters>, ascii_capable: Option<Letters>) -> Letters
 }
 
 /// One table of letters in force, one atomic per letter so the event tap can read them without
-/// a lock. Written by `layout.rs` on the main thread; every reader is on the main thread as
-/// well, so a half-written table is never seen in practice, and would cost one keystroke if it
-/// were.
+/// a lock. Written by `layout.rs` on the main thread at a layout change, and read there and by
+/// the event tap on its own thread (`tap.rs`): a key the tap names while a change is being written
+/// can meet a table half old and half new, which costs that one keystroke its letter, and is not
+/// worth a lock every key would wait for.
 type LiveLetters = [AtomicU16; 26];
 
 const fn us_live() -> LiveLetters {
