@@ -255,15 +255,24 @@ local function invokeMenuItem(cell, o, item, onDone)
     if pid == nil then return true, w end
     return w ~= nil and w.app ~= nil and w.app.pid == pid, w
   end
-  local function leftAlone()
+  -- Said, interrupting: it used to be the log line alone, and on a Mac, where the application that
+  -- came to the front after the click named no window, the user heard nothing after Return (the
+  -- second Mac tester's log, 2026-10-30). `said` is what the user is left with: the menu not
+  -- opened, when the program came in the quarter second after the click, or no item chosen, when
+  -- it came while the opened menu was read. Nothing is sent: no Escape into another program. Nor
+  -- is the pass-through flag of the by-name opening touched: the overlay's leaving the front
+  -- clears it, a hold over the menu has cleared it already, and while a page's hand-over holds the
+  -- keys the flag is the page's.
+  local function leftAlone(said)
     host.log.info("Kontakt: another application came to the front during the menu read — nothing clicked")
+    host.speech.output(said .. ": another program came to the front", { interrupt = true })
   end
   local ctrl, uia = openFileMenu(cell, o)
   if not ctrl then return end
   host.timer.after(250, function()
     local ours, front = frontIsOurs()
     if not ours then
-      leftAlone()
+      leftAlone("Menu not opened")
       return
     end
     -- By name first where the button was found by name — and when the ITEM is not, the menu
@@ -292,7 +301,7 @@ local function invokeMenuItem(cell, o, item, onDone)
     local seen = host.ocr.recognize({ bx - 80, by + 14, bx + 170, by + 460 }, { lang = "en" })
     local stillOurs, after = frontIsOurs()
     if not stillOurs then
-      leftAlone()
+      leftAlone("Menu item not chosen")
       return
     end
     -- A read that failed — the capture, a recogniser that hung, no English recogniser installed —

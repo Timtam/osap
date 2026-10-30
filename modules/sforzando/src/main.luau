@@ -174,16 +174,19 @@ ov:attachEmbedded({
   -- stay inside the panel on a Mac (another plug-in selected in the same FX chain window is
   -- asked about afresh — see the runtime's "stay").
   identify = function(ctrl, again)
-    -- UIA (as ReaHotkey): sforzando's GUI is a Pane named "PlogueXMLGUI". On a Mac nothing
-    -- of sforzando's is published, and this asks the whole plug-in window for nothing.
+    -- On the DAW's panel, the "sforzando" wordmark in the header, read with a callback (above),
+    -- and nothing else. The runtime hands the binding a panel only where no control of the
+    -- plug-in's own was found, so there is no tree to ask: the find below would walk the whole
+    -- plug-in window for nothing, which took 980 ms in one of Ableton Live's windows (the second
+    -- Mac tester's log, 2026-10-30).
+    if ctrl.stay ~= nil then return wordmarkOnPanel(ctrl, again) end
+    -- UIA (as ReaHotkey): sforzando's GUI is a Pane named "PlogueXMLGUI".
     if host.element and host.element.find(ctrl.id, "PlogueXMLGUI", host.element.type.Pane) then
       return true
     end
-    -- Otherwise the "sforzando" wordmark in the header, read where it would be: with a callback
-    -- on the DAW's panel (above), and on a control of its own as the answer itself — a small
-    -- region, read in English as the wordmark is written, once per control handle; the handler
-    -- that asked waits for the reading, and nothing else does.
-    if ctrl.stay ~= nil then return wordmarkOnPanel(ctrl, again) end
+    -- Otherwise the wordmark on a control of its own, as the answer itself — a small region, read
+    -- in English as the wordmark is written, once per control handle; the handler that asked waits
+    -- for the reading, and nothing else does.
     local ox, oy = ctrl.client.x, ctrl.client.y
     local r = host.ocr.recognize({ ox + WORDMARK[1], oy + WORDMARK[2], ox + WORDMARK[3], oy + WORDMARK[4] },
       { lang = "en" })

@@ -3,6 +3,156 @@
 Project backlog for the cross-platform automation platform.
 Architecture and feasibility foundation: [docs/architecture-feasibility-study.md](docs/architecture-feasibility-study.md).
 
+## The second Mac tester's log (2026-10-30)
+
+A second Mac tester's log (build c9f403f, macOS 26.6.2, Apple silicon, VoiceOver on): REAPER with
+Kontakt 8 and sforzando, then about four and a half hours of Ableton Live. Three problems, each with
+a mechanism of its own (the diagnosis and its adversarial verification, in the session's notes):
+
+- **Return on a control that opens a plug-in menu did nothing.** Kontakt's Load instrument, Cmd+L
+  and Option+V, sforzando's Instrument: 10 times of 10, an application that named no window
+  (VoiceOver) became the active one within the second after our HID click; the overlay let go of
+  its keys and Kontakt gave up with a log line only. For 3 s to more than 56 s nothing the tester
+  could hear happened ("every key hangs"). The log does not say why it came forward. The Avenger
+  header's OCR read VoiceOver's caption text in the band where both click points lie, which favours
+  the click landing on a window of VoiceOver's (H1) over VoiceOver reacting to the popup (H2).
+- **The event tap ran on the main run loop.** Every stall of the main thread held every key of the
+  Mac, VoiceOver's included, and from about a second on macOS switched the tap off: 128 late-key
+  lines (up to 1447 ms) and 68 switch-offs in ordinary use, the condition the item "The event tap
+  on its own thread" below set.
+- **Keys "swallowed" in Live came late.** daw-hosts' Live entry took every titled Live window for
+  a plug-in window (the Set's, Settings, "Set Time to Insert", the system's Save panel), so every
+  embedded overlay walked Live's tree on the main thread at every activation, focus move and poll:
+  4,886 walks of 50 ms or more, about 380 s, the same `locate` once per VM. Space and the arrows
+  reached Live up to 1.4 s late, several at once. In the Save panel each walk ran 3-5.5 s past its
+  300 ms deadline, one turn of the loop took 36 s, the guard stopped a module, and its stop window
+  then held the keyboard for 12 s.
+
+Built on wip/mac-keys from the maintainer's decisions of the same day; tested headless, not yet run
+on a Mac:
+
+- [x] **F1. The event tap on a thread of its own** (`key-tap`, user-interactive, its own run loop;
+      tap.rs, tap_queue.rs, tap_front.rs). The watchdog's 2 s timer and a re-creation run there; the
+      main thread only signals a recheck after a wake. Nothing on that thread writes the log: its
+      lines are handed to an observer on the main loop. Taken keys go over in a `Mutex<Vec>`,
+      stamped and drained under the one lock, and wait there already suppressed while the main
+      thread stalls; the drain says `a captured key waited N ms for the event loop`, at most once a
+      second. **The application in front, asked per key:** for a key the tap would take for an
+      overlay pinned to a window, the window server's front application (`GetFrontProcess`, looked
+      up at run time, one call); another one in front lets the key pass. No timer decides. Its cost
+      is logged, and two answers of 250 ms or more in a row switch the check off until a wake, an
+      unlock or the session back. The tap decides at the press, so a key pressed before an overlay
+      coming up has set its captures goes to the plug-in, as on Windows (with the tap on the main
+      loop such a key waited, and was taken). Carbon hotkeys are stamped by the tap at their own
+      key-down, so their counts are right; their order against keys typed during a stall is bounded
+      and said (`N shortcut press(es) reached their module after captured keys pressed after
+      them`), not forced, which would need a timeout. New reasons `keys.TAP_THREAD` and
+      `keys.TAP_ENDED`. Docs: keys.md's macOS block, macos-port.md; the `HOT_DEADLINE` comment
+      (ax.rs) gives the right reason now.
+- [x] **F2. Live's file panels are no plug-in windows** (daw-hosts 0.3.1): its macOS entry leaves
+      out an identifier ending in `-panel`, as Logic's does. The Set's window, Settings and "Set
+      Time to Insert" are still taken. Test: `overlay_mac_test2_tests.rs`
+      (`lives_file_panels_are_not_plugin_windows`).
+- [x] **F3. `locate` and `locateVia` kept per epoch** (element_lua.rs `served`; the item
+      "`host.element.locate` is not epoch-cached" below): served from the epoch's store for a key,
+      a hotkey, a window or focus change, where every VM evaluates the same event; asked afresh by
+      a poll or a module loading, because ARC ON:EAR sees its choosers and its settings panel open
+      and close only by polling `locate` every 500 ms in a window that stays, and a tick does not
+      turn the epoch over. A poll's locates are not counted for `[observe]`. Tests: element_lua.rs
+      (two VMs, one walk; a poll asks again). Docs: element.md, window.md.
+- [x] **F4. A walk asks its deadline before every read** (budget.rs `may_read`; ax.rs `attribute`,
+      `snapshot_batched`, `children`): a read past it is not begun, and the walk ends as at a node,
+      "not known". About 1.3 s at most (the deadline and one read) instead of 3-5.5 s. Tests:
+      budget.rs.
+- [x] **F5. sforzando asks no tree on a DAW's panel** (sforzando 0.2.3): there only the wordmark is
+      read; the `PlogueXMLGUI` find (980 ms in a Live window) is asked of a control of its own.
+      Test: `sforzando_asks_no_tree_on_the_daws_panel`.
+- [x] **F6. Kontakt says when it gives its menu up** (Kontakt 0.1.7): "Menu not opened: another
+      program came to the front", interrupting, when that program came in the quarter second
+      after the click; "Menu item not chosen: …" when it came while the opened menu was read.
+      Still nothing clicked and no Escape. No
+      `menuOpen(false)` there: the overlay's leaving the front clears the flag already. Test:
+      `kontakt_clicks_its_menu_row_only_while_its_program_stays_in_front`.
+- [x] **F7. Three lines that tell H1 from H2** (click_notes.rs, input.rs, watch.rs; no screen
+      reader named, window metadata only, never a capture). At every `host.input.click` through the
+      input, before it is posted: the window the hit test names at the point (number, application,
+      pid, layer), and whether it is the module's window or one of the application in front. For
+      an application that comes to the front naming no window: its activation policy, its windows
+      on screen (number, layer, place, size, alpha, name) and which of them hold the last click's
+      point. And `<app> (pid P) came to the front N ms after this application's click at x,y`.
+      Docs: input.md's click macOS block.
+
+Open:
+
+- [ ] **F8. A1's fix, once the next log has F7's lines** (the maintainer: first the diagnosis, then
+      the fix). The `is_voiceover` exception in `number_owns_point` (ax.rs) stays until then.
+      - **H1**, the click lands in a window of the application that comes forward (`click at …
+        lands in window N of '<app>' …, not a window of the application in front`, and that
+        application's line has the last click in that window): the click is covered. Pass `window`
+        from the runtime's menu-opening clicks and from Kontakt's `uiaClick` and `openFileMenu`, so
+        a covered click is refused and said; drop `is_voiceover`, now that a window at the point is
+        shown to take clicks (the VoiceOver cursor's outline must still not refuse every click);
+        and where the plug-in takes them, `via = "post"` (no hit test, nothing activated): whether
+        Qt (Kontakt) and Plogue's GUI take a posted click is a Mac measurement.
+      - **H2**, the click lands in the plug-in's own window and the windowless application has no
+        window at the point: the click worked. An activation whose application names no window and
+        has none on screen then ends no stay, only for a pending menu press and holding no keys
+        (`_menuHold`: a windowless application, the Finder after Command-Tab, holds nothing
+        otherwise). The system still sends keys to the active application, and F1's per-key check
+        lets them go to it, so Kontakt's read-the-menu path would work, and sforzando's list, used
+        from the keyboard, would not.
+- [ ] **The tap's question names an application, not a window** (tap.rs `front_moved`). Another
+      window of the same application in front while the main thread is busy, one switched to with a
+      key no overlay takes or the told window closed, is not seen: a captured key is taken for the
+      window last told, and after the stall its overlay acts on it, or has let go and the key is
+      lost. The window server says which application is active, not its key window; only the
+      application says that (Accessibility, asked of the process that may be the busy one, inside
+      the callback), and the window list's order is not it (a floating plug-in window stays above
+      the window that has the keys). Two checks are possible, per key a pinned capture takes: the
+      told window no longer on screen (a list of window numbers, `CGWindowListCreate`; catches a
+      closed window, never passes a key wrongly), or a window of the same application above the
+      told one at its own layer (catches a switch, but can pass a key with no stall at all).
+      Decide with the first `the event tap asked the window server … took … µs` line from a Mac,
+      and with a log that shows the case.
+- [ ] **F9. A macOS accessibility thread**: the item "macOS has no accessibility thread yet" below.
+      After F1 a stall no longer holds the Mac's keyboard; it still delays what an overlay says:
+      Kontakt's 4.6 s `findAny` with a callback, and `window.active()` waiting 1 s on an application
+      that does not answer, once per 5 s quarantine, on focus changes in every application.
+- [ ] **Narrow Live's entry to its plug-in windows** once a tester sends the probe's lines
+      (Shift+Cmd+F9) from a Live plug-in window, from Live's main window and from Settings: their
+      subroles, identifiers and titles. Until then the entry takes the Set's window and Settings, at
+      one identity question per overlay and stay there.
+- [ ] **App Nap while the tap exists.** Decided not to hold it now (activity.rs): every late key of
+      this log sits beside a stall of our own. With F1, `… reached the event tap late … the tap's
+      own thread was late` measures the nap alone: such a line with no stall nearby while nothing
+      is captured is the case for holding the activity for as long as the tap exists.
+- [ ] **The tester's questions** (plain, few): with VoiceOver's caption panel switched off
+      (VoiceOver Utility, Visuals), Return on Load instrument in Kontakt once — did the menu open,
+      and was it read? After Return, how did the keys come back (waiting, Escape, Command-Tab,
+      something else), and about how long did it take? In sforzando, was an instrument loaded when
+      he pressed Return on Instrument (every read of that field was empty)? In Live, was a plug-in
+      window open at any point? With the next build: Shift+Cmd+F9 in a Live plug-in window, in
+      Live's main window and in Settings, and the log.
+- [ ] **Only a Mac confirms:** `event tap installed on its own thread`; no late-key line and no
+      switch-off beside `[pump]` lines of a second or more; the front check's first answer in µs,
+      and no switch-off of it; `GetFrontProcess` on macOS 26 naming an application in front that
+      names no window; Tab pressed during a stall reaching the overlay after it, a window switch
+      during a stall letting keys reach the new application, and VoiceOver's own keys prompt; a stop
+      dropping the keys and stamped hotkeys pressed during a stall (`drop_queued_input`); one
+      `uia.locate(Kontakt File Menu)` per interactive epoch instead of five; no single walk's
+      `blocked the pump` over about 1.3 s; no `[host-panel] panel of 'Save'` in Live; F7's three
+      lines around each menu-opening click; and whether "Menu not opened" is heard while the
+      application in front names no window.
+- [ ] **Watch the next Mac logs for keys pressed while an overlay comes up** (F1): Tab or Return at
+      once after switching to a plug-in's window now reach the plug-in, as on Windows. If a tester
+      finds that wrong, the tap could hold a key of a window it was just told of until the
+      overlay's captures arrive; that needs a bound, a timer, and is the maintainer's call.
+- [ ] **The guard's stop window took the keyboard** for 12 s in Live's Save panel (stops.rs). With
+      F2 and F4 that stop should not come there; whether a stop window should take the keyboard
+      from the application in front at all is the maintainer's call.
+- The item "`[observe] epoch served` is still a line per tick on a Mac" below matters more now:
+  locates asked in the interactive lane are counted.
+
 ## Quick repeats of a key: once, twice, three times (2026-10-20, from the maintainer; built 2026-10-23)
 
 Asked for by the developer of the avenger_control tool (2026-10-20): bind a key's quick repeats,
@@ -1092,8 +1242,9 @@ to 0.11.0. The core part, in the plan's order:
       module window's Quit, the quit key, Command-Q in a page) as the window loop ends. A signal
       ends the process without that line: there is no signal handler. Tests: `instance.rs` (the way
       out), the quit test in `lib.rs`.
-- [ ] **The event tap on its own run loop (finding 5, R4: keys not captured during a stall).** The
-      maintainer decides whether it goes in now (the plan's question 3). Not built.
+- [x] **The event tap on its own run loop (finding 5, R4: keys not captured during a stall).** The
+      maintainer decides whether it goes in now (the plan's question 3). Decided and built on
+      2026-10-30: "The second Mac tester's log (2026-10-30)", F1, at the top.
 - [ ] **The focus guard while VoiceOver moves through the page (finding 29).** Only if the tester
       confirms that VoiceOver jumped back while moving through the page (findings' question 14).
       Not built.
@@ -4152,7 +4303,7 @@ control that has hidden itself acts on its hotkey sibling or says "not available
       Only after that: a viewport filter for macOS `focus_step` — clip by ancestors that SCROLL
       (AXScrollArea, AXList, AXTable, AXOutline, a group with an AXScrollBar child), never by
       every AXGroup, ignoring ancestors with no rectangle.
-- [ ] **The event tap on its own thread** — waits for the measurement, which is built
+- [x] **The event tap on its own thread** — waits for the measurement, which is built
       (2026-09-19). Both switch-offs were the probe's ~1.2 s synchronous hotkey callback, not
       focus handling; the ~1 s focus stalls did not trip it because no key was waiting. The tap
       now notes every key-down that reaches it 250 ms or more after it was pressed, and the
@@ -4161,6 +4312,8 @@ control that has hidden itself acts on its hotkey sibling or says "not available
       worth making (tap.rs's escape hatch, which needs queue.rs's pump-thread queues to become
       cross-thread). The timestamp's unit on Apple silicon is read two ways (`key_age.rs`,
       tested on Windows); if the line reports absurd ages, that reading is the first suspect.
+      **Built (2026-10-30):** the second Mac tester's log had 128 such lines and 68 switch-offs in
+      ordinary use ("The second Mac tester's log (2026-10-30)", F1, at the top).
 - [x] **The probe in timer hops, with a busy guard** — 2026-09-19. The press-time part stays
       synchronous (window, surfaces, focus chain); every tree dump, the picture, the OCR, the
       text comparison and each answer run one event-loop tick apart, the three OCR-batching
@@ -4198,9 +4351,13 @@ control that has hidden itself acts on its hotkey sibling or says "not available
 - [ ] **The pump line calls its residue "mostly key and hotkey dispatch"** and never measures it
       (`ev_counts.3` is documented as key-dispatch ms and written by nobody). Time on_hotkey and
       on_key, print keys/hotkeys and "outside the handlers" separately.
-- [ ] **`host.element.locate` is not epoch-cached**, so on a miss each of the five VMs that carry
+- [x] **`host.element.locate` is not epoch-cached**, so on a miss each of the five VMs that carry
       Kontakt's code walks the window. macOS-only `located()` routing first; on every platform
       only after checking ON:EAR's polls on Windows don't start logging `[observe]` per tick.
+      **Built (2026-10-30)**, the check done by reading: kept per epoch everywhere, ON:EAR's polls
+      would have been served their first answer, and its choosers would not let go when their panel
+      closes. So `locate` and `locateVia` are kept for a key, a hotkey and a window or focus change,
+      and asked afresh by a poll, which is not counted ("The second Mac tester's log", F3).
 - [ ] **Personal Voice after a grant listed 0 personal voices.** Ask whether that Mac has one
       recorded; if so, relaunch and read the startup voice line. And what the status reads right
       after refusing macOS's own dialog (the pump now unticks either way).
@@ -4613,6 +4770,7 @@ in macOS 14`, where without it the process would have aborted), `window.active` 
       was recognised as wording.
 - [x] **`docs/macos-port.md` claimed the tap lives on its own thread.** It does not
       (`tap.rs`: main thread), and the session showed the main thread suffices. Corrected.
+      Since 2026-10-30 it does again ("The second Mac tester's log", F1), and the doc says so.
 - Observed and left alone, because they behaved: REAPER and sforzando each refused the focus
   observer when first seen (busy at startup) and were subscribed later on the next
   activation; seven `Return` presses reached the plugin while its menu was open, which is the
@@ -8411,15 +8569,15 @@ system.
       in-Komplete-Kontrol cells are declared absent on a Mac (`macos = false`). Komplete Kontrol,
       u-he, Melodyne, ARC ON:EAR and the Kontakt library modules named no DAW and are unchanged.
 - [ ] **sforzando in a DAW on a Mac — the wordmark, never read there.** The binding used to be
-      recognised in REAPER by the window's title; now by a `PlogueXMLGUI` pane (nothing of
-      sforzando's is published on a Mac, so in practice not) or by the "sforzando" wordmark read
-      off the event loop at 597..770 x 29..74 of the panel — the Windows region (605..762 x
-      33..70) grown by 8 and 4 points for the Mac build, which moved the read-outs by up to 7 and
-      4. At the next session, sforzando in REAPER (chain and floating) and in Logic: the
-      `attachEmbedded: [host-panel] panel of '…' … identify=true — 'sforzando'` line, the overlay
-      coming up and its read-outs landing. `identify=false` with sforzando plainly on screen means
-      the region misses the wordmark: send the log and a screenshot of the window, and the region
-      is measured from it.
+      recognised in REAPER by the window's title; now, on a DAW's panel, by the "sforzando"
+      wordmark alone (the `PlogueXMLGUI` find is asked of a control of its own only, since
+      sforzando 0.2.3), read off the event loop at 597..770 x 29..74 of the panel — the Windows
+      region (605..762 x 33..70) grown by 8 and 4 points for the Mac build, which moved the
+      read-outs by up to 7 and 4. At the next session, sforzando in REAPER (chain and floating)
+      and in Logic: the `attachEmbedded: [host-panel] panel of '…' … identify=true — 'sforzando'`
+      line, the overlay coming up and its read-outs landing. `identify=false` with sforzando
+      plainly on screen means the region misses the wordmark: send the log and a screenshot of the
+      window, and the region is measured from it.
 - [ ] **Kontakt 8 in a DAW on a Mac** is recognised only when it publishes a button named "Kontakt
       File Menu" within 110 points across and 24 up or down of the authored {86,19}, which was
       written as a click point, not measured as a centre; otherwise `publishes no button named
@@ -8920,7 +9078,9 @@ Built and tested against the scripted host only (`overlay_avenger_tests.rs`,
       Live's main window, which the entry takes as well until then — so daw-hosts' focus key leaves
       the entry out (`focusKey = false`), which would otherwise bring Live's main window forward
       ahead of a Logic plug-in window; the content origin the host derives for it; and where the
-      plug-in begins (the module's identification line, `MENU read at …`, at two zooms).
+      plug-in begins (the module's identification line, `MENU read at …`, at two zooms). Its
+      file panels are left out since daw-hosts 0.3.1; the narrowing waits for the probe's lines
+      ("The second Mac tester's log (2026-10-30)").
 - [x] **The page's first stage** (read-only): `ui/{index.html, panel.css, panel.js}` from the
       tool's `panel/pages.py` (the transport through `platform`, `ACTIONS`, "not read" for every
       value not read, the database's expansions marked, a reloaded page's reads with their age,

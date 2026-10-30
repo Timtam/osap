@@ -261,17 +261,22 @@ local reaper = {
 -- with a title, its plug-in found by `livePluginOrigin`'s starting values. That tool finds Live's
 -- plug-in window by its title naming the plug-in, which an entry here must not do (no plug-in is
 -- named here); so the entry takes every titled window of Live — its main window, titled by the
--- Set, included until a Mac session says what tells the two apart (their subroles, the shape of
--- a plug-in window's title). That costs a plug-in module one `identify` there per stay, which
--- answers no. The focus key leaves the entry out (`focusKey = false`) until then: it would find
--- Live's main window — with Live running in the background, ahead of a Logic plug-in window the
--- user is in, since this list comes first — and bring it forward.
+-- Set, and Settings included until a Mac session says what tells them apart (their subroles, the
+-- shape of a plug-in window's title). That costs a plug-in module one `identify` there per stay,
+-- which answers no. The focus key leaves the entry out (`focusKey = false`) until then: it would
+-- find Live's main window — with Live running in the background, ahead of a Logic plug-in window
+-- the user is in, since this list comes first — and bring it forward.
+-- Its file panels are left out as Logic's are, by their identifier: the second Mac tester's log
+-- (2026-10-30) has Live's Save panel as `AXWindow/AXDialog/save-panel`, taken for a plug-in window,
+-- and every embedded overlay walked it in one turn of the event loop for 36 s, until the guard
+-- stopped a module.
 local ableton = {
   { daw = "Ableton Live", app = { exe = { contains = "Ableton Live" } }, windows = { class = { contains = "Vst3PlugWindow" } } },
   { daw = "Ableton Live", app = { exe = { contains = "Ableton Live" } }, windows = { class = { contains = "AbletonVstPlugClass" } } },
   { daw = "Ableton Live", app = { exe = { contains = "Ableton Live" } }, windows = { class = { contains = "#32770" } } },
   { daw = "Ableton Live",
-    macos = { app = { bundleId = "com.ableton.live" }, title = { pattern = "%S" } },
+    macos = { app = { bundleId = "com.ableton.live" }, title = { pattern = "%S" },
+      axIdentifier = { ["not"] = { suffix = "-panel" } } },
     pluginOrigin = { macos = livePluginOrigin }, focusKey = false },
 }
 
@@ -377,8 +382,8 @@ end
 
 -- Memoised per window and client size, as the overlay runtime keys its copy of this cache and
 -- for the same reason: the surface walk behind `reaperPluginOrigin` is an accessibility
--- traversal of the whole FX window, and it runs on the thread that carries the event tap. Once
--- per window is affordable; once per press is how a stall gets the tap switched off. The trade
+-- traversal of the whole FX window, and it runs on the event loop every captured key waits for.
+-- Once per window is affordable; once per press is a stall at every press. The trade
 -- is that dragging the FX list divider is not followed until the window is resized, or closed
 -- and opened again as a new window. The size is in the key because a DAW lays a window out
 -- again when it is resized; it was the id alone until 2026-09-28, so a resized window kept the
@@ -442,7 +447,7 @@ end
 -- and cost something: on Windows, Logic's entry (a `macos` block, no application clause this
 -- platform can use) had the prelude list EVERY window on each press that found no plug-in
 -- window; on a Mac, the Windows-only bridged-REAPER entry listed REAPER's windows a second
--- time, at the full timeout, on the thread that carries the event tap. And the DAWs the log line
+-- time, at the full timeout, on the event loop. And the DAWs the log line
 -- names are the ones that could have been found. Less the entries marked `focusKey = false`.
 local PLATFORMS = { "windows", "macos", "linux" }
 local function appliesHere(m)

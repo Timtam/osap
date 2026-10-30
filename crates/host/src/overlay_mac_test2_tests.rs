@@ -6,6 +6,9 @@
 //! asked its identity question in it. And the focus key's own click into the plug-in's panel, after
 //! which Logic reports no focus at all, begins a stay there (finding 9, the maintainer's decision of
 //! 2026-10-24); any other empty focus chain still begins none.
+//!
+//! And from the second Mac tester's log (2026-10-30): Ableton Live's file panels are no plug-in
+//! windows either.
 
 use super::overlay_host_panel_tests::{run_with_helpers, SPECIFICITY_ARBITER};
 use super::overlay_page_tests::PG;
@@ -86,6 +89,43 @@ fn logics_file_panel_is_not_a_plugin_window() {
         T.at(T.LOGIC)
         S.hotkeyFns["Cmd+Shift+F6"]()
         assert(S.focusCalls[#S.focusCalls] == 21, "the plug-in window, not the panel: " .. T.dump())
+    "##);
+}
+
+/// The second Mac tester's log (2026-10-30): Ableton Live's Save panel, a titled
+/// `AXWindow/AXDialog/save-panel` of Live's, was a plug-in window of daw-hosts' Live entry, and every
+/// embedded overlay walked it: 36 s in one turn of the event loop, and the guard stopped a module.
+/// Live's entry leaves the system's open and save panels out as Logic's does, by their identifier.
+/// Its other titled windows, the Set's among them, it still takes until a probe from a Live plug-in
+/// window says what tells them apart (TODO.md).
+#[test]
+fn lives_file_panels_are_not_plugin_windows() {
+    run_mac(r##"
+        local S = T.S
+        T.modules("modules/daw-hosts/")
+        local LIVE = { pid = 7000, exe = "Live", name = "Live", bundleId = "com.ableton.live" }
+        local SAVE = { id = 61, title = "Save", class = "AXWindow/AXDialog/save-panel", app = LIVE,
+          bounds = { x = 380, y = 200, w = 1156, h = 448 }, client = { x = 380, y = 232, w = 1156, h = 416 } }
+        local OPEN = { id = 62, title = "Open", class = "AXWindow/AXDialog/open-panel", app = LIVE,
+          bounds = { x = 380, y = 200, w = 1156, h = 448 }, client = { x = 380, y = 232, w = 1156, h = 416 } }
+        local SET = { id = 51, title = "Untitled", class = "AXWindow/AXStandardWindow/", app = LIVE,
+          bounds = { x = 0, y = 25, w = 1440, h = 875 }, client = { x = 0, y = 25, w = 1440, h = 875 } }
+        local live = T.daw.matcher(T.daw.ableton[4])
+        S.listed = { SET, SAVE, OPEN }
+        T.at(SAVE)
+        local asked = 0
+        local o = T.bind({ hosts = T.daw.all, control = { windows = "x" },
+          identify = function() asked += 1; return true end }, "Mine")
+        assert(not o.active and asked == 0, "nothing asked in Live's save panel: " .. T.dump())
+        assert(not T.host.window.test(live, SAVE), "the save panel is not matched")
+        assert(not T.host.window.test(live, OPEN), "nor the open panel")
+        T.show(OPEN)
+        assert(not o.active and asked == 0, "nothing asked in Live's open panel: " .. T.dump())
+        assert(T.count("panel of 'Save'") == 0 and T.count("panel of 'Open'") == 0, T.dump())
+        -- The Set's window is still taken, as before.
+        assert(T.host.window.test(live, SET), "the Set's window still is")
+        T.show(SET)
+        assert(o.active and asked == 1, T.dump())
     "##);
 }
 

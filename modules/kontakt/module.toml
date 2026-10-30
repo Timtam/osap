@@ -3,8 +3,10 @@ name = "Kontakt"
 # 0.1.5 asks whether a window is a Komplete Kontrol, and which Kontakt it is, with a callback, off
 # the event loop, and keeps the answers per window (src/detect.luau, "What a control is"). 0.1.6
 # searches for the What's New close glyph and the resize grip with host.screen.imageSearch and a
-# callback, where host.screen.imageSearchAsync is gone.
-version = "0.1.6"
+# callback, where host.screen.imageSearchAsync is gone. 0.1.7 says "Menu not opened: another
+# program came to the front" when its file menu is given up for that, or "Menu item not chosen: …"
+# when that happened while the menu was read, where it used to say nothing.
+version = "0.1.7"
 engine_api = ">=0.1, <0.2"
 entry = "src/main.luau"
 license = "MIT"

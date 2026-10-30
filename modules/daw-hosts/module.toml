@@ -4,7 +4,8 @@ name = "DAW host definitions"
 # 0.3.0 leaves Logic's file panels out of its plug-in windows (their identifier ends in -panel), and
 # its focus key's own click into a plug-in's panel begins a stay when Logic reports no focus after
 # it (host.window.recheck's `entered`, which the overlay runtime 0.13 reads).
-version = "0.3.0"
+# 0.3.1 leaves Ableton Live's file panels out of its plug-in windows on a Mac too, as Logic's.
+version = "0.3.1"
 license = "GPL-3.0-or-later"
 
 # A code module: its source is evaluated inside every VM that depends on it, so the matchers

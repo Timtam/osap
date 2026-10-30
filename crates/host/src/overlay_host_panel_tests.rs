@@ -1070,6 +1070,59 @@ fn sforzando_binds_in_a_logic_window_titled_inst_1_and_in_a_reaper_floating_wind
     "##);
 }
 
+/// sforzando asks no accessibility tree on the DAW's plug-in panel (the second Mac tester's log,
+/// 2026-10-30): the runtime hands a binding the panel only where its own control was not found, so
+/// the `PlogueXMLGUI` find, which walked the whole plug-in window there (980 ms in one of Ableton
+/// Live's), is not asked; the wordmark's read is, off the event loop. On its own control on Windows
+/// the find is still asked first.
+#[test]
+fn sforzando_asks_no_tree_on_the_daws_panel() {
+    let count_finds = r##"
+        local finds = 0
+        local find = T.host.element.find
+        rawset(T.host.element, "find", function(id, name, ...)
+          if name == "PlogueXMLGUI" then finds += 1 end
+          return find(id, name, ...)
+        end)
+        function T.finds() return finds end
+    "##;
+    run_mac(&format!(r##"
+        local S = T.S
+        local made = T.collect()
+        T.modules("modules/sforzando/")
+        {count_finds}
+        S.listed = T.LISTED_MAC
+        T.at(T.FLOAT)
+        T.source("modules/sforzando/src/main.luau")(T.host)
+        local ov = made[1]
+        T.runDue()
+        assert(#S.reads == 1 and T.finds() == 0, "the wordmark read, and no tree asked: " .. T.dump())
+        S.reads[1].cb({{ status = "text", text = "sforzando", words = {{}} }})
+        T.runDue()
+        assert(ov.active and ov:origin().class == "host-panel" and T.finds() == 0, T.dump())
+        -- Another stay, in Logic's window: still no tree.
+        S.controls = {{}}
+        T.show(T.LOGIC)
+        T.event()
+        assert(#S.reads == 2 and T.finds() == 0, T.dump())
+    "##));
+    run(&format!(r##"
+        local S = T.S
+        local made = T.collect()
+        T.modules("modules/sforzando/")
+        {count_finds}
+        local plugin = {{ id = 70, class = "Plugin00A1B2C3", bounds = {{ x = 240, y = 90, w = 760, h = 560 }},
+          client = {{ x = 240, y = 90, w = 760, h = 560 }} }}
+        S.front, S.controls, S.chain = T.FX, {{ T.LIST, plugin }}, {{ plugin, T.FX }}
+        S.ocr = function(r) return "sforzando" end
+        T.turn()
+        T.source("modules/sforzando/src/main.luau")(T.host)
+        local ov = made[1]
+        T.runDue()
+        assert(ov.active and ov:origin().id == 70 and T.finds() >= 1, "the tree asked first on its own control: " .. T.dump())
+    "##));
+}
+
 /// sforzando on Windows is found by its own control, as it always was — evaluated on the tick
 /// after it is bound — and its wordmark read relative to that control, on the event loop, once per
 /// control.
@@ -1783,6 +1836,11 @@ fn an_embedded_binding_joining_a_bound_overlay_is_evaluated_on_the_next_tick() {
 /// Kontakt's module: so the program in front when the menu was opened must still be in front before
 /// the read and after it, or nothing is clicked; and the Escape that closes a menu without the entry
 /// goes only to the window that was in front before the read. Without a change, the row is clicked.
+/// Given up because another program came to the front, or nothing named is in front (a Mac
+/// application that names no window, as in the second Mac tester's log of 2026-10-30), it says so,
+/// interrupting — the menu not opened, or, when that came while the menu was read, no item chosen —
+/// and sends nothing; the pass-through flag of the by-name opening is left to the overlay's
+/// leaving, which clears it.
 #[test]
 fn kontakt_clicks_its_menu_row_only_while_its_program_stays_in_front() {
     run(r##"
@@ -1824,21 +1882,51 @@ fn kontakt_clicks_its_menu_row_only_while_its_program_stays_in_front() {
         assert(#S.clicks == n + 1 and lastClick() == "50,75", "the row: " .. lastClick())
         assert(lang == "en", tostring(lang))
 
-        -- Another program in front before the menu is read: nothing read, nothing clicked.
+        -- Another program in front before the menu is read: nothing read, nothing clicked, and said.
+        local GAVE_UP = "Menu not opened: another program came to the front"
+        local NOT_CHOSEN = "Menu item not chosen: another program came to the front"
+        local function saidGaveUp(from, text)
+          local s = S.speech[from + 1]
+          return #S.speech == from + 1 and s.text == (text or GAVE_UP) and s.interrupt == true
+        end
         T.at(T.FX)
         n = press("Load...")
+        local spoken = #S.speech
         otherProgram()
         T.run(300)
         assert(#S.clicks == n, "a click in the other program: " .. lastClick())
         assert(T.count("Kontakt: another application came to the front during the menu read — nothing clicked") == 1, T.dump())
+        assert(saidGaveUp(spoken) and #S.sent == 0, tostring((S.speech[spoken + 1] or {}).text))
 
-        -- Another program in front while the menu is read: nothing clicked.
+        -- Another program in front while the menu is read: nothing clicked, and said: the menu was
+        -- opened, and no item is chosen.
         T.at(T.FX)
         menu(LOAD, otherProgram)
         n = press("Load...")
+        spoken = #S.speech
         T.run(300)
         assert(#S.clicks == n, "a click in the other program: " .. lastClick())
         assert(T.count("Kontakt: another application came to the front during the menu read — nothing clicked") == 2, T.dump())
+        assert(saidGaveUp(spoken, NOT_CHOSEN) and #S.sent == 0, tostring((S.speech[spoken + 1] or {}).text))
+
+        -- Nothing named in front after the by-name opening: said, nothing sent, and the flag the
+        -- opening set is not touched here.
+        T.at(T.FX)
+        local locate = T.host.element.pluginLocate
+        rawset(T.host.element, "pluginLocate", function(_, _, name)
+          if name == "Kontakt File Menu" then return { x = 300, y = 80 } end
+          return nil
+        end)
+        n = press("Load...")
+        assert(lastClick() == "300,80" and S.menuOpen[#S.menuOpen] == true, "opened by name: " .. lastClick())
+        local flags = #S.menuOpen
+        spoken = #S.speech
+        T.at(nil)
+        T.run(300)
+        rawset(T.host.element, "pluginLocate", locate)
+        assert(#S.clicks == n and #S.menuOpen == flags, "a click or a flag: " .. T.dump())
+        assert(T.count("Kontakt: another application came to the front during the menu read — nothing clicked") == 3, T.dump())
+        assert(saidGaveUp(spoken) and #S.sent == 0, tostring((S.speech[spoken + 1] or {}).text))
 
         -- No such row, another window of the same program in front by then: no Escape into it.
         T.at(T.FX)
