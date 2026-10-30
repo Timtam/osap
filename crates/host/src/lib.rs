@@ -666,11 +666,12 @@ struct Observations {
     /// input, window activate), so pairing it with `epoch` makes a stale click impossible
     /// while leaving the read-only questions as cheap as before.
     input_epoch: u64,
-    /// `host.element.find`, `findAny` and `pluginLocate`, by question: what the tree answered —
-    /// a "not known" too, kept as not known for the rest of the epoch, never as a no
-    /// (element_lua.rs, `kept`). `pluginLocate` is the expensive one — it walks the RAW tree, the
-    /// only view that reaches into a DAW-embedded plugin's hosted fragment — and one of them sits
-    /// in Kontakt 7's `isRackView`, which its cells consult on every recheck.
+    /// `host.element.find`, `findAny`, `pluginLocate`, `locate` and `locateVia`, by question: what
+    /// the tree answered — a "not known" too, kept as not known for the rest of the epoch, never as
+    /// a no (element_lua.rs, `kept`); a poll's `locate` is asked again and replaces what is here
+    /// (`served`). `pluginLocate` is the expensive one — it walks the RAW tree, the only view that
+    /// reaches into a DAW-embedded plugin's hosted fragment — and one of them sits in Kontakt 7's
+    /// `isRackView`, which its cells consult on every recheck.
     elements: HashMap<backend::ElementAsk, backend::ElementOutcome>,
     /// hwnd → its child controls. Rc so handing it out does not copy the vector.
     controls: HashMap<isize, Rc<Vec<backend::ControlInfo>>>,
@@ -1953,10 +1954,11 @@ impl Shared {
     /// The outcomes of what modules asked other programs for, for the callbacks that wait for them —
     /// a click made, or refused (acting.rs), and an accessibility tree's answer, an element pressed
     /// among them (element.rs) — each to its module's mailbox, in the lane it was asked from. Both
-    /// ticks drive it. An answer of the program's to `find`, `findAny` or `pluginLocate` that comes
-    /// while the epoch and the input epoch it was asked in still stand is kept for the epoch, as one
-    /// the event loop waited for is (element_lua.rs); what the host told without asking the program
-    /// never is (element.rs, `Due::program`).
+    /// ticks drive it. An answer of the program's to a question of a kind kept for the epoch — `find`,
+    /// `findAny`, `pluginLocate`, `locate`, `locateVia` — that comes while the epoch and the input
+    /// epoch it was asked in still stand is kept for the epoch, as one the event loop waited for is
+    /// (element_lua.rs); what the host told without asking the program never is (element.rs,
+    /// `Due::program`).
     fn fire_acted(&self) {
         self.fire_focus_puts();
         for due in self.acting.take_due() {
@@ -8940,10 +8942,12 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
                 // the call returns — its waits there, where no turn of the event loop stretches
                 // them. The outcome decides what the module holds once it is known, as a
                 // no-activate click's does (`fire_acted`).
-                let ready = c
-                    .window
-                    .map_or(Ok(()), |w| sh.backend.click_check(w, x, y))
-                    .and_then(|()| sh.backend.mouse_double_click(x, y, button, sh.backend.double_click_time()));
+                let ready = c.window.map_or(Ok(()), |w| sh.backend.click_check(w, x, y)).and_then(|()| {
+                    // What the platform writes of the click before it goes (a Mac: the window at the
+                    // point), once the window's check let it.
+                    sh.backend.note_click(x, y, c.window);
+                    sh.backend.mouse_double_click(x, y, button, sh.backend.double_click_time())
+                });
                 match ready {
                     Ok(job) => {
                         // At once: a picture of this module's still out may show it (said once in
@@ -9002,6 +9006,9 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
                         // the log).
                         sh.note_acting(lua, "host.input.click");
                         sh.bump_input_epoch();
+                        // What the platform writes of the click before it goes (a Mac: the window at
+                        // the point and whether it is the one the click is for).
+                        sh.backend.note_click(x, y, c.window);
                         let made = sh.backend.mouse_click(x, y, button);
                         // Its own release lets go of a button held down before it; one not made
                         // leaves it as it was, and a press left down is held (`after_release`).
@@ -11656,7 +11663,7 @@ mod focus_step_binding_tests {
     fn the_binding_builds_its_answer_with_focus_step_table() {
         const ELEMENT_LUA: &str = include_str!("element_lua.rs");
         let (_, text) = bindings(ELEMENT_LUA, "uia").into_iter().find(|b| b.0 == "focusStep").expect("host.element.focusStep");
-        assert!(text.contains("put(&sh, lua, idx, ElementAsk::FocusStep { hwnd, direction }, tail)"), "{text}");
+        assert!(text.contains("put(&*sh, lua, idx, ElementAsk::FocusStep { hwnd, direction }, tail)"), "{text}");
         let values = body(ELEMENT_LUA, "pub(crate) fn values(");
         assert!(values.contains("Some(step) => Value::Table(focus_step_table(lua, step.clone())?)"), "{values}");
         assert_eq!(values.matches("ElementAnswer::Step").count(), 1, "one way to build it");
@@ -11755,7 +11762,7 @@ mod ocr_wiring_tests {
         let press = bindings(ELEMENT_LUA, "uia").into_iter().find(|b| b.0 == "press").expect("host.element.press").1;
         let noted = press.find("sh.note_acting(lua, \"host.element.press\");").expect("host.element.press does not note acting");
         let bumped = press.find("sh.bump_input_epoch();").expect("host.element.press does not turn the input epoch over");
-        let asked = press.find("put(&sh, lua, idx, ElementAsk::Press { hwnd, name, ctype }, tail)").expect("host.element.press is not asked");
+        let asked = press.find("put(&*sh, lua, idx, ElementAsk::Press { hwnd, name, ctype }, tail)").expect("host.element.press is not asked");
         assert!(noted < asked && bumped < asked, "acting is noted before the press is asked");
         assert!(body(LIB, "fn install_host_api(").contains("element_lua::install(lua, &host, shared, idx)?;"));
         let new = body(LIB, "pub fn new() -> Result<Self>");
@@ -11918,9 +11925,9 @@ mod ocr_wiring_tests {
         assert!(open.contains("self.elements.settle(out);"));
         assert!(body(LIB, "fn discard(&self, _idx: usize, ev: Event, why: mailbox::Why)").contains("Event::Element { out, .. } => self.elements.settle(out),"));
         const ELEMENT_LUA: &str = include_str!("element_lua.rs");
-        assert!(body(ELEMENT_LUA, "fn ask_here(").contains("if waited.program && kept(ask) {"));
-        let put = body(ELEMENT_LUA, "fn put(");
-        let replaced = put.find("sh.elements.replace(owner, key);").expect("a key replaces nothing");
+        assert!(body(ELEMENT_LUA, "fn ask_here<").contains("if waited.program && kept(ask) {"));
+        let put = body(ELEMENT_LUA, "fn put<");
+        let replaced = put.find("sh.elements().replace(owner, key);").expect("a key replaces nothing");
         assert!(replaced < put.find("match tail.cb {").expect("the forms"), "before every form, the cached and the waited ones too");
     }
 
@@ -12992,6 +12999,13 @@ mod ocr_wiring_tests {
         assert!(of("drag").contains("sh.after_release(idx, button, &dragged, None);"));
         assert!(of("click").contains("let made = sh.backend.mouse_click(x, y, button);"));
         assert!(of("click").contains("sh.after_release(idx, button, &made, None);"));
+        // F7: the platform writes what the click lands in before it goes, once and twice, after the
+        // window's check and only through the input.
+        let click = of("click");
+        let noted = |at: &str| click[..click.find(at).unwrap()].rfind("sh.backend.note_click(x, y, c.window);");
+        assert!(noted("let made = sh.backend.mouse_click(x, y, button);").is_some_and(|n| n > click.find("Ok(None) => match").unwrap()));
+        assert!(noted("sh.backend.mouse_double_click(").is_some_and(|n| n > click.find("sh.backend.click_check(w, x, y)").unwrap()));
+        assert_eq!(click.matches("sh.backend.note_click(").count(), 2, "a posted or no-activate click is no click through the input");
         // A no-activate click lets go of nothing at the call: its outcome decides, on a later tick,
         // with the module's presses at the hand-over.
         let click = of("click");

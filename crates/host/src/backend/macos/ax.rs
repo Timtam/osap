@@ -59,14 +59,15 @@ use objc2_core_foundation::{
     CGSize, Type,
 };
 use objc2_core_graphics::{
-    kCGWindowAlpha, kCGWindowBounds, kCGWindowLayer, kCGWindowNumber, kCGWindowOwnerPID,
-    CGRectMakeWithDictionaryRepresentation, CGWindowListCopyWindowInfo, CGWindowListOption,
+    kCGWindowAlpha, kCGWindowBounds, kCGWindowLayer, kCGWindowName, kCGWindowNumber,
+    kCGWindowOwnerPID, CGRectMakeWithDictionaryRepresentation, CGWindowListCopyWindowInfo,
+    CGWindowListOption,
 };
 use objc2_foundation::NSString;
 
 use crate::errors::{element, HostError};
 
-use super::budget::{Budget, SlowThisTurn, Walk};
+use super::budget::{may_read, Budget, SlowThisTurn, Walk};
 use super::question::not_known;
 use super::front_memory::{Memory, Recall};
 use super::handles;
@@ -129,7 +130,9 @@ const CHILDREN_MAX: usize = 256;
 /// holds the keyboard at all (`tap.rs`). What it still holds is the overlay: every captured key,
 /// every hotkey and every spoken line waits on the main thread while it runs, so a walk that has
 /// not found its answer in 300 ms is stopped rather than let finish. Twenty times the pump's 15 ms
-/// budget, so it cannot fire on a healthy tree.
+/// budget, so it cannot fire on a healthy tree. It is asked before every read of the walk, not only
+/// as it enters a node (`budget.rs`, `may_read`), so a walk ends at most one read — a
+/// [`MESSAGING_TIMEOUT`] — past it.
 const HOT_DEADLINE: Duration = Duration::from_millis(300);
 
 /// And how long the DIAGNOSTIC dump may take, which is a different trade.
@@ -579,7 +582,14 @@ pub(super) fn app_element(pid: i32) -> CFRetained<AXUIElement> {
 /// `Ok(None)` from the API (the call succeeded, the value was NULL) and an outright failure
 /// both come back as `None` — no caller in this backend distinguishes them, and the failure
 /// has already been classified into the log by then.
+///
+/// Inside a walk, a read past the walk's deadline is not begun, and is `None` too: the walk ends at
+/// it as at a node past its time (`budget.rs`, `may_read`). Nothing is noted against the
+/// application for it.
 pub(super) fn attribute(el: &AXUIElement, name: &CFString) -> Option<CFRetained<CFType>> {
+    if !may_read() {
+        return None;
+    }
     let mut raw: *const CFType = core::ptr::null();
     let err = unsafe { el.copy_attribute_value(name, NonNull::from(&mut raw)) };
     if err != AXError::Success {
@@ -654,7 +664,8 @@ fn attribute_bool(el: &AXUIElement, name: &CFString) -> Option<bool> {
     v.downcast_ref::<CFNumber>().and_then(|n| n.as_i64()).map(|n| n != 0)
 }
 
-/// The children of an element, capped.
+/// The children of an element, capped. One read through [`attribute`], so a walk past its deadline
+/// does not begin it.
 pub(super) fn children(el: &AXUIElement) -> Vec<CFRetained<AXUIElement>> {
     let Some(v) = attribute(el, a_children()) else {
         return Vec::new();
@@ -780,7 +791,12 @@ pub(super) fn snapshot(el: &AXUIElement) -> Snap {
     snapshot_individually(el)
 }
 
+/// Not begun past the deadline of the walk it is made in (`budget.rs`, `may_read`); the single reads
+/// it falls back to are not either, so a node a walk reaches after its time is not read at all.
 fn snapshot_batched(el: &AXUIElement) -> Option<Snap> {
+    if !may_read() {
+        return None;
+    }
     let keys = snap_keys();
     let mut raw: *const CFArray = core::ptr::null();
     // Options 0 (not StopOnError): an element that lacks one attribute still answers for
@@ -961,6 +977,10 @@ pub(super) fn join_class(s: &Snap) -> String {
 /// and a walk that met one writes a line of its own (`unanswered.rs`), once in five seconds at most
 /// for its kind in its application — for the Mac session that is to say whether a plug-in that
 /// works ever answers so. The walk goes on past them as before.
+///
+/// Every read on this thread while it runs — its own, and those its `visit` makes — is bounded by
+/// its deadline (`budget.rs`, `may_read`): one not begun ends the walk as at a node past its time,
+/// the last read of a walk included, after which no node would have asked.
 fn walk(
     el: &AXUIElement,
     depth: i32,
@@ -970,7 +990,11 @@ fn walk(
 ) -> bool {
     // Ended below; dropped by a panic in the walk, it stops the count all the same.
     let counting = unanswered::begin(budget.kind().words());
+    let _reads = budget.bound_reads();
     let on = walk_from(el, depth, max_depth, budget, visit);
+    if budget.out_of_time() {
+        stopped(budget);
+    }
     if let Some(counting) = counting {
         // The application is asked for after the walk, and named only for a line to write.
         if let Some(line) = counting.end(Instant::now(), || element_pid(el), exe_for_pid) {
@@ -989,41 +1013,19 @@ fn walk_from(
     visit: &mut impl FnMut(&AXUIElement, &Snap, i32) -> WalkStep,
 ) -> bool {
     if !budget.spend() {
-        // A module's question is told which bound: nothing it found is "not known" then, and a
-        // dump is not all of the tree (`Budget::cut`).
-        if let Some(why) = budget.cut() {
-            not_known(why);
-        }
-        // Said out loud, once, and not at trace level. A walk that ran out returns exactly
-        // what a walk that finished and found nothing returns, so without this line a plugin
-        // whose tree is larger than the bound answers "that element is not here" to every
-        // question, for ever, and the overlay simply never activates — with nothing anywhere
-        // to distinguish it from a plugin we do not support.
-        //
-        // Which bound ran out is named, because the two want opposite responses: a node
-        // budget reached means raise the count for that walk, a deadline reached means the
-        // application is answering too slowly to walk at all and no count will help.
-        if !BUDGET_REPORTED.with(Cell::get) {
-            BUDGET_REPORTED.with(|c| c.set(true));
-            crate::logging::line(
-                "macos",
-                if budget.ran_out_of_time() {
-                    "an accessibility walk ran out of TIME and stopped early — the application \
-                     is answering too slowly to walk, so any answer from it is 'not found so \
-                     far', not 'not there'. A larger node budget would not help this one."
-                } else {
-                    "an accessibility walk hit its NODE budget and stopped early — any answer \
-                     from it is 'not found so far', not 'not there'. If detection is failing \
-                     on a large plugin, this is the first thing to look at."
-                },
-            );
-        }
+        stopped(budget);
         return true;
     }
     if depth > max_depth {
         return true;
     }
     let snap = snapshot(el);
+    // Its snapshot, or part of it, not read for the walk's deadline: an element not read is not
+    // visited — a visit would take its empty role and name for an answer — and the walk ends here.
+    if budget.out_of_time() {
+        stopped(budget);
+        return true;
+    }
     unanswered::read(&snap.role, &snap.title);
     match visit(el, &snap, depth) {
         WalkStep::Stop => return false,
@@ -1039,6 +1041,39 @@ fn walk_from(
         }
     }
     true
+}
+
+/// A walk stopped at one of its bounds: a module's question is told which, and the log once.
+fn stopped(budget: &Budget) {
+    // A module's question is told which bound: nothing it found is "not known" then, and a dump
+    // is not all of the tree (`Budget::cut`).
+    if let Some(why) = budget.cut() {
+        not_known(why);
+    }
+    // Said out loud, once, and not at trace level. A walk that ran out returns exactly what a
+    // walk that finished and found nothing returns, so without this line a plugin whose tree is
+    // larger than the bound answers "that element is not here" to every question, for ever, and
+    // the overlay simply never activates — with nothing anywhere to distinguish it from a plugin
+    // we do not support.
+    //
+    // Which bound ran out is named, because the two want opposite responses: a node budget
+    // reached means raise the count for that walk, a deadline reached means the application is
+    // answering too slowly to walk at all and no count will help.
+    if !BUDGET_REPORTED.with(Cell::get) {
+        BUDGET_REPORTED.with(|c| c.set(true));
+        crate::logging::line(
+            "macos",
+            if budget.ran_out_of_time() {
+                "an accessibility walk ran out of TIME and stopped early — the application \
+                 is answering too slowly to walk, so any answer from it is 'not found so \
+                 far', not 'not there'. A larger node budget would not help this one."
+            } else {
+                "an accessibility walk hit its NODE budget and stopped early — any answer \
+                 from it is 'not found so far', not 'not there'. If detection is failing \
+                 on a large plugin, this is the first thing to look at."
+            },
+        );
+    }
 }
 
 enum WalkStep {
@@ -1616,6 +1651,65 @@ pub(super) fn window_owner(number: u32) -> Option<(i32, i32)> {
         return Some((pid, layer));
     }
     None
+}
+
+/// What a click through the input at (x, y) lands in, for its line (`click_notes::click_line`): the
+/// window the system's hit test names there — the test a click's `window` is checked by, which skips
+/// windows that let clicks through — and its application and layer from the window server's list,
+/// whoever's it is. Main thread only, as the hit test is: `None` off it, and where it names no
+/// window. One copy of the list.
+pub(super) fn click_hit(x: i32, y: i32) -> Option<super::click_notes::Hit> {
+    let number = hit_window_at(x, y)?;
+    let owner = window_owner(number).map(|(pid, layer)| (pid, exe_for_pid(pid), layer));
+    Some(super::click_notes::Hit { number, owner })
+}
+
+/// The window server's number of the window `handle` is, or lies in for a control; 0 when it cannot
+/// be paired with one (`window_id`).
+pub(super) fn window_number_of(handle: isize) -> u32 {
+    if crate::backend::own_number(handle).is_some() {
+        return window_id(handle);
+    }
+    match handles::get(handle) {
+        Some(e) if e.owner != 0 && e.owner != handle => window_id(e.owner),
+        Some(_) => window_id(handle),
+        None => 0,
+    }
+}
+
+/// Every window of `pid` on screen, front-most first: number, layer, place, alpha and name — for
+/// the line of an application that came to the front naming no window
+/// (`click_notes::windowless_line`). One copy of the window server's list, read by any thread; a
+/// name is there only with Screen Recording, and is whatever the application calls the window.
+pub(super) fn listed_windows_of(pid: i32) -> Vec<super::click_notes::Listed> {
+    let Some(list) = CGWindowListCopyWindowInfo(
+        CGWindowListOption::OptionOnScreenOnly | CGWindowListOption::ExcludeDesktopElements,
+        0,
+    ) else {
+        return Vec::new();
+    };
+    // SAFETY: CGWindowListCopyWindowInfo is documented to return an array of dictionaries.
+    let typed: &CFArray<CFDictionary> = unsafe { list.cast_unchecked::<CFDictionary>() };
+    (0..typed.len().min(512))
+        .filter_map(|i| {
+            let dict = typed.get(i)?;
+            if dict_i64(&dict, unsafe { kCGWindowOwnerPID }) != Some(i64::from(pid)) {
+                return None;
+            }
+            let r = dict_rect(&dict)?;
+            Some(super::click_notes::Listed {
+                number: dict_i64(&dict, unsafe { kCGWindowNumber }).unwrap_or(0) as u32,
+                layer: dict_i64(&dict, unsafe { kCGWindowLayer }).unwrap_or(0) as i32,
+                x: r.origin.x,
+                y: r.origin.y,
+                w: r.size.width,
+                h: r.size.height,
+                // A window that says nothing of its alpha is drawn.
+                alpha: dict_f64(&dict, unsafe { kCGWindowAlpha }).unwrap_or(1.0),
+                name: dict_string(&dict, unsafe { kCGWindowName }),
+            })
+        })
+        .collect()
 }
 
 /// Who owns a window number, and its rectangle. From the on-screen list, as [`window_owner`];
@@ -2662,6 +2756,19 @@ pub(super) fn dict_has_string(dict: &CFDictionary, key: &CFString) -> bool {
     // SAFETY: the value is borrowed from the dictionary, which outlives this call.
     let any: &CFType = unsafe { &*(v as *const CFType) };
     any.downcast_ref::<CFString>().is_some()
+}
+
+/// A string in a window-list entry: `kCGWindowName`, which the system gives only with Screen
+/// Recording. `None` where there is none.
+fn dict_string(dict: &CFDictionary, key: &CFString) -> Option<String> {
+    let ptr: *const c_void = (key as *const CFString).cast();
+    let v = unsafe { dict.value(ptr) };
+    if v.is_null() {
+        return None;
+    }
+    // SAFETY: the value is borrowed from the dictionary, which outlives this call.
+    let any: &CFType = unsafe { &*(v as *const CFType) };
+    any.downcast_ref::<CFString>().map(|s| s.to_string())
 }
 
 #[allow(dead_code)]

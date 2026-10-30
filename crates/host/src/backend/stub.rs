@@ -43,6 +43,8 @@ pub struct StubBackend {
     double_click: Cell<Option<std::time::Duration>>,
     /// When a test says the pump took the queued presses, for `input_taken_at`: never, until then.
     input_taken: Cell<Option<std::time::Instant>>,
+    /// How many `host.element` questions reached this backend (`element_ask`).
+    element_asks: Cell<u32>,
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -122,6 +124,12 @@ impl StubBackend {
     /// The pump took the presses queued until `at`, as a backend's pump notes it.
     pub(crate) fn set_input_taken(&self, at: std::time::Instant) {
         self.input_taken.set(Some(at));
+    }
+
+    /// How many `host.element` questions have reached this backend: what the epoch's store did not
+    /// answer.
+    pub(crate) fn element_asks(&self) -> u32 {
+        self.element_asks.get()
     }
 }
 
@@ -232,8 +240,9 @@ impl Backend for StubBackend {
     fn window_focus_chain(&self) -> Vec<ControlInfo> {
         Vec::new()
     }
-    // No tree to ask: every question finds nothing, and a press is not supported.
+    // No tree to ask: every question finds nothing, and a press is not supported. Counted.
     fn element_ask(&self, ask: &ElementAsk) -> ElementOutcome {
+        self.element_asks.set(self.element_asks.get() + 1);
         ask.nothing()
     }
     fn set_captured_keys(&self, keys: &[Captured]) {

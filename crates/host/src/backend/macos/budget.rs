@@ -15,10 +15,71 @@
 //! **A walk stopped at a bound is not "not there".** What a module is told of a question whose
 //! walk stopped before the end of the tree is the bound, as an error value ([`Budget::cut`]), so
 //! that nothing found reads as "not known" and a dump says it is not all of the tree (`ax.rs`).
+//!
+//! **The deadline is asked before every read, not only at a node.** A node of a walk is several
+//! reads — its snapshot, which falls back to seven single reads when the batched one fails, its
+//! children, and what the walk's own visit asks of it — each bounded at the messaging timeout, a
+//! second. Checked only as the walk entered a node, a walk's 300 ms ran to three to five and a half
+//! seconds in Live's Save panel (the second Mac tester's log, 2026-10-30: five walks of one turn,
+//! 36 s, until the guard stopped a module). So the walk bounds the reads of its thread by its
+//! deadline while it runs ([`Budget::bound_reads`]); `ax.rs`'s funnel asks [`may_read`] before each
+//! call into the application, and a read past the deadline is not begun: the walk ends then as at
+//! a node past its time. A walk ends at most one read — a second — after its deadline.
 
+use std::cell::Cell;
 use std::time::{Duration, Instant};
 
 use crate::errors::{element, HostError};
+
+thread_local! {
+    /// The reads of the walk running on this thread: its deadline, and whether a read past it was
+    /// not begun ([`may_read`]). `None` outside a walk, where no read is bounded by this.
+    static READS: Cell<Option<Reads>> = const { Cell::new(None) };
+}
+
+#[derive(Clone, Copy)]
+struct Reads {
+    until: Instant,
+    refused: bool,
+}
+
+/// While it lives, the reads this thread makes are bounded by a walk's deadline
+/// ([`Budget::bound_reads`]); dropped, the bound of a walk around it, if any, is back.
+pub(crate) struct ReadBound {
+    outer: Option<Reads>,
+}
+
+impl Drop for ReadBound {
+    fn drop(&mut self) {
+        READS.with(|r| r.set(self.outer));
+    }
+}
+
+/// Whether a read of an application may be begun now: `false` past the deadline of the walk running
+/// on this thread — and from then on until that walk ends, which is then out of time
+/// ([`Budget::out_of_time`]); `true` outside a walk. One clock read per call into another process,
+/// which costs a thousand times more than it.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn may_read() -> bool {
+    may_read_at(Instant::now())
+}
+
+/// The same thing with the clock handed in.
+fn may_read_at(now: Instant) -> bool {
+    READS.with(|r| match r.get() {
+        None => true,
+        Some(reads) if !reads.refused && now < reads.until => true,
+        Some(reads) => {
+            r.set(Some(Reads { refused: true, ..reads }));
+            false
+        }
+    })
+}
+
+/// Whether a read of the walk running on this thread was not begun past its deadline.
+fn read_refused() -> bool {
+    READS.with(|r| r.get().is_some_and(|r| r.refused))
+}
 
 /// What a walk is for, which says what a module is told when it stops at one of its bounds
 /// ([`Budget::cut`]): each kind has its own bounds in `ax.rs`, and the messages name them.
@@ -86,14 +147,19 @@ impl Budget {
     /// the tester's machine has produced.
     ///
     /// A consequence worth knowing rather than discovering: a tree of fewer than 64 nodes
-    /// never consults the clock at all. That is the intended trade — such a walk cannot be
-    /// slow enough to matter — and sforzando's entire window came to sixteen.
+    /// never consults this clock at all. That was the intended trade — such a walk cannot be
+    /// slow enough to matter — and sforzando's entire window came to sixteen. It can be, when
+    /// each of its reads waits a second, and its reads ask the clock themselves now
+    /// ([`may_read`]).
     ///
     /// Out of time stays out of time. It once refused only the node at the clock check, so the
     /// walk went on with that node's next sibling and was refused again only 64 nodes later: the
     /// deadline dropped one node in 64, with its subtree, and the walk ran on to its count.
+    ///
+    /// The clock here is the node count's; the reads ask it themselves ([`may_read`]), and a read
+    /// they did not begin ends the walk at the next node as the clock would.
     fn spend_at(&mut self, now: Instant) -> bool {
-        if self.ran_out_of_time {
+        if self.out_of_time() {
             return false;
         }
         if self.nodes <= 0 {
@@ -125,6 +191,22 @@ impl Budget {
     }
 
     pub(crate) fn ran_out_of_time(&self) -> bool {
+        self.ran_out_of_time
+    }
+
+    /// Bounds every read this thread makes by this walk's deadline while the returned value lives
+    /// ([`may_read`]): `ax.rs`'s walk holds it for the length of the walk.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub(crate) fn bound_reads(&self) -> ReadBound {
+        ReadBound { outer: READS.with(|r| r.replace(Some(Reads { until: self.until, refused: false }))) }
+    }
+
+    /// Whether the walk is out of time: its clock ran out at a node, or one of its reads was not
+    /// begun past its deadline — which makes it out of time from then on, as at a node.
+    pub(crate) fn out_of_time(&mut self) -> bool {
+        if read_refused() {
+            self.ran_out_of_time = true;
+        }
         self.ran_out_of_time
     }
 
@@ -330,6 +412,102 @@ mod tests {
         }
         assert_eq!(b.nodes_left(), left, "and spends nothing");
         assert!(!b.ran_out_of_nodes());
+    }
+
+    /// F4 of the second Mac tester's log: a read of the walk running on this thread is not begun
+    /// past its deadline, and the walk ends then as at a node past its time — told as its time, not
+    /// its nodes. Before the deadline, and outside a walk, every read is begun.
+    #[test]
+    fn a_read_past_the_walks_deadline_is_not_begun_and_ends_the_walk() {
+        let t = Instant::now();
+        assert!(may_read_at(t + Duration::from_secs(600)), "outside a walk nothing bounds a read");
+        let mut b = Budget::starting_at(Walk::Search, 1500, Duration::from_millis(300), t);
+        {
+            let _reads = b.bound_reads();
+            assert!(b.spend_at(t));
+            assert!(may_read_at(t + Duration::from_millis(299)), "inside its time");
+            assert!(!b.out_of_time());
+            // The snapshot of a node the walk entered in time, begun after the time.
+            assert!(!may_read_at(t + Duration::from_millis(300)), "at its deadline the read is not begun");
+            assert!(!may_read_at(t + Duration::from_millis(1)), "nor any read of the walk after it");
+            assert!(b.out_of_time(), "the walk is out of time");
+            let left = b.nodes_left();
+            assert!(!b.spend_at(t), "and the next node is not walked");
+            assert_eq!(b.nodes_left(), left, "nor paid for");
+            assert_eq!(b.cut(), Some(HostError::of(&element::HOT_TOO_SLOW)), "told as its time");
+            assert!(!b.ran_out_of_nodes());
+        }
+        assert!(may_read_at(t + Duration::from_secs(600)), "the walk over, its bound goes with it");
+        // A dump keeps its own deadline.
+        let mut d = Budget::starting_at(Walk::Dump, 2000, Duration::from_secs(5), t);
+        let _reads = d.bound_reads();
+        assert!(may_read_at(t + Duration::from_millis(4999)));
+        assert!(!may_read_at(t + Duration::from_secs(5)));
+        assert!(d.out_of_time());
+        assert_eq!(d.cut(), Some(HostError::of(&element::TOO_SLOW)));
+    }
+
+    /// A read refused for its deadline stops even the first node after it, which a walk's own
+    /// clock — read every 64 nodes — would have walked: the deadline is no longer a node count
+    /// away.
+    #[test]
+    fn a_refused_read_stops_the_walk_before_its_clock_would() {
+        let t = Instant::now();
+        let mut b = Budget::starting_at(Walk::Focus, 800, Duration::from_millis(300), t);
+        let _reads = b.bound_reads();
+        let late = t + Duration::from_millis(301);
+        assert!(b.spend_at(late), "800 → 799: not a clock check, so the node alone would be walked");
+        assert!(!may_read_at(late), "but its read is not begun");
+        assert!(!b.spend_at(late), "and the next node is not walked");
+        assert!(b.ran_out_of_time());
+    }
+
+    /// `ax.rs`'s funnel asks the deadline before it calls into the application — a single read, the
+    /// batched snapshot, and the children, which are a single read — every walk bounds its reads
+    /// for as long as it runs, and a node whose snapshot was not read is not visited: the walk ends
+    /// there as at a node past its time, and says so as it does then.
+    #[test]
+    fn every_read_of_a_walk_asks_its_deadline_first() {
+        const AX: &str = include_str!("ax.rs");
+        let body = |sig: &str| {
+            let at = AX.find(sig).unwrap_or_else(|| panic!("ax.rs has no {sig}"));
+            let end = AX[at..].find("\n}\n").expect("the end of it") + at;
+            &AX[at..end]
+        };
+        let before = |text: &str, first: &str, then: &str| {
+            let a = text.find(first).unwrap_or_else(|| panic!("no {first} in:\n{text}"));
+            let b = text.find(then).unwrap_or_else(|| panic!("no {then} in:\n{text}"));
+            assert!(a < b, "{first} comes after {then}");
+        };
+        let attribute = body("pub(super) fn attribute(el: &AXUIElement, name: &CFString)");
+        before(attribute, "if !may_read() {\n        return None;\n    }", "copy_attribute_value");
+        let batched = body("fn snapshot_batched(el: &AXUIElement)");
+        before(batched, "if !may_read() {\n        return None;\n    }", "copy_multiple_attribute_values");
+        assert!(body("pub(super) fn children(el: &AXUIElement)").contains("attribute(el, a_children())"), "through the funnel");
+        let walk = body("fn walk(\n");
+        before(walk, "let _reads = budget.bound_reads();", "walk_from(el, depth, max_depth, budget, visit)");
+        before(walk, "walk_from(el, depth, max_depth, budget, visit)", "if budget.out_of_time() {\n        stopped(budget);");
+        let from = body("fn walk_from(\n");
+        before(from, "let snap = snapshot(el);", "if budget.out_of_time() {\n        stopped(budget);\n        return true;\n    }");
+        before(from, "if budget.out_of_time() {\n        stopped(budget);\n        return true;\n    }", "match visit(el, &snap, depth)");
+        assert_eq!(from.matches("stopped(budget);").count(), 2, "at a node refused, and at a node whose snapshot was not read");
+    }
+
+    /// A walk made while another runs on the same thread bounds the reads by its own deadline, and
+    /// puts the other's back as it ends: what it refused is not the other walk's refusal.
+    #[test]
+    fn a_walk_inside_another_puts_the_others_bound_back() {
+        let t = Instant::now();
+        let mut outer = Budget::starting_at(Walk::Search, 1500, Duration::from_millis(300), t);
+        let _outer = outer.bound_reads();
+        {
+            let mut inner = Budget::starting_at(Walk::Search, 1500, Duration::from_millis(10), t);
+            let _inner = inner.bound_reads();
+            assert!(!may_read_at(t + Duration::from_millis(20)));
+            assert!(inner.out_of_time());
+        }
+        assert!(may_read_at(t + Duration::from_millis(20)), "the outer walk's time stands");
+        assert!(!outer.out_of_time());
     }
 
     /// A walk carries what it is for, and says it in the words of the line a walk writes when an

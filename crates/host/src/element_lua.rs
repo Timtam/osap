@@ -18,26 +18,67 @@
 //! not been asked yet — whether it is answered from the epoch's store, waited for, or asked with a
 //! callback — and `host.element.pending(key)` says whether one asked with a callback is out.
 //!
-//! **The epoch's answers.** `find`, `findAny` and `pluginLocate` are asked once per epoch: a second
-//! identical call in the same epoch gets the first one's answer — a "not known" of the program's
-//! too, for the rest of that epoch — without the program being asked again. With a callback that
-//! answer comes on the next turn, as any other. A callback's answer is kept for the epoch only when
-//! it is the program's and comes while the epoch and the input epoch it was asked in still stand;
-//! what the host told without asking the program (element.rs, `Due::program`) never is. The other
-//! calls are asked every time.
+//! **The epoch's answers.** `find`, `findAny`, `pluginLocate`, `locate` and `locateVia` are asked
+//! once per epoch: a second identical call in the same epoch gets the first one's answer — a "not
+//! known" of the program's too, for the rest of that epoch — without the program being asked again.
+//! With a callback that answer comes on the next turn, as any other. A callback's answer is kept for
+//! the epoch only when it is the program's and comes while the epoch and the input epoch it was
+//! asked in still stand; what the host told without asking the program (element.rs, `Due::program`)
+//! never is. A `locate` or `locateVia` asked in the polls' lane is put to the program again
+//! ([`served`]). The other calls are asked every time.
 
+use std::cell::{Ref, RefMut};
+use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use mlua::{Function, Lua, MultiValue, Table, Value};
 
-use crate::backend::{ElementAnswer, ElementAsk, ElementOutcome};
-use crate::element::{Pending, SLOW};
+use crate::backend::{Backend, ElementAnswer, ElementAsk, ElementOutcome};
+use crate::element::{Elements, Pending, SLOW};
 use crate::logging;
 use crate::ocr::lua::owner_of;
-use crate::ocr::types::current_priority;
-use crate::vm_guard::host_call;
-use crate::{acting, describe_value, dump_node_to_table, errors_lua, focus_step_table, Shared};
+use crate::ocr::types::{current_priority, Priority};
+use crate::vm_guard::{host_call, Guard};
+use crate::{acting, describe_value, dump_node_to_table, errors_lua, focus_step_table, Observations, Shared};
+
+/// What a module's `host.element` question needs of the host: the epoch's store and the epochs it
+/// is kept for, the questions on their way, the backend that answers them, the guard whose wall
+/// clock stands while a wait is behind other questions, and each module's VM. The host is one
+/// ([`Shared`]); so is the tests' holder, whose backend counts what reaches it.
+pub(crate) trait ElementHost {
+    /// The epoch's store, emptied when the epoch has turned over (`Shared::observations`).
+    fn observations(&self) -> RefMut<'_, Observations>;
+    fn elements(&self) -> &Elements;
+    fn backend(&self) -> &dyn Backend;
+    fn guard(&self) -> &Arc<Guard>;
+    /// `host.epoch()` and `host.inputEpoch()` now.
+    fn epochs(&self) -> (u64, u64);
+    /// module_idx → the generation of the VM it runs now.
+    fn vm_gens(&self) -> Ref<'_, HashMap<usize, u64>>;
+}
+
+impl ElementHost for Shared {
+    fn observations(&self) -> RefMut<'_, Observations> {
+        Shared::observations(self)
+    }
+    fn elements(&self) -> &Elements {
+        &self.elements
+    }
+    fn backend(&self) -> &dyn Backend {
+        &*self.backend
+    }
+    fn guard(&self) -> &Arc<Guard> {
+        &self.guard
+    }
+    fn epochs(&self) -> (u64, u64) {
+        (self.epoch.get(), self.input_epoch.get())
+    }
+    fn vm_gens(&self) -> Ref<'_, HashMap<usize, u64>> {
+        self.vm_gens.borrow()
+    }
+}
 
 /// What follows a call's own arguments: the question's `opts.key`, and the callback.
 pub(crate) struct Tail {
@@ -114,9 +155,33 @@ pub(crate) fn tail(f: &str, rest: MultiValue) -> mlua::Result<Tail> {
 }
 
 /// Whether the answers to questions of `ask`'s kind are kept for the epoch: `find`, `findAny`,
-/// `pluginLocate` — the identity and location questions every evaluation of an overlay asks again.
+/// `pluginLocate`, `locate`, `locateVia` — the identity and location questions every evaluation of
+/// an overlay asks again, in every VM that carries the same code: Kontakt's `locate` of its File
+/// menu button was walked once per VM, five times in one dispatch, in a DAW whose every window it
+/// asked (the second Mac tester's log, 2026-10-30).
 pub(crate) fn kept(ask: &ElementAsk) -> bool {
-    matches!(ask, ElementAsk::Find { .. } | ElementAsk::FindAny { .. } | ElementAsk::PluginLocate { .. })
+    matches!(
+        ask,
+        ElementAsk::Find { .. }
+            | ElementAsk::FindAny { .. }
+            | ElementAsk::PluginLocate { .. }
+            | ElementAsk::Locate { .. }
+            | ElementAsk::LocateVia { .. }
+    )
+}
+
+/// Whether the epoch's store answers `ask` asked in `lane`: every kept kind asked from a key, a
+/// hotkey, a window or focus change — the dispatch in which every module's overlays evaluate in turn
+/// and the same question comes from each VM. From the polls' lane — a `host.timer.every` tick, a
+/// module loading, and what those asked for — a `locate` or `locateVia` is put to the program again,
+/// and its answer kept for what is asked after it: a recurring tick does not turn the epoch over, and
+/// a poll is there to see what no event announces. Where a thing is, and whether it is on screen at
+/// all, is what such a change moves: ARC ON:EAR's choosers are panels that open and close inside a
+/// window that stays, and their overlays let go of the keys only when a poll's `locate` finds the
+/// panel gone. `find`, `findAny` and `pluginLocate` are served in that lane as they always were.
+pub(crate) fn served(ask: &ElementAsk, lane: Priority) -> bool {
+    kept(ask)
+        && !(lane == Priority::Background && matches!(ask, ElementAsk::Locate { .. } | ElementAsk::LocateVia { .. }))
 }
 
 /// The name a callback's errors are reported under: `"element.find"`.
@@ -224,9 +289,9 @@ pub(crate) fn blocked_line(ask: &ElementAsk, took: Duration, behind: Duration) -
 /// Asks `ask` now and waits for the answer — on the accessibility thread where the platform has
 /// one, else on the event loop — and keeps the program's answer for the epoch where its kind is
 /// kept there. A wait of [`SLOW`] or more is named in the log ([`blocked_line`]).
-fn ask_here(sh: &Shared, ask: &ElementAsk, input_epoch: u64) -> ElementOutcome {
+fn ask_here<H: ElementHost>(sh: &H, ask: &ElementAsk, input_epoch: u64) -> ElementOutcome {
     let t = Instant::now();
-    let waited = sh.elements.ask(&*sh.backend, ask.clone(), input_epoch, Some(&sh.guard));
+    let waited = sh.elements().ask(sh.backend(), ask.clone(), input_epoch, Some(sh.guard()));
     if let Some(line) = blocked_line(ask, t.elapsed(), waited.behind) {
         logging::line("observe", &line);
     }
@@ -236,10 +301,13 @@ fn ask_here(sh: &Shared, ask: &ElementAsk, input_epoch: u64) -> ElementOutcome {
     waited.outcome
 }
 
-/// One question of module `idx`: answered from the epoch's store where its kind is kept there and
-/// it was asked this epoch; asked otherwise — waited for, or handed on with the callback.
-fn put(sh: &Rc<Shared>, lua: &Lua, idx: usize, ask: ElementAsk, tail: Tail) -> mlua::Result<MultiValue> {
-    let cached = if kept(&ask) {
+/// One question of module `idx`: answered from the epoch's store where its kind is served from
+/// there in the lane it is asked in ([`served`]) and it was asked this epoch — counted, for the
+/// epoch's `[observe]` line, only then; asked otherwise — waited for, or handed on with the
+/// callback.
+fn put<H: ElementHost>(sh: &H, lua: &Lua, idx: usize, ask: ElementAsk, tail: Tail) -> mlua::Result<MultiValue> {
+    let prio = current_priority();
+    let cached = if served(&ask, prio) {
         let mut obs = sh.observations();
         obs.asked += 1;
         let hit = obs.elements.get(&ask).cloned();
@@ -252,28 +320,28 @@ fn put(sh: &Rc<Shared>, lua: &Lua, idx: usize, ask: ElementAsk, tail: Tail) -> m
     };
     // No borrow of the store is held past this point: the wait below answers what is sent to this
     // thread's windows (element.rs, `Signal`).
-    let input_epoch = sh.input_epoch.get();
-    let owner = owner_of(lua, &sh.vm_gens.borrow(), idx);
+    let (epoch, input_epoch) = sh.epochs();
+    let owner = owner_of(lua, &sh.vm_gens(), idx);
     if let Some(key) = &tail.key {
-        sh.elements.replace(owner, key);
+        sh.elements().replace(owner, key);
     }
     match tail.cb {
         Some(cb) => {
             let pending = Pending {
                 answer: acting::Answer { idx, lua: lua.clone(), cb, what: what_of(&ask) },
-                prio: current_priority(),
+                prio,
                 ask: ask.clone(),
-                asked_in: (sh.epoch.get(), input_epoch),
+                asked_in: (epoch, input_epoch),
                 owner,
                 key: tail.key,
             };
-            match (cached, sh.backend.element_runner()) {
-                (Some(outcome), _) => sh.elements.answer_now(pending, outcome),
-                (None, Some(runner)) => sh.elements.ask_for(runner, ask, input_epoch, pending),
+            match (cached, sh.backend().element_runner()) {
+                (Some(outcome), _) => sh.elements().answer_now(pending, outcome),
+                (None, Some(runner)) => sh.elements().ask_for(runner, ask, input_epoch, pending),
                 // No thread: asked here, now, and answered on the next turn all the same.
                 (None, None) => {
                     let outcome = ask_here(sh, &ask, input_epoch);
-                    sh.elements.answer_now(pending, outcome);
+                    sh.elements().answer_now(pending, outcome);
                 }
             }
             Ok(MultiValue::new())
@@ -299,7 +367,7 @@ pub(crate) fn install(lua: &Lua, host: &Table, shared: &Rc<Shared>, idx: usize) 
         lua.create_function(move |lua, (hwnd, name, ctype, rest): (isize, String, i32, MultiValue)| {
             host_call!("host.element.find");
             let tail = tail("host.element.find", rest)?;
-            put(&sh, lua, idx, ElementAsk::Find { hwnd, name, ctype }, tail)
+            put(&*sh, lua, idx, ElementAsk::Find { hwnd, name, ctype }, tail)
         })?,
     )?;
     // host.element.type — the UIA ControlType ids, by name. Modules were declaring these as
@@ -361,7 +429,7 @@ pub(crate) fn install(lua: &Lua, host: &Table, shared: &Rc<Shared>, idx: usize) 
         lua.create_function(move |lua, (hwnd, names, types, rest): (isize, Vec<String>, Vec<i32>, MultiValue)| {
             host_call!("host.element.findAny");
             let tail = tail("host.element.findAny", rest)?;
-            put(&sh, lua, idx, ElementAsk::FindAny { hwnd, names, types }, tail)
+            put(&*sh, lua, idx, ElementAsk::FindAny { hwnd, names, types }, tail)
         })?,
     )?;
     // host.element.locate(hwnd, name, controlType, opts?, cb?) -> { x, y } | nil | nil, err —
@@ -372,7 +440,7 @@ pub(crate) fn install(lua: &Lua, host: &Table, shared: &Rc<Shared>, idx: usize) 
         lua.create_function(move |lua, (hwnd, name, ctype, rest): (isize, String, i32, MultiValue)| {
             host_call!("host.element.locate");
             let tail = tail("host.element.locate", rest)?;
-            put(&sh, lua, idx, ElementAsk::Locate { hwnd, name, ctype }, tail)
+            put(&*sh, lua, idx, ElementAsk::Locate { hwnd, name, ctype }, tail)
         })?,
     )?;
     // host.element.locateVia(hwnd, viaName, viaType, name, controlType, opts?, cb?) -> { x, y } |
@@ -386,7 +454,7 @@ pub(crate) fn install(lua: &Lua, host: &Table, shared: &Rc<Shared>, idx: usize) 
             move |lua, (hwnd, via_name, via_type, name, ctype, rest): (isize, String, i32, String, i32, MultiValue)| {
                 host_call!("host.element.locateVia");
                 let tail = tail("host.element.locateVia", rest)?;
-                put(&sh, lua, idx, ElementAsk::LocateVia { hwnd, via_name, via_type, name, ctype }, tail)
+                put(&*sh, lua, idx, ElementAsk::LocateVia { hwnd, via_name, via_type, name, ctype }, tail)
             },
         )?,
     )?;
@@ -401,7 +469,7 @@ pub(crate) fn install(lua: &Lua, host: &Table, shared: &Rc<Shared>, idx: usize) 
             move |lua, (hwnd, container, name, ctype, rest): (isize, String, String, i32, MultiValue)| {
                 host_call!("host.element.pluginLocate");
                 let tail = tail("host.element.pluginLocate", rest)?;
-                put(&sh, lua, idx, ElementAsk::PluginLocate { hwnd, container, name, ctype }, tail)
+                put(&*sh, lua, idx, ElementAsk::PluginLocate { hwnd, container, name, ctype }, tail)
             },
         )?,
     )?;
@@ -414,7 +482,7 @@ pub(crate) fn install(lua: &Lua, host: &Table, shared: &Rc<Shared>, idx: usize) 
             move |lua, (hwnd, container, name, ctype, rest): (isize, String, String, i32, MultiValue)| {
                 host_call!("host.element.stateProbe");
                 let tail = tail("host.element.stateProbe", rest)?;
-                put(&sh, lua, idx, ElementAsk::StateProbe { hwnd, container, name, ctype }, tail)
+                put(&*sh, lua, idx, ElementAsk::StateProbe { hwnd, container, name, ctype }, tail)
             },
         )?,
     )?;
@@ -426,7 +494,7 @@ pub(crate) fn install(lua: &Lua, host: &Table, shared: &Rc<Shared>, idx: usize) 
         lua.create_function(move |lua, (hwnd, rest): (isize, MultiValue)| {
             host_call!("host.element.dump");
             let tail = tail("host.element.dump", rest)?;
-            put(&sh, lua, idx, ElementAsk::Dump { hwnd }, tail)
+            put(&*sh, lua, idx, ElementAsk::Dump { hwnd }, tail)
         })?,
     )?;
     // host.element.rawDump(hwnd, opts?, cb?) — like dump, but over the RAW TreeWalker, which
@@ -437,7 +505,7 @@ pub(crate) fn install(lua: &Lua, host: &Table, shared: &Rc<Shared>, idx: usize) 
         lua.create_function(move |lua, (hwnd, rest): (isize, MultiValue)| {
             host_call!("host.element.rawDump");
             let tail = tail("host.element.rawDump", rest)?;
-            put(&sh, lua, idx, ElementAsk::RawDump { hwnd }, tail)
+            put(&*sh, lua, idx, ElementAsk::RawDump { hwnd }, tail)
         })?,
     )?;
     // host.element.classNavPoint(hwnd, className, ctype, child, sibling, opts?, cb?) -> {x,y} |
@@ -451,7 +519,7 @@ pub(crate) fn install(lua: &Lua, host: &Table, shared: &Rc<Shared>, idx: usize) 
             move |lua, (hwnd, class, ctype, child, sibling, rest): (isize, String, i32, i32, i32, MultiValue)| {
                 host_call!("host.element.classNavPoint");
                 let tail = tail("host.element.classNavPoint", rest)?;
-                put(&sh, lua, idx, ElementAsk::ClassNavPoint { hwnd, class, ctype, child, sibling }, tail)
+                put(&*sh, lua, idx, ElementAsk::ClassNavPoint { hwnd, class, ctype, child, sibling }, tail)
             },
         )?,
     )?;
@@ -466,7 +534,7 @@ pub(crate) fn install(lua: &Lua, host: &Table, shared: &Rc<Shared>, idx: usize) 
         lua.create_function(move |lua, (hwnd, direction, rest): (isize, i32, MultiValue)| {
             host_call!("host.element.focusStep");
             let tail = tail("host.element.focusStep", rest)?;
-            put(&sh, lua, idx, ElementAsk::FocusStep { hwnd, direction }, tail)
+            put(&*sh, lua, idx, ElementAsk::FocusStep { hwnd, direction }, tail)
         })?,
     )?;
     // host.element.focusWithin(hwnd, { x, y, w, h }, opts?, cb?) -> { name, ctype } | nil | nil,
@@ -479,7 +547,7 @@ pub(crate) fn install(lua: &Lua, host: &Table, shared: &Rc<Shared>, idx: usize) 
             host_call!("host.element.focusWithin");
             let (x, y, w, h): (i32, i32, i32, i32) = (rect.get("x")?, rect.get("y")?, rect.get("w")?, rect.get("h")?);
             let tail = tail("host.element.focusWithin", rest)?;
-            put(&sh, lua, idx, ElementAsk::FocusWithin { hwnd, x, y, w, h }, tail)
+            put(&*sh, lua, idx, ElementAsk::FocusWithin { hwnd, x, y, w, h }, tail)
         })?,
     )?;
     // host.element.press(hwnd, name, controlType, opts?, cb?) -> true | false, err — or nothing
@@ -495,7 +563,7 @@ pub(crate) fn install(lua: &Lua, host: &Table, shared: &Rc<Shared>, idx: usize) 
             // At once: a picture of this module's still out may show it (said once in the log).
             sh.note_acting(lua, "host.element.press");
             sh.bump_input_epoch();
-            put(&sh, lua, idx, ElementAsk::Press { hwnd, name, ctype }, tail)
+            put(&*sh, lua, idx, ElementAsk::Press { hwnd, name, ctype }, tail)
         })?,
     )?;
     // host.element.pending(key) -> boolean — whether a question of this module asked with `key` and
@@ -655,16 +723,125 @@ mod tests {
         }
     }
 
-    /// Only the identity and location questions every evaluation asks again are kept for the epoch.
+    /// Only the identity and location questions every evaluation asks again are kept for the epoch;
+    /// a poll's `locate` and `locateVia` are put to the program again, and the rest served.
     #[test]
-    fn find_find_any_and_plugin_locate_are_kept_for_the_epoch() {
-        assert!(kept(&ElementAsk::Find { hwnd: 1, name: String::new(), ctype: 50009 }));
-        assert!(kept(&ElementAsk::FindAny { hwnd: 1, names: vec![], types: vec![] }));
-        assert!(kept(&ElementAsk::PluginLocate { hwnd: 1, container: "K".into(), name: "VIEW".into(), ctype: 50000 }));
-        assert!(!kept(&ElementAsk::Locate { hwnd: 1, name: "x".into(), ctype: 50000 }));
-        assert!(!kept(&ElementAsk::Press { hwnd: 1, name: "x".into(), ctype: 50000 }));
-        assert!(!kept(&ElementAsk::FocusStep { hwnd: 1, direction: 1 }));
-        assert!(!kept(&ElementAsk::RawDump { hwnd: 1 }));
+    fn the_identity_and_location_questions_are_kept_for_the_epoch() {
+        let locate = ElementAsk::Locate { hwnd: 1, name: "x".into(), ctype: 50000 };
+        let via = ElementAsk::LocateVia { hwnd: 1, via_name: "K".into(), via_type: 50033, name: "x".into(), ctype: 50000 };
+        let identity = [
+            ElementAsk::Find { hwnd: 1, name: String::new(), ctype: 50009 },
+            ElementAsk::FindAny { hwnd: 1, names: vec![], types: vec![] },
+            ElementAsk::PluginLocate { hwnd: 1, container: "K".into(), name: "VIEW".into(), ctype: 50000 },
+        ];
+        for ask in identity.iter().chain([&locate, &via]) {
+            assert!(kept(ask), "{ask:?}");
+            assert!(served(ask, Priority::Interactive), "{ask:?}");
+        }
+        for ask in &identity {
+            assert!(served(ask, Priority::Background), "{ask:?}: a poll is served as it always was");
+        }
+        assert!(!served(&locate, Priority::Background), "a poll's locate is asked again");
+        assert!(!served(&via, Priority::Background));
+        for ask in [
+            ElementAsk::Press { hwnd: 1, name: "x".into(), ctype: 50000 },
+            ElementAsk::FocusStep { hwnd: 1, direction: 1 },
+            ElementAsk::RawDump { hwnd: 1 },
+            ElementAsk::StateProbe { hwnd: 1, container: "K".into(), name: "x".into(), ctype: 50000 },
+        ] {
+            assert!(!kept(&ask) && !served(&ask, Priority::Interactive), "{ask:?}");
+        }
+    }
+
+    /// The tests' host for a module's questions: one epoch's store, and the stub backend, which
+    /// counts the questions that reach it.
+    struct Holder {
+        store: std::cell::RefCell<Observations>,
+        elements: Elements,
+        backend: crate::backend::stub::StubBackend,
+        guard: Arc<Guard>,
+        gens: std::cell::RefCell<HashMap<usize, u64>>,
+    }
+
+    impl ElementHost for Holder {
+        fn observations(&self) -> RefMut<'_, Observations> {
+            self.store.borrow_mut()
+        }
+        fn elements(&self) -> &Elements {
+            &self.elements
+        }
+        fn backend(&self) -> &dyn Backend {
+            &self.backend
+        }
+        fn guard(&self) -> &Arc<Guard> {
+            &self.guard
+        }
+        fn epochs(&self) -> (u64, u64) {
+            (0, 0)
+        }
+        fn vm_gens(&self) -> Ref<'_, HashMap<usize, u64>> {
+            self.gens.borrow()
+        }
+    }
+
+    /// F3 of the second Mac tester's log: the same `locate` — Kontakt's File menu, asked by every VM
+    /// that carries Kontakt's code — reaches the program once in an epoch, whichever VM asks first,
+    /// and so does `locateVia`; a poll's is put to the program again each time, and kept for what
+    /// comes after it. Two real VMs, each with its own `locate`, over the host's own `put`.
+    #[test]
+    fn two_vms_asking_the_same_locate_in_one_epoch_reach_the_program_once() {
+        let holder = Rc::new(Holder {
+            store: std::cell::RefCell::new(Observations::default()),
+            elements: Elements::new(),
+            backend: crate::backend::stub::StubBackend::default(),
+            guard: Guard::new(),
+            gens: std::cell::RefCell::new(HashMap::new()),
+        });
+        let vm = |idx: usize| {
+            let lua = Lua::new();
+            let h = holder.clone();
+            let locate = lua
+                .create_function(move |lua, name: String| {
+                    let ask = ElementAsk::Locate { hwnd: 7, name, ctype: 50000 };
+                    put(&*h, lua, idx, ask, Tail { key: None, cb: None })
+                })
+                .unwrap();
+            lua.globals().set("locate", locate).unwrap();
+            let h = holder.clone();
+            let via = lua
+                .create_function(move |lua, name: String| {
+                    let ask = ElementAsk::LocateVia { hwnd: 7, via_name: "Kontakt 8".into(), via_type: 50033, name, ctype: 50000 };
+                    put(&*h, lua, idx, ask, Tail { key: None, cb: None })
+                })
+                .unwrap();
+            lua.globals().set("locateVia", via).unwrap();
+            lua
+        };
+        let (a, b) = (vm(0), vm(1));
+        let ask = |lua: &Lua, call: &str| lua.load(format!("return {call}('Kontakt File Menu')")).eval::<Value>().unwrap();
+        let reached = || holder.backend.element_asks();
+        {
+            // A focus change: every VM's overlays evaluate in turn.
+            let _lane = crate::ocr::types::enter_priority(Priority::Interactive);
+            assert!(ask(&a, "locate").is_nil(), "nothing there");
+            assert!(ask(&b, "locate").is_nil(), "the first VM's answer");
+            assert_eq!(reached(), 1, "one walk for both");
+            assert!(ask(&b, "locateVia").is_nil() && ask(&a, "locateVia").is_nil());
+            assert_eq!(reached(), 2, "and one for locateVia");
+            let obs = holder.store.borrow();
+            assert_eq!((obs.asked, obs.served), (4, 2), "counted for the epoch's line");
+        }
+        // A poll in the same epoch — no recurring tick turns it over: each one asked again, and not
+        // counted, as a question asked every time is not.
+        assert!(ask(&a, "locate").is_nil() && ask(&b, "locate").is_nil());
+        assert_eq!(reached(), 4, "a poll's locate is put to the program each time");
+        assert!(ask(&b, "locateVia").is_nil());
+        assert_eq!(reached(), 5);
+        assert_eq!((holder.store.borrow().asked, holder.store.borrow().served), (4, 2));
+        // What a poll asked is kept: a key after it in the same epoch is answered from the store.
+        let _lane = crate::ocr::types::enter_priority(Priority::Interactive);
+        assert!(ask(&a, "locate").is_nil());
+        assert_eq!(reached(), 5);
     }
 
     /// The event loop's line for a long wait: from 50 ms, what was asked and how long the pump was

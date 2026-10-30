@@ -51,6 +51,9 @@ mod capture;
 /// which path answered — with `--older-functions`, the older two alone. See the file.
 /// `pub(super)` for `backend::capture_check`.
 pub(super) mod capture_check;
+/// What the log says of a click through the input, and of an application that comes to the front
+/// after one without naming a window. Pure; see the file.
+mod click_notes;
 mod enrol;
 /// Whether Screen Recording is granted and Input Monitoring needed, judged by what this run has
 /// seen. Pure; see the file.
@@ -276,6 +279,12 @@ impl Backend for MacBackend {
 
     fn mouse_click(&self, x: i32, y: i32, button: MouseButton) -> Result<(), crate::errors::HostError> {
         input::mouse_click(x, y, button)
+    }
+
+    /// The window the hit test names at the point, and whether it is the one the click is for, in the
+    /// log; the click noted for the activation after it (`input::note_click`).
+    fn note_click(&self, x: i32, y: i32, window: Option<isize>) {
+        input::note_click(x, y, window);
     }
 
     /// The events handed to the window's process, routed inside it by the window's number and

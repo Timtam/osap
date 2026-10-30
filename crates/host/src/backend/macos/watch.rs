@@ -381,6 +381,12 @@ fn activated(app: &NSRunningApplication, announce: bool) {
     let pid = app.processIdentifier();
     let name = app_name(app);
     FRONT_PID.store(pid, Ordering::Relaxed);
+    // How long after this application's last click it came, the first activation after each click
+    // (`click_notes.rs`): beside the click's own line, what says whether a click brought another
+    // application to the front.
+    if let Some(line) = super::input::after_click_line(&name, pid) {
+        crate::logging::line("macos", &line);
+    }
     // Set against AppKit's word on this application's own key window, for the log (`own.rs`).
     super::own::note_front(pid);
     // This application's own request for the front, if one waits, has its answer: the workspace
@@ -445,6 +451,17 @@ fn activated(app: &NSRunningApplication, announce: bool) {
                  is in front; the tap keeps what it had rather than being told there is none"
             ),
         ),
+    }
+    // Naming no window — not answering, or answering none: what it has on screen instead, and which
+    // of those holds the last click's point (`click_notes.rs`). The window server's list, once;
+    // nothing asked of the application.
+    if answered.is_none_or(|w| w == 0) {
+        let windows = super::ax::listed_windows_of(pid);
+        let policy = super::click_notes::policy_words(app.activationPolicy().0);
+        crate::logging::line(
+            "macos",
+            &super::click_notes::windowless_line(&name, pid, &policy, &windows, super::input::last_click()),
+        );
     }
     crate::logging::trace("macos", || {
         format!("activated: {name} (pid {pid}), frontmost window handle {window}")

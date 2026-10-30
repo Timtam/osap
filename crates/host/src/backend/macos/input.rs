@@ -20,6 +20,8 @@
 
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 
 use objc2_application_services::AXIsProcessTrusted;
 use objc2_core_foundation::{CFRetained, CGPoint};
@@ -29,7 +31,7 @@ use objc2_core_graphics::{
     CGScrollEventUnit, CGWarpMouseCursorPosition,
 };
 
-use super::{keys, post_click};
+use super::{click_notes, keys, post_click};
 use crate::backend::{KeyRefusal, MouseButton};
 use crate::errors::{input, HostError};
 
@@ -282,6 +284,45 @@ pub fn mouse_move(x: i32, y: i32) -> Result<(), HostError> {
     let glide = glide_event(x, y)?;
     post_all(&[glide]);
     Ok(())
+}
+
+/// When this process noted its first click: the origin [`LAST_CLICK`]'s moments are measured from.
+static CLICK_ORIGIN: OnceLock<Instant> = OnceLock::new();
+
+/// The last click through the input, for the activation after it (`click_notes::LastClick`).
+static LAST_CLICK: click_notes::LastClick = click_notes::LastClick::new();
+
+fn since_click_origin() -> Duration {
+    CLICK_ORIGIN.get_or_init(Instant::now).elapsed()
+}
+
+/// A click through the input at (x, y) is about to be posted — `host.input.click` once or twice,
+/// for `window` when the module named one: the window the system's hit test names at the point,
+/// and whether it is the one the click is for, written before the click goes (a popup it opens
+/// could cover the point after it); and the click noted for the activation after it
+/// (`click_notes.rs`). Decides nothing. On the event loop, which the hit test needs: one copy of the
+/// window server's list, a few milliseconds — and, the first time a named window is paired with the
+/// window server's, another (`ax::window_id`).
+pub fn note_click(x: i32, y: i32, window: Option<isize>) {
+    let for_ = match window {
+        Some(handle) => click_notes::For::Window { handle, number: super::ax::window_number_of(handle) },
+        None => click_notes::For::Front(super::ax::frontmost_pid().map(|pid| (pid, super::ax::exe_for_pid(pid)))),
+    };
+    let hit = super::ax::click_hit(x, y);
+    crate::logging::line("input", &click_notes::click_line(x, y, hit.as_ref(), &for_));
+    LAST_CLICK.note(x, y, since_click_origin());
+}
+
+/// For an application `app` (`pid`) that came to the front: how long after this application's last
+/// click — the first activation after each click, and `None` for every other.
+pub(super) fn after_click_line(app: &str, pid: i32) -> Option<String> {
+    let (x, y, ago) = LAST_CLICK.take(since_click_origin())?;
+    Some(click_notes::after_click_line(app, pid, ago, x, y))
+}
+
+/// The last click's point, told to an activation or not; `None` before the first.
+pub(super) fn last_click() -> Option<(i32, i32)> {
+    LAST_CLICK.last()
 }
 
 pub fn mouse_click(x: i32, y: i32, button: MouseButton) -> Result<(), HostError> {

@@ -272,6 +272,13 @@ mod macos_tap_queue;
 #[path = "macos/tap_front.rs"]
 mod macos_tap_front;
 
+/// And what the log says of a click through the input and of an application that comes to the
+/// front after one without naming a window — the lines that tell the next Mac log whether a click
+/// landed on another application's window drawn over the point.
+#[cfg(all(test, not(target_os = "macos")))]
+#[path = "macos/click_notes.rs"]
+mod macos_click_notes;
+
 /// And the reads an application could not complete inside one accessibility walk: which element,
 /// which attribute, how many walks of a kind in an application met one — the line the next Mac
 /// session reads to say whether a plug-in that works ever answers so, once in five seconds at most.
@@ -1775,6 +1782,13 @@ pub trait Backend {
             _ => Ok(()),
         }
     }
+
+    /// A click through the system's input at (x, y) is about to be made — `host.input.click` with
+    /// `via = "input"`, once or twice, after its `window`'s check — for `window` when the module named
+    /// one: what the platform writes of it in the log before it goes. It decides nothing. A Mac writes
+    /// the window its hit test names at the point, and whether that is the window the click is for
+    /// (`macos/click_notes.rs`); the default writes nothing.
+    fn note_click(&self, _x: i32, _y: i32, _window: Option<isize>) {}
 
     /// `host.input.click`'s `via = "post"`: the click posted to the window a real click at (x, y)
     /// reaches, when that is `window` or a window inside it — as messages to that window in its own
@@ -5858,10 +5872,12 @@ mod not_known_tests {
         for sig in ["pub(super) fn attribute(", "pub(super) fn attribute_element_checked(", "pub(super) fn element_gone("] {
             assert!(body(AX, sig).contains("note_busy(element_pid(el));"), "{sig}");
         }
+        // At a node refused, at a node whose snapshot was not read for the deadline, and at the end
+        // of a walk one of whose reads was not (budget.rs, `may_read`): the same stop.
         let walk = body(AX, "fn walk_from(\n");
-        let refused = walk.find("if !budget.spend() {").unwrap();
-        assert!(walk[refused..].starts_with("if !budget.spend() {\n        // A module's question is told which bound"));
-        assert!(walk[refused..refused + 300].contains("if let Some(why) = budget.cut() {\n            not_known(why);"));
+        assert!(walk.contains("if !budget.spend() {\n        stopped(budget);"));
+        assert!(body(AX, "fn walk(\n").contains("if budget.out_of_time() {\n        stopped(budget);"));
+        assert!(body(AX, "fn stopped(budget: &Budget) {").contains("if let Some(why) = budget.cut() {\n        not_known(why);"));
         // Every question starts at root_of, so a quarantined application is noted for each.
         for f in ["pub fn find(", "pub fn find_any(", "pub fn locate(", "pub fn locate_via(", "pub fn plugin_locate(", "pub fn dump(", "pub fn state_probe(", "pub fn class_nav_point(", "pub fn focus_step(", "pub fn focus_within("] {
             assert!(body(AX, f).contains("root_of(hwnd, "), "{f}");
@@ -5889,7 +5905,8 @@ mod not_known_tests {
         assert!(begun < walked && walked < ended);
         assert!(walk[walked..ended].contains("if let Some(counting) = counting {"), "only the walk that began the count ends it");
         let from = body("fn walk_from(\n");
-        assert!(at(from, "let snap = snapshot(el);\n    unanswered::read(&snap.role, &snap.title);") < at(from, "match visit(el, &snap, depth) {"));
+        assert!(at(from, "let snap = snapshot(el);") < at(from, "unanswered::read(&snap.role, &snap.title);"));
+        assert!(at(from, "unanswered::read(&snap.role, &snap.title);") < at(from, "match visit(el, &snap, depth) {"));
         assert!(from.contains(concat!(
             "for (i, child) in children(el).into_iter().enumerate() {\n",
             "        unanswered::enter(i);\n",
