@@ -26,17 +26,35 @@
 -- Read with a callback (host.ocr.recognize), as the runtime's identity rule asks of a panel: on a
 -- Mac a read that finds nothing takes a quarter of a second, a wait for it would hold this
 -- module's keys, and `identify` is asked in every plug-in window of every DAW the keyboard comes
--- into. So `identify` answers nil —
--- "could not tell yet" — until the answer lands, and then asks the overlays of its binding to look
--- again, with the function the runtime hands `identify` for it (`again`, docs/api/overlay.md,
--- attachEmbedded), as sforzando's wordmark does. A read that
--- saw nothing (blank, none, failed) is no answer and is asked again, and so is one that is only
--- half an answer: one of MENU and UNDO read and not the other, captions read only with boxes the
--- recogniser guessed, or Avenger's captions with no factor that fits them. Text without Avenger's
--- header is a real "no". The runtime keeps a "no" — and bounds the "could not tell yet" at eight
--- in a row — for the stay on a Mac's panel, and for as long as it keeps the control on Windows,
--- where a JUCE child has no stay (docs/api/overlay.md, O.memoByOrigin): a "no" there is final for
--- that editor, which is why only text without the header is one.
+-- into. So `identify` cannot tell until the answer lands, and then asks the overlays of its
+-- binding to look again, with the function the runtime hands `identify` for it (`again`,
+-- docs/api/overlay.md, attachEmbedded), as sforzando's wordmark does. A read that saw nothing
+-- (blank, none, failed) is no answer, and neither is one that is only half an answer: one of MENU
+-- and UNDO read and not the other, captions read only with boxes the recogniser guessed, or
+-- Avenger's captions with no factor that fits them.
+--
+-- "Not yet" and "no" are said differently on the two kinds of origin, because the runtime keeps
+-- them differently (docs/api/overlay.md, attachEmbedded):
+--   * ON A DAW'S PANEL (a Mac) `identify` answers nil while it cannot tell, and the runtime counts
+--     eight of those in a row and then keeps a "no" for the rest of the STAY — which a visit to
+--     the DAW's own controls ends, so the next stay asks again. Text without Avenger's header is a
+--     real "no" there, kept for the stay: every plug-in window of every DAW is a panel, and the
+--     reads a "no" saves are the ones every other plug-in would pay.
+--   * ON AVENGER'S OWN WINDOW (Windows: the KalliGuiWin child, src/main.luau) the runtime keeps a
+--     verdict per CONTROL, for as long as the child lives (O.memoByOrigin): there is no stay, and a
+--     "no" — or a nil counted to eight, which it keeps as one — keeps the overlay off that editor
+--     until the user closes the FX window and opens it again, which nothing tells a blind user.
+--     When this module matched every JUCE window there, a "no" for text without the header saved
+--     reads in every JUCE plug-in; the class is narrow now (the first Windows session, 2026-10-30),
+--     so a wrong "no" costs the user the editor, and a wrong "not yet" costs a few reads. So there
+--     no read makes a "no" (the maintainer's decision of 2026-10-30): neither MENU nor UNDO —
+--     "Loading", a slow first paint, one read that mangled both captions — is "not yet", as a
+--     blank read is; `identify` never answers nil there but RAISES, with one fixed message
+--     (NOT_YET), which the runtime takes as "could not tell yet, and not counted"; every read that
+--     stays undecided asks for the next at once (`again`); and the module bounds itself instead,
+--     at VISIT_READS_MAX reads per visit (below). The cost: at most eight header reads per visit to
+--     a KalliGui editor that is not Avenger, and nothing for any other plug-in, whose class is never
+--     asked.
 --
 -- Kept per window, size and STAY (the runtime's word for the keyboard inside one window's panel,
 -- which a visit to the DAW's own controls ends): one REAPER FX chain window shows whichever FX is
@@ -102,8 +120,30 @@ local BAND_DOWN = 32 / G.WIDTH_AT_50
 -- the text, only half the header, no factor): after this many the header is not read again for
 -- it — a count, not a clock — and the overlay places nothing there until the window changes size
 -- or the keyboard comes in again. The runtime's own cap on "could not tell yet" is eight
--- evaluations.
+-- evaluations. On Avenger's own window it bounds only the reads of a state already held as
+-- Avenger's — the reads for its factor and zoom — and a read that leaves the identity open counts
+-- towards VISIT_READS_MAX instead.
 local READS_MAX = 6
+
+-- Reads of Avenger's own window (Windows) that leave its identity open, per VISIT: after this many
+-- in one visit `identify` reads no more and goes on raising NOT_YET without reading, until the next
+-- visit re-arms the count. Eight because it is the runtime's own number for "could not tell yet"
+-- in a row (IDENTIFY_UNDECIDED_MAX, docs/api/overlay.md, attachEmbedded) — the bound that a raise,
+-- not counted there, leaves to this module — kept per visit rather than for the control's life,
+-- so that coming back to the window is a way back to the overlay.
+--
+-- A VISIT is the window in front changing: a change of host.window.active()'s id, counted by an
+-- onFocus callback of this module's, registered the first time `identify` is asked about Avenger's
+-- own window — so a Mac, whose origin is always a panel, never registers one — and by `identify`
+-- itself, since the runtime's own onFocus callback, registered first, asks it before this module's
+-- has run in the same round. Alt+Tab away and back is a new visit; the keyboard moving inside
+-- REAPER's FX window is not. Counts and events: no timer decides anything (the maintainer's rule).
+local VISIT_READS_MAX = 8
+
+-- What `identify` raises on Avenger's own window for every "not yet" — a read out, a read that
+-- told nothing, the visit's reads used up: one message, so the runtime's one line per control
+-- (`identify raised: …`) says the same whichever it was, and the module's own lines say which.
+local NOT_YET = "VPS Avenger's header has given no verdict yet"
 
 -- A zoom step of ours has been chosen in the zoom list: the zoom field is read again until it
 -- shows another zoom, at most this many times — Avenger may not have redrawn by the first read.
@@ -143,6 +183,40 @@ local function keyOf(ctrl)
   return string.format("%s|%s|%s", tostring(ctrl.id), sizeOf(ctrl), tostring(ctrl.stay))
 end
 
+-- Whether `ctrl` is Avenger's own window (Windows: the KalliGuiWin child) rather than a DAW's
+-- plug-in panel (class "host-panel", a Mac): the split every rule of this file that differs
+-- between the two goes by, as geometry.luau's frame does.
+local function ownWindow(ctrl)
+  return ctrl.class ~= "host-panel"
+end
+
+-- The visits (VISIT_READS_MAX): their count, and the id of the window last seen in front.
+local visits = { n = 0, id = nil, watching = false }
+
+-- The window in front now, counted as a new visit when its id is another than the last one seen.
+-- nil — nothing shown in front — is no window and leaves the count, so a moment with nothing shown
+-- between two looks at the same FX window is no visit; Alt+Tab's switcher, a window of its own, is.
+local function seeFront()
+  local a = host.window.active()
+  local id = a and a.id
+  if id ~= nil and id ~= visits.id then
+    visits.id = id
+    visits.n += 1
+  end
+end
+
+-- Asked by `identify` about Avenger's own window: the onFocus callback registered at the first
+-- such question, and the window in front seen now. The callback never raises — one that raises
+-- skips the module's later onFocus callbacks for that change (docs/api/window.md, onFocus) — and
+-- costs one host.window.active(), the epoch's answer.
+local function watchVisits()
+  if not visits.watching then
+    visits.watching = true
+    host.window.onFocus(function() pcall(seeFront) end)
+  end
+  pcall(seeFront)
+end
+
 -- A state for `ctrl`'s window, size and stay. A new one INHERITS "Avenger" from another state of
 -- the same control in the same stay that was read as Avenger's: on Windows, where there is no
 -- stay, that is the control the runtime already holds as Avenger's at another size (see the top
@@ -151,8 +225,10 @@ local function stateFor(ctrl)
   local key = keyOf(ctrl)
   local st = states[key]
   if st then return st end
+  -- `tries` and `visit`: on Avenger's own window, the reads that left the identity open in the
+  -- visit `visit` (VISIT_READS_MAX).
   st = { key = key, id = ctrl.id, size = sizeOf(ctrl), stay = tostring(ctrl.stay), reads = 0,
-    verdict = nil, zoom = nil, k = nil, stale = false }
+    tries = 0, visit = nil, verdict = nil, zoom = nil, k = nil, stale = false }
   for _, other in pairs(states) do
     if other.id == st.id and other.stay == st.stay and other.verdict == true then
       st.verdict, st.inherited = true, true
@@ -183,9 +259,13 @@ local function sayOnce(kind, key, fmt, ...)
   host.log.info(string.format(fmt, ...))
 end
 
+-- The title the log names `ctrl` by: its own window's on a DAW's panel. On Avenger's own window
+-- the control is a child of the window in front — the runtime finds it among that window's
+-- controls — and has no title of its own, so the window in front's: REAPER's FX window, which
+-- names the track and the plug-in.
 local function titleOf(ctrl)
   local a = host.window.active()
-  if a and a.id == ctrl.id then return tostring(a.title) end
+  if a and (a.id == ctrl.id or ownWindow(ctrl)) then return tostring(a.title) end
   return "window " .. tostring(ctrl.id)
 end
 
@@ -341,7 +421,7 @@ end
 -- The display factor of `ctrl` where it is known without reading: 1 on a DAW's plug-in panel
 -- (see "The factor"), nil on Avenger's own window.
 local function knownDisplay(ctrl)
-  if ctrl.class == "host-panel" then return 1 end
+  if not ownWindow(ctrl) then return 1 end
   return nil
 end
 
@@ -477,28 +557,72 @@ local function lookAgain(st)
   if st.again then st.again() else host.window.recheck() end
 end
 
+-- Avenger's own window, its identity open: `st`'s count of undecided reads re-armed when the visit
+-- is another than the one it counts — said when that ends a stop. Asked by `request` before a read
+-- starts and by `answered` before a read that landed is counted: a read started in one visit and
+-- answered in the next (the user away and back while it was out) counts towards the visit it
+-- landed in, so the visit's eighth read cannot land in the next visit and stop it unread.
+local function visitOf(ctrl, st)
+  if st.visit == visits.n then return end
+  if st.tries >= VISIT_READS_MAX then
+    host.log.info(string.format("[avenger] '%s' (%dx%d): another visit — the header is read again, "
+      .. "up to %d times", titleOf(ctrl), ctrl.client.w, ctrl.client.h, VISIT_READS_MAX))
+  end
+  st.visit, st.tries = visits.n, 0
+end
+
+-- A read of Avenger's own window that left the identity open (`tries` counts it): the next read at
+-- once, through the runtime's `again` — or, after the visit's last (VISIT_READS_MAX), none, said
+-- once: nothing reads again until the next visit (request).
+local function readAgain(st, where)
+  if st.tries < VISIT_READS_MAX then
+    lookAgain(st)
+    return
+  end
+  host.log.info(string.format("[avenger] %s: %d reads of the header in this visit gave no verdict — not "
+    .. "read again until another window has been in front and this one is again", where, st.tries))
+end
+
 local function answered(ctrl, st, token, band, cx, cy, title, r)
   if states[st.key] ~= st or st.reading ~= token then return end
   st.reading = nil
   -- A newer read of this module's header replaced this one before it was recognised; that one
   -- answers for itself, and until then nothing is known that was not known before.
   if r.status == "stale" then return end
-  st.reads += 1
+  local undecided = st.verdict == nil
+  -- On Avenger's own window a read made while the identity is open counts towards the visit's
+  -- VISIT_READS_MAX, and every one that leaves it open asks for the next at once (readAgain);
+  -- READS_MAX counts the others — and on a panel every read, as before.
+  local open = undecided and ownWindow(ctrl)
+  if open then
+    visitOf(ctrl, st)
+    st.tries += 1
+  else
+    st.reads += 1
+  end
   local winKey = string.format("%s|%dx%d", tostring(ctrl.id), ctrl.client.w, ctrl.client.h)
   local area = string.format("%d,%d %dx%d", band[1], band[2], band[3] - band[1], band[4] - band[2])
   local where = string.format("'%s' (%dx%d)", title, ctrl.client.w, ctrl.client.h)
   if r.status ~= "text" then
     -- Nothing read is no answer — a view that has not painted yet looks exactly like this — so
-    -- the verdict stays open, and the next evaluation reads again.
+    -- the verdict stays open, and the next evaluation reads again: on Avenger's own window at
+    -- once, on a panel at whatever event comes next.
     sayOnce("nothing", winKey, "[avenger] %s: the header band at %s read nothing (%s%s) — asked again "
       .. "at the next evaluation", where, area, tostring(r.status), r.error and (": " .. r.error) or "")
     if H.step and H.step.id == st.id then takeZoom(st, nil, nil, nil) end
+    if open then readAgain(st, where) end
     return
   end
-  local undecided = st.verdict == nil
   local h, why, partial = parseHeader(r.words, cx, cy)
   if not h then
-    if undecided and not partial then
+    if open then
+      -- Avenger's own window: neither caption read, or only half of them, is "not yet" — text
+      -- without the header included (see the top of this file).
+      host.log.info(string.format("[avenger] %s: %s in the header band at %s: \"%s\" — no verdict yet "
+        .. "(read %d of %d in this visit)", where, tostring(why), area, forLog(r.text), st.tries,
+        VISIT_READS_MAX))
+      readAgain(st, where)
+    elseif undecided and not partial then
       st.verdict = false
       if lastAvenger == st.id then lastAvenger = nil end
       sayOnce("no", winKey, "[avenger] %s: not VPS Avenger — %s in the header band at %s: \"%s\"",
@@ -545,6 +669,7 @@ local function answered(ctrl, st, token, band, cx, cy, title, r)
       -- place nothing), and read again.
       host.log.info(string.format("[avenger] %s: the header reads like VPS Avenger's, but no factor: %s — "
         .. "not taken as VPS Avenger until one fits; read again. %s", where, tostring(noFactor), line))
+      if open then readAgain(st, where) end
     else
       host.log.info(string.format("[avenger] %s: the header again — but no factor: %s; nothing is "
         .. "clicked or read there until there is one. %s", where, tostring(noFactor), line))
@@ -566,6 +691,14 @@ local function answered(ctrl, st, token, band, cx, cy, title, r)
       what = string.format("zoom not known (the display's scaling is not known, and the zoom field "
         .. "was not read), factor %.4f from the header's size", k)
     end
+    if ownWindow(ctrl) then
+      -- The factor Avenger's own window's width gives, logged beside the one taken and never used
+      -- (the maintainer's decision of 2026-10-30): a session at a second zoom says whether the
+      -- width follows the zoom there (geometry.luau, WIDTH_AT_50_MEASURED). Not on a panel, whose
+      -- width is the DAW's window's.
+      what = string.format("%s; by the window's width %.4f (%d / %.2f), logged only", what,
+        ctrl.client.w / G.WIDTH_AT_50_MEASURED, ctrl.client.w, G.WIDTH_AT_50_MEASURED)
+    end
     host.log.info(string.format("[avenger] %s: %s, %s — %s. %s", where,
       undecided and "VPS Avenger" or "the header again", field, what, line))
     headerShot(ctrl, band, k, zoom, h)
@@ -580,7 +713,12 @@ local function request(ctrl, st)
   local stepping = H.step ~= nil and H.step.id == st.id
   if st.verdict ~= nil and st.k and not st.stale then return false end
   if st.verdict == false then return false end
-  if st.reads >= READS_MAX and not stepping then
+  if st.verdict == nil and ownWindow(ctrl) then
+    -- Avenger's own window, its identity open: VISIT_READS_MAX reads per visit, the count
+    -- re-armed for a state whose reads were counted in an earlier visit (visitOf).
+    visitOf(ctrl, st)
+    if st.tries >= VISIT_READS_MAX then return false end
+  elseif st.reads >= READS_MAX and not stepping then
     sayOnce("cap", st.key, "[avenger] '%s' (%dx%d): %d reads of the header brought no zoom — not read "
       .. "again until the window changes size or the keyboard comes in again", titleOf(ctrl),
       ctrl.client.w, ctrl.client.h, st.reads)
@@ -645,16 +783,22 @@ end
 
 -- ── What the overlay asks ────────────────────────────────────────────────────
 
--- The binding's `identify`: true, false, or nil while the header's read is out. `again` is the
--- runtime's: called when the read's answer is in (lookAgain).
+-- The binding's `identify`: true, false, or — while it cannot tell — nil on a DAW's panel and a
+-- raise of NOT_YET on Avenger's own window, which the runtime does not count (see the top of this
+-- file). `again` is the runtime's: called when a read's answer is in (lookAgain).
 function H.identify(ctrl, again)
   if not (ctrl and ctrl.id and ctrl.client) then return false end
   local st = stateFor(ctrl)
   if again then st.again = again end
   if st.verdict ~= nil then return st.verdict end
   if carried(ctrl, st) then return true end
+  if not ownWindow(ctrl) then
+    request(ctrl, st)
+    return nil
+  end
+  watchVisits()
   request(ctrl, st)
-  return nil
+  error(NOT_YET, 0)
 end
 
 -- The overlay's scale (O:scale): the factor for `origin`'s window, size and stay, or nil —

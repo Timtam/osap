@@ -789,7 +789,7 @@ fn the_knob_reader_reads_one_knob_off_its_own_box_at_50_100_and_200_percent() {
           { name = "Mac 200 %", k = 4, zoom = 200 },
           { name = "Windows 150 %, 100 %", k = 3, zoom = 100 },
         }
-        local origin = { client = { x = 100, y = 100, w = 4000, h = 3000 }, class = "JUCE_1a05739a091" }
+        local origin = { client = { x = 100, y = 100, w = 4000, h = 3000 }, class = "KalliGuiWin18360-000000000D72C850" }
         for _, c in ipairs(cases) do
           local pl = P.placer(origin, c.k, c.zoom)
           local function read(spec, which)
@@ -858,7 +858,7 @@ fn the_knob_reader_reads_the_projects_counts_pixel_for_pixel() {
         T.avengerAt80("Init Preset")
         local K = S.included["modules/vps-avenger/src/read/knob.luau"][1]
         local P = S.included["modules/vps-avenger/src/read/picture.luau"][1]
-        local origin = { client = { x = 100, y = 100, w = 4000, h = 3000 }, class = "JUCE_1a05739a091" }
+        local origin = { client = { x = 100, y = 100, w = 4000, h = 3000 }, class = "KalliGuiWin18360-000000000D72C850" }
         local pl = P.placer(origin, 2, 100)
         -- The knob's middle on screen, a whole pixel here: (100 + 2 x, 100 + 2 y).
         local function read(which, pixels)

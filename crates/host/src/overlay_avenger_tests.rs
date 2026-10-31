@@ -42,6 +42,12 @@
 //! is Init Preset, which Avenger steps no preset from — said as Tab reaches them, and a press
 //! clicks nothing and says why — until a read of a preset, and claim nothing where the preset may
 //! have changed with nothing read since (Undo, a button of the module's own, among them).
+//!
+//! And for the first Windows session (2026-10-30), where Avenger's editor was a KalliGuiWin child
+//! rather than a JUCE window: on Avenger's own window no read is a "no" — `identify` raises while
+//! it cannot tell, which the runtime does not count, every undecided read asks for the next at
+//! once, and the module reads at most eight times a visit — while a Mac's panel keeps its rule;
+//! and the factor the window's width gives is logged there, and used for nothing.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -781,7 +787,7 @@ T.WLIST = { id = 61, class = "SysListView32", bounds = { x = 8, y = 60, w = 230,
   client = { x = 8, y = 60, w = 230, h = 600 } }
 function T.juce(zoom, d)
   local w, h = T.size(zoom, d)
-  return { id = 70, class = "JUCE_1a05739a091", bounds = { x = 248, y = 60, w = w, h = h },
+  return { id = 70, class = "KalliGuiWin18360-000000000D72C850", bounds = { x = 248, y = 60, w = w, h = h },
     client = { x = 248, y = 60, w = w, h = h } }
 end
 function T.onWindows(zoom, d)
@@ -826,6 +832,29 @@ function T.lastRead(key)
     if S.reads[i].key == key then return S.reads[i] end
   end
   return nil
+end
+
+-- How many reads have been asked for with `key`.
+function T.readsOf(key)
+  local n = 0
+  for _, r in ipairs(S.reads) do
+    if r.key == key then n += 1 end
+  end
+  return n
+end
+
+-- Counts the onFocus callbacks the module's header registers in S.headerFocus — told apart from
+-- the runtime's by the chunk the registration comes from — from here on: called before
+-- T.avenger(), whose overlays bind and ask `identify` the first time.
+function T.countHeaderFocus()
+  local onFocus = rawget(T.host.window, "onFocus")
+  S.headerFocus = 0
+  rawset(T.host.window, "onFocus", function(cb)
+    if string.find(debug.info(2, "s") or "", "vps-avenger/src/header.luau", 1, true) then
+      S.headerFocus += 1
+    end
+    return onFocus(cb)
+  end)
 end
 
 -- ── The page's host (src/page.luau) ──────────────────────────────────────────
@@ -2128,7 +2157,7 @@ fn on_windows_avenger_is_its_juce_child_and_a_display_factor_is_learned_from_the
         T.ok(S.rechecks == 0 and not header.active, "asked again through identify's own function: " .. S.rechecks)
         T.runDue()
         T.ok(header.active and header:origin().id == 70)
-        T.ok(T.count("attachEmbedded: matched control [JUCE_1a05739a091] id=70, identify=true") == 1)
+        T.ok(T.count("attachEmbedded: matched control [KalliGuiWin18360-000000000D72C850] id=70, identify=true") == 1)
         T.ok(T.count("zoom 80 % (read), factor 2.4000, display factor 1.50") == 1)
         T.ok(T.count("from where the table puts them with Avenger's corner at the panel's +0,+0, "
           .. "(+2.0,-2.0) and (+2.0,-2.0) with it at -2,+2") == 1, "no DAW difference on the plug-in's own window")
@@ -2220,6 +2249,298 @@ fn on_windows_a_zoom_step_keeps_the_control_avengers_and_an_unread_zoom_is_not_g
         -- Undo at the size's factor: 248 + 610 = 858, 60 + 28 = 88.
         T.pressAt(header, 8)
         T.ok(T.clickAt() == "858,88", T.clickAt())
+    "##);
+}
+
+// ---------------------------------------------------------------------------------------------
+// The first Windows session (2026-10-30): on Avenger's own window no read is a "no", `identify`
+// raises while it cannot tell, every undecided read asks for the next at once, and the module
+// bounds itself at eight such reads per visit — the maintainer's decisions of the same day.
+// ---------------------------------------------------------------------------------------------
+
+/// A first read of "Loading" — Avenger still painting its header — is "not yet" on Avenger's own
+/// window, never the "no" the runtime would keep for as long as the child lives: no `not VPS
+/// Avenger`, and the next read asked for at once through the runtime's `again`, with no window
+/// event; the header then brings the overlay up.
+#[test]
+fn on_windows_a_first_read_without_the_header_is_not_yet_and_read_again_at_once() {
+    run(r##"
+        local S = T.S
+        T.onWindows(80, 1.5)
+        local header = T.avenger()
+        local r = T.lastRead("vps-avenger header")
+        T.answer(r, T.reading({ { text = "Loading", x = 300, y = 80, w = 60, h = 20 } }))
+        T.ok(not header.active and T.count("not VPS Avenger") == 0, "no 'no': " .. T.dump())
+        T.ok(T.count("[avenger] 'FX: Track 1 \"VPS Avenger\"' (2091x1346): neither MENU nor UNDO was read in "
+          .. "the header band at 248,60 941x77: \"Loading\" — no verdict yet (read 1 of 8 in this visit)") == 1, T.dump())
+        T.runDue()
+        local r2 = T.lastRead("vps-avenger header")
+        T.ok(r2 ~= r and not r2.answered and T.readsOf("vps-avenger header") == 2,
+          "read again on the module's next turn, no window event: " .. T.dump())
+        T.answer(r2, T.header(248, 60, 2.4, 80))
+        T.runDue()
+        T.ok(header.active and header:origin().id == 70, T.dump())
+        T.ok(T.count("identify raised: VPS Avenger's header has given no verdict yet — taken as could not tell "
+          .. "yet, and not counted") >= 1, T.dump())
+        T.ok(T.count("identify could not tell") == 0, "nothing counted towards the runtime's eight")
+    "##);
+}
+
+/// While a read of Avenger's own window is out `identify` raises one fixed message, which the
+/// runtime does not count: twelve evaluations meanwhile — each asks it twice here, the control
+/// being among the window's children and on the focus chain — are never taken as a "no", and the
+/// header, when it lands, brings the overlay up.
+#[test]
+fn on_windows_evaluations_while_a_read_is_out_are_never_taken_as_no() {
+    run(r##"
+        local S = T.S
+        T.onWindows(80, 1.5)
+        local header = T.avenger()
+        local r = T.lastRead("vps-avenger header")
+        for _ = 1, 12 do T.event() end
+        T.ok(T.readsOf("vps-avenger header") == 1 and not r.answered and not header.active,
+          "one read out, asked once: " .. T.readsOf("vps-avenger header"))
+        T.ok(T.count("identify could not tell") == 0 and T.count("identify=false") == 0, "never a no: " .. T.dump())
+        T.answer(r, T.header(248, 60, 2.4, 80))
+        T.runDue()
+        T.ok(header.active, T.dump())
+        T.ok(T.count("attachEmbedded: matched control [KalliGuiWin18360-000000000D72C850] id=70, identify=true") == 1)
+    "##);
+}
+
+/// A read that saw nothing (blank) and one that read only half the header (MENU without UNDO) are
+/// no answer on Avenger's own window either: each is read again at once through `again`, with no
+/// window event between — where before nothing read again until the user's next focus change.
+#[test]
+fn on_windows_a_blank_or_half_read_is_read_again_through_again() {
+    run(r##"
+        local S = T.S
+        T.onWindows(80, 1.5)
+        local header = T.avenger()
+        local r = T.lastRead("vps-avenger header")
+        T.answer(r, { status = "blank", text = "", words = {} })
+        T.runDue()
+        local r2 = T.lastRead("vps-avenger header")
+        T.ok(r2 ~= r and not r2.answered, "a blank read is read again at once: " .. T.dump())
+        local half = T.header(248, 60, 2.4, 80)
+        table.remove(half.words, 5)
+        T.answer(r2, half)
+        T.ok(T.count("no UNDO was read in the header band at 248,60 941x77") == 1
+          and T.count("no verdict yet (read 2 of 8 in this visit)") == 1, T.dump())
+        T.runDue()
+        local r3 = T.lastRead("vps-avenger header")
+        T.ok(r3 ~= r2 and not r3.answered, "half the header is read again at once: " .. T.dump())
+        T.answer(r3, T.header(248, 60, 2.4, 80))
+        T.runDue()
+        T.ok(header.active and T.count("not VPS Avenger") == 0, T.dump())
+    "##);
+}
+
+/// What the runtime no longer counts, the module bounds: a KalliGui editor whose header reads
+/// "Menu" and "Undo" in mixed case — another plug-in of the same toolkit — is never taken for
+/// Avenger and is read eight times in one visit, each read asked for at once, then not again in
+/// that visit, said once. Another window in front and REAPER's FX window again is a new visit:
+/// read again, eight more at most, the re-arming said once. The visits are counted by an onFocus
+/// callback of the module's, registered once, at the first `identify` about Avenger's own window.
+#[test]
+fn on_windows_an_editor_that_is_not_avenger_is_read_eight_times_a_visit() {
+    run(r##"
+        local S = T.S
+        T.countHeaderFocus()
+        local J = T.onWindows(80, 1.5)
+        local header = T.avenger()
+        T.ok(S.headerFocus == 1, "one onFocus callback, at the first identify: " .. S.headerFocus)
+        local function notAvenger()
+          local reading = T.header(248, 60, 2.4, 80)
+          reading.words[4].text, reading.words[5].text = "Menu", "Undo"
+          return reading
+        end
+        -- Every read answered as it is asked, and the module's turns played: no window event.
+        local function answerAll(turns)
+          for _ = 1, turns do
+            local r = T.lastRead("vps-avenger header")
+            if r and not r.answered then T.answer(r, notAvenger()) end
+            T.runDue()
+          end
+        end
+        answerAll(12)
+        T.ok(T.readsOf("vps-avenger header") == 8, "eight reads in the visit: " .. T.readsOf("vps-avenger header"))
+        T.ok(not header.active and T.count("not VPS Avenger") == 0, T.dump())
+        T.ok(T.count("[avenger] 'FX: Track 1 \"VPS Avenger\"' (2091x1346): 8 reads of the header in this visit "
+          .. "gave no verdict — not read again until another window has been in front and this one is again") == 1, T.dump())
+        -- More events in the same visit read nothing, and say nothing more.
+        T.event()
+        T.event()
+        T.ok(T.readsOf("vps-avenger header") == 8 and T.count("gave no verdict") == 1, T.dump())
+        -- A moment with nothing in front, and the same FX window again, is no visit.
+        T.hide(T.WFX)
+        T.event()
+        T.show(T.WFX, { J, T.WFX })
+        T.ok(T.readsOf("vps-avenger header") == 8 and T.count("another visit") == 0,
+          "nothing in front is no window: " .. T.dump())
+        -- Another window, then REAPER's FX window again: a new visit.
+        T.show(T.OTHER)
+        T.ok(T.readsOf("vps-avenger header") == 8, "nothing read while another window is in front")
+        T.show(T.WFX, { J, T.WFX })
+        T.ok(T.count("[avenger] 'FX: Track 1 \"VPS Avenger\"' (2091x1346): another visit — the header is "
+          .. "read again, up to 8 times") == 1, T.dump())
+        answerAll(12)
+        T.ok(T.readsOf("vps-avenger header") == 16, "eight more: " .. T.readsOf("vps-avenger header"))
+        T.ok(T.count("gave no verdict") == 2 and T.count("another visit") == 1 and not header.active, T.dump())
+        T.ok(T.count("identify could not tell") == 0 and T.count("identify=false") == 0, T.dump())
+        T.ok(S.headerFocus == 1, "still one callback: " .. S.headerFocus)
+    "##);
+}
+
+/// The visit's eighth read out while the user goes to another window and back: it lands in the
+/// new visit and counts there — read 1 of 8 in this visit, the next read asked for at once —
+/// instead of ending, unread, a visit that has only begun (the review of 2026-10-31). The new
+/// visit then has its eight reads and no more, said once, and no stop was said that had to end.
+#[test]
+fn on_windows_a_read_that_lands_in_the_next_visit_counts_there() {
+    run(r##"
+        local S = T.S
+        local J = T.onWindows(80, 1.5)
+        local header = T.avenger()
+        local function notAvenger()
+          local reading = T.header(248, 60, 2.4, 80)
+          reading.words[4].text, reading.words[5].text = "Menu", "Undo"
+          return reading
+        end
+        for _ = 1, 7 do
+          T.answer(T.lastRead("vps-avenger header"), notAvenger())
+          T.runDue()
+        end
+        local r8 = T.lastRead("vps-avenger header")
+        T.ok(T.readsOf("vps-avenger header") == 8 and not r8.answered, "the eighth out: " .. T.dump())
+        -- Away and back while it is out: a new visit, and nothing more read meanwhile.
+        T.show(T.OTHER)
+        T.show(T.WFX, { J, T.WFX })
+        T.ok(T.readsOf("vps-avenger header") == 8, T.dump())
+        T.answer(r8, notAvenger())
+        T.ok(T.count("no verdict yet (read 1 of 8 in this visit)") == 2 and T.count("gave no verdict") == 0,
+          "counted in the visit it landed in: " .. T.dump())
+        T.runDue()
+        T.ok(T.readsOf("vps-avenger header") == 9, "the next read at once, no window event: " .. T.dump())
+        for _ = 1, 12 do
+          local r = T.lastRead("vps-avenger header")
+          if not r.answered then T.answer(r, notAvenger()) end
+          T.runDue()
+        end
+        T.ok(T.readsOf("vps-avenger header") == 15, "eight in the new visit: " .. T.readsOf("vps-avenger header"))
+        T.ok(T.count("gave no verdict") == 1 and T.count("another visit") == 0 and not header.active, T.dump())
+    "##);
+}
+
+/// READS_MAX bounds only the reads of a state already held as Avenger's: seven reads of "Loading"
+/// and then the header use none of it. A zoom step to 85 % leaves 80 %'s state without a factor;
+/// the child back at 80 % with no step of ours (the zoom changed some other way) reads its header
+/// again and places at 80 %'s factor — where the seven "Loading" reads, counted there, would have
+/// stopped it unread until the overlay left the front.
+#[test]
+fn on_windows_undecided_reads_leave_a_held_state_its_rereads() {
+    run(r##"
+        local S = T.S
+        T.onWindows(80, 1.5)
+        local header = T.avenger()
+        for _ = 1, 7 do
+          T.answer(T.lastRead("vps-avenger header"), T.reading({ { text = "Loading", x = 300, y = 80, w = 60, h = 20 } }))
+          T.runDue()
+        end
+        T.answer(T.lastRead("vps-avenger header"), T.header(248, 60, 2.4, 80))
+        T.runDue()
+        T.ok(header.active and T.readsOf("vps-avenger header") == 8, T.dump())
+        T.event()
+        T.run(400)
+        T.stepAt(header, 10, 1)
+        T.popup(500, 270, 110, 150, 584)
+        T.tick(1)
+        T.closePopups()
+        T.tick(2)
+        T.ok(T.count("[avenger] zoom step from 80 % chosen") == 1, T.dump())
+        -- REAPER resizes the child to Avenger at 85 %, whose header ends the step.
+        T.onWindows(85, 1.5)
+        T.event()
+        T.tick(1)
+        T.answer(T.lastRead("vps-avenger header"), T.header(248, 60, 2.55, 85))
+        T.tick(1)
+        T.ok(T.lastSaid() == "Zoom, 85 percent, slider", T.said())
+        -- Back at 80 %, no step of ours: its state, without a factor since the step, is read again
+        -- when a control is placed there — Undo pressed, and nothing clicked until the read lands.
+        T.onWindows(80, 1.5)
+        T.event()
+        local clicks = #S.clicks
+        T.pressAt(header, 8)
+        local r = T.lastRead("vps-avenger header")
+        T.ok(r and not r.answered and T.region(r.region) == "248,60,1189,137", "read again: " .. T.dump())
+        T.ok(#S.clicks == clicks and T.count("brought no zoom") == 0, T.dump())
+        T.answer(r, T.header(248, 60, 2.4, 80))
+        T.tick(1)
+        -- Undo at 80 %'s factor again: (980, 94).
+        T.pressAt(header, 8)
+        T.ok(T.clickAt() == "980,94", T.clickAt())
+    "##);
+}
+
+/// On a DAW's panel (a Mac) the rule is the one it was: `identify` answers nil while a read is out
+/// — no raise — text without Avenger's captions is a "no" kept for the stay, and the module
+/// registers no onFocus callback of its own: the visits are Avenger's own window's.
+#[test]
+fn on_a_mac_panel_text_without_the_captions_stays_no_for_the_stay() {
+    run_mac(r##"
+        local S = T.S
+        T.countHeaderFocus()
+        local W = T.float(80)
+        S.listed = { W }
+        T.at(W)
+        local header = T.avenger()
+        local r = T.lastRead("vps-avenger header")
+        T.event()
+        T.ok(T.count("identify raised") == 0, "nil on a panel, not a raise: " .. T.dump())
+        T.answer(r, T.reading({ { text = "Loading", x = 300, y = 100, w = 60, h = 20 } }))
+        T.runDue()
+        T.event()
+        T.event()
+        T.ok(not header.active and T.lastRead("vps-avenger header") == r, "kept as no for the stay: " .. T.dump())
+        T.ok(T.count("[avenger] 'VST3i: VPS Avenger - Track 1' (1394x898): not VPS Avenger — neither MENU nor "
+          .. "UNDO was read in the header band") == 1, T.dump())
+        T.ok(T.count("no verdict yet") == 0 and T.count("by the window's width") == 0, T.dump())
+        T.ok(S.headerFocus == 0, "no onFocus of the module's on a Mac: " .. S.headerFocus)
+    "##);
+}
+
+/// The factor Avenger's own window's width gives is logged beside the one read, and used for
+/// nothing (the maintainer's decision of 2026-10-30): a child 1307 wide — 75 % by its width —
+/// whose header reads 80 % is placed at 80 %'s factor, 1.6. On a DAW's panel the line has no such
+/// part: the panel's width is the DAW's window's.
+#[test]
+fn the_width_factor_of_avengers_own_window_is_logged_and_nothing_else() {
+    run(r##"
+        local S = T.S
+        local J = T.onWindows(80, 1)
+        -- 1307 / 871.25 = 1.50014: Avenger's width at 75 %.
+        J.bounds.w, J.client.w = 1307, 1307
+        local header = T.avenger()
+        T.answer(T.lastRead("vps-avenger header"), T.header(248, 60, 1.6, 80))
+        T.runDue()
+        T.ok(header.active, T.dump())
+        T.ok(T.count("[avenger] 'FX: Track 1 \"VPS Avenger\"' (1307x898): VPS Avenger, the zoom field reads 80 % — "
+          .. "zoom 80 % (read), factor 1.6000, display factor 1.00; by the window's width 1.5001 (1307 / 871.25), "
+          .. "logged only. MENU read at") == 1, T.dump())
+        -- Undo at 80 %'s factor: 248 + 1.6 x 305 = 736, 60 + 22.4 -> 82.
+        T.pressAt(header, 8)
+        T.ok(T.clickAt() == "736,82", T.clickAt())
+    "##);
+    run_mac(r##"
+        local S = T.S
+        local W = T.float(80)
+        S.listed = { W }
+        T.at(W)
+        local header = T.avenger()
+        T.answer(T.lastRead("vps-avenger header"), T.header(98, 84, 1.6, 80))
+        T.runDue()
+        T.ok(header.active and T.count("zoom 80 % (read), factor 1.6000, display factor 1.00. MENU read at") == 1, T.dump())
+        T.ok(T.count("by the window's width") == 0, "not on a panel")
     "##);
 }
 

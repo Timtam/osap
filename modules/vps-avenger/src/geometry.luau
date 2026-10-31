@@ -95,13 +95,21 @@ G.NO = { 487, 310 }
 G.DIALOG_BAND = { 280, 200, 600, 336 }
 
 -- ── The plug-in's size ───────────────────────────────────────────────────────
--- Avenger is about 871 points wide at 50 %: the tester's floating REAPER window was 1394 wide at
--- 80 % and Logic's 1398 with a two-point border each side (2026-09-27), which is 871.25 at 50 %,
--- and the project's fit of several screenshots has a slope of 17.43 per percent, 871.5 at 50 %.
--- Used for one thing only: how wide and tall a band the header is read in (header.luau). It is
--- never a factor, because Avenger's width inside a DAW carries an offset nobody has measured, and
--- the project's width formula reads 80 % as 75 %.
+-- Avenger is about 871 points wide at 50 %: the tester's floating REAPER window on a Mac was 1394
+-- wide at 80 % and Logic's 1398 with a two-point border each side (2026-09-27), and Avenger's own
+-- child window on Windows 1394 at 80 % too (the first Windows session, 2026-10-30, the display at
+-- 100 %), which is 871.25 at 50 %; the project's fit of several screenshots has a slope of 17.43
+-- per percent, 871.5 at 50 %. Used for one thing only: how wide and tall a band the header is read
+-- in (header.luau). It is never a factor, because Avenger's width inside a DAW carries an offset
+-- nobody has measured, and the project's width formula reads 80 % as 75 %.
 G.WIDTH_AT_50 = 871
+-- The width those measurements give at 50 %, 1394 / 1.6. On Avenger's own window (Windows) the
+-- factor the window's width gives — its width over this — is LOGGED beside the factor read off the
+-- header, and never used (header.luau; the maintainer's decision of 2026-10-30): the child's width
+-- holds no DAW frame there, so a session at a second zoom says whether it follows the zoom — at 75
+-- % it would be 1307 wide, give or take one. Not on a DAW's panel, whose width is the DAW's
+-- window's and holds whatever it draws beside the plug-in.
+G.WIDTH_AT_50_MEASURED = 871.25
 -- And about 561 points tall at 50 %: 897 at 80 % in the same log of the tester's, which is 560.6 —
 -- worked out from where Logic's header ends and its footer begins, not measured on its own. Used
 -- beside the width for the header's band only (header.luau), for a DAW that keeps its window

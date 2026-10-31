@@ -70,17 +70,16 @@ local SLOT = "com.platform.vps-avenger"
 -- panel — REAPER's FX chain and floating window, Logic's plug-in window — which daw-hosts places,
 -- and on Windows Avenger's own child window.
 --
--- That child's class is a JUCE window's: "JUCE_" and a number in hex, which JUCE makes from the
--- clock when a plug-in's code first puts a window on the screen, so it differs from one plug-in —
--- and one load — to the next, and only the shape can be matched. How sure: it is JUCE's own
--- naming, the shape of ON:EAR's JUCE_1a05739a091 in this repository, and Avenger is a JUCE
--- plug-in by the project's account (it names JUCE's hover hit-testing); but nobody has looked at
--- an Avenger in a Windows DAW, so whether its editor is that child, and the only one, is a Windows
--- session's to say (TODO.md). Every JUCE plug-in has such a window, which is why `identify` — the
--- header read, header.luau — says whose it is, there as on a Mac's panel.
+-- That child's class is not a JUCE window's, as this module first assumed: the first Avenger seen
+-- in a Windows DAW (2026-10-30, the VST3 in REAPER's FX chain, the window probe's lines) had
+-- KalliGuiWin18360-000000000D72C850, inside REAPER's reaperPluginHostWrapProc, and the keyboard
+-- in it, so "^JUCE_%x+$" never matched and the overlay never came up. Only the prefix is matched:
+-- the number and the hex after it look like a build and an address, which a second load or
+-- release need not repeat. Any plug-in made with the same toolkit has such a window, which is why
+-- `identify` — the header read, header.luau — says whose it is, there as on a Mac's panel.
 local BINDING = O.embedded({
   hosts = daw.all,
-  control = { windows = "^JUCE_%x+$" },
+  control = { windows = "^KalliGuiWin" },
   identify = H.identify,
 }, { slot = SLOT })
 
