@@ -715,17 +715,14 @@ fn show_built(sh: &Rc<Shared>, id: u64, label: &str, focus: bool, avoid: Option<
         (Some(a), Some(_)) if open_app && shown.is_err() => {
             format!(", left where it was (no room beside {},{} {}x{})", a.x, a.y, a.w, a.h)
         }
-        (Some(a), Some(covered)) => {
-            let area = (i64::from(a.w) * i64::from(a.h)).max(1);
-            format!(
-                ", OVER {}% of {},{} {}x{} (no room beside it)",
-                covered * 100 / area,
-                a.x,
-                a.y,
-                a.w,
-                a.h
-            )
-        }
+        (Some(a), Some(covered)) => format!(
+            ", OVER {}% of {},{} {}x{} (no room beside it)",
+            over_share(covered, i64::from(a.w) * i64::from(a.h)),
+            a.x,
+            a.y,
+            a.w,
+            a.h
+        ),
         (Some(a), None) => format!(", beside {},{} {}x{}", a.x, a.y, a.w, a.h),
         (None, _) => String::new(),
     };
@@ -778,6 +775,15 @@ fn show_built(sh: &Rc<Shared>, id: u64, label: &str, focus: bool, avoid: Option<
 fn show_built(_: &Rc<Shared>, _: u64, _: &str, _: bool, _: Option<Rect>) -> (bool, Option<HostError>) {
     // `on_show` never answers `Show` where no page can be built.
     (false, Some(Refusal::Unsupported.error()))
+}
+
+/// How much of the rectangle to avoid the page covers, for the show's line: the share of `area`
+/// that `covered` is, in per cent with one decimal — a page over 15,075 of 1,632,347 pixels is over
+/// 0.9 % of it, which the whole per cent of integer division said as 0 (the second Windows session,
+/// 2026-10-31). An area of 0 is taken as 1. Pure.
+#[cfg(any(windows, target_os = "macos", test))]
+fn over_share(covered: i64, area: i64) -> String {
+    format!("{:.1}", covered as f64 * 100.0 / area.max(1) as f64)
 }
 
 /// The foreground window, for a log line: the page itself, or another window by its id.
@@ -1513,6 +1519,20 @@ mod tests {
 
     fn opts(lua: &Lua, src: &str) -> Value {
         lua.load(src).eval().unwrap()
+    }
+
+    /// The share of the rectangle a page is over, as the show's line says it: one decimal, so a
+    /// share under one per cent is not said as none.
+    #[test]
+    fn the_share_a_page_is_over_has_one_decimal() {
+        assert_eq!(over_share(15_075, 1_632_347), "0.9");
+        assert_eq!(over_share(1, 1_000_000), "0.0");
+        assert_eq!(over_share(115_200, 1_920 * 1_080), "5.6");
+        assert_eq!(over_share(50, 100), "50.0");
+        assert_eq!(over_share(100, 100), "100.0");
+        assert_eq!(over_share(7, 0), "700.0", "an area of 0 taken as 1");
+        let line = crate::ocr_wiring_tests::body(include_str!("webview_lua.rs"), "fn show_built(sh: &Rc<Shared>");
+        assert!(line.contains("over_share(covered, i64::from(a.w) * i64::from(a.h)),"), "{line}");
     }
 
     #[test]

@@ -45,6 +45,10 @@ pub struct StubBackend {
     input_taken: Cell<Option<std::time::Instant>>,
     /// How many `host.element` questions reached this backend (`element_ask`).
     element_asks: Cell<u32>,
+    /// What `display_scaling` answers once a test set it; until then that this build has none.
+    scaling: Cell<Option<super::DisplayScaling>>,
+    /// Every place `display_scaling` was asked about, in order.
+    scaling_asked: RefCell<Vec<super::ScalingAt>>,
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -131,6 +135,16 @@ impl StubBackend {
     pub(crate) fn element_asks(&self) -> u32 {
         self.element_asks.get()
     }
+
+    /// Answers `display_scaling` with `s` from now on, or as this build does with none (`None`).
+    pub(crate) fn set_scaling(&self, s: Option<super::DisplayScaling>) {
+        self.scaling.set(s);
+    }
+
+    /// The places `display_scaling` was asked about since the last call, in order.
+    pub(crate) fn take_scaling_asked(&self) -> Vec<super::ScalingAt> {
+        std::mem::take(&mut *self.scaling_asked.borrow_mut())
+    }
 }
 
 impl Backend for StubBackend {
@@ -156,6 +170,12 @@ impl Backend for StubBackend {
 
     fn screen_size(&self) -> (i32, i32) {
         (0, 0)
+    }
+
+    // No display here: no scaling, unless a test set one.
+    fn display_scaling(&self, at: super::ScalingAt) -> Result<super::DisplayScaling, HostError> {
+        self.scaling_asked.borrow_mut().push(at);
+        self.scaling.get().ok_or_else(|| HostError::of(&common::NOT_YET))
     }
 
     // The source is accepted and ignored here, as on macOS: there is only one way of reading

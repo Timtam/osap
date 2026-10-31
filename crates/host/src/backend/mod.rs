@@ -62,6 +62,11 @@ mod uia;
 /// for. See the file.
 #[cfg(windows)]
 mod click_win;
+/// A single click held out of a double-click — `host.input.click`'s `clicks = 1` through the
+/// input, where Windows would pair its press with the host's last press of the button — on the
+/// host's `input-gesture` thread, and the record of that last press. See the file.
+#[cfg(windows)]
+mod held_click;
 /// A double-click made as one gesture — `host.input.click`'s `clicks = 2` — on the host's
 /// `input-gesture` thread: the order and the timing of its two pairs, shared by both platforms'
 /// hands, and its log line. Pure apart from the hand; see the file.
@@ -1320,6 +1325,24 @@ impl FocusBounds {
     }
 }
 
+/// What `host.screen.scaling` asks about ([`Backend::display_scaling`]): the monitor that holds a
+/// point on the screen, or the one a window is on, by the window's id as `host.window` gives it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScalingAt {
+    Point(i32, i32),
+    Window(isize),
+}
+
+/// The display scaling there, as `host.screen.scaling` answers it: `scale`, the monitor's — the
+/// factor a program aware of each monitor's DPI draws at there; `system`, the system's — the one a
+/// program aware of the system's DPI only draws at on every monitor. Each is a DPI over 96 on
+/// Windows (106 / 96 for a custom 110 %), and 1 on a Mac.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DisplayScaling {
+    pub scale: f64,
+    pub system: f64,
+}
+
 /// Mouse button for input synthesis.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MouseButton {
@@ -1845,6 +1868,18 @@ pub trait Backend {
         Err(HostError::of(&common::NOT_YET))
     }
 
+    /// `host.input.click` once through the system's input (`via = "input"`, `clicks = 1`), its part
+    /// on the event loop, after its `window`'s check: `None` when the click is made now, as ever;
+    /// otherwise the job that makes it later, for the host's `input-gesture` thread. Windows: a
+    /// click inside the double-click time and rectangle of the host's last press of the button,
+    /// which Windows would take for a double-click's second press, made once that time has passed —
+    /// and every click asked for while such a click is still on its way, behind it
+    /// (`held_click.rs`). Local calls only. The default, a Mac's among them — whose clicks carry
+    /// their click state, 1 for a single click — holds none.
+    fn held_click(&self, _x: i32, _y: i32, _button: MouseButton) -> Option<ActJob> {
+        None
+    }
+
     /// The job that gives back their activation — takes the no-activate style off again — to the
     /// windows `when` ends, for the same thread as the clicks, after them; `why` for the log.
     /// `None` when no window holds the style and no click that gives it is on its way, which is
@@ -1920,6 +1955,16 @@ pub trait Backend {
 
     /// Size of the primary display in pixels.
     fn screen_size(&self) -> (i32, i32);
+
+    /// `host.screen.scaling`: the display scaling of the monitor that holds a point, or of the one
+    /// a window is on ([`ScalingAt`]) — on Windows that monitor's effective DPI and the system DPI,
+    /// each over 96; on a Mac 1 and 1, as every coordinate there is in points. Local calls, on the
+    /// event loop: nothing is asked of any program. `Err` with what the module is told — on Windows
+    /// a window handle that names no window, `common::WINDOW_GONE`. The default is a platform
+    /// without it, `common::NOT_YET`.
+    fn display_scaling(&self, _at: ScalingAt) -> Result<DisplayScaling, HostError> {
+        Err(HostError::of(&common::NOT_YET))
+    }
 
     /// A pointer to the stateless screen-capture routine, so a worker thread can capture without
     /// holding the (`Rc`, non-`Send`) backend: each region captured through the source, or why it

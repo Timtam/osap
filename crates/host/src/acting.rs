@@ -49,7 +49,8 @@ pub(crate) enum Lane {
     /// One thread, so a style is given back only after every click handed over before.
     Style = 0,
     /// Gestures timed as they are made: a double-click (`clicks = 2`), its waits on this thread,
-    /// one gesture after the other.
+    /// one gesture after the other — and on Windows a single click held out of a double-click,
+    /// which waits here for the double-click time to pass (backend/held_click.rs).
     Gesture = 1,
 }
 

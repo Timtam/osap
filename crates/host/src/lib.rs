@@ -8771,6 +8771,20 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
             Ok(t)
         })?,
     )?;
+    // host.screen.scaling(x, y) | host.screen.scaling(win) -> { scale, system } | nil, err — the
+    // display scaling of the monitor that holds a point, or of the one a window is on: on Windows
+    // that monitor's effective DPI and the system DPI, each over 96; 1 and 1 on a Mac, whose
+    // coordinates are points (the maintainer's D5 of 2026-10-31, for TODO.md's item on a misread
+    // zoom caption: a factor learned from what a program draws is its own only where the display
+    // scaling is known). Local calls, on the event loop (`screen_scaling`).
+    let sh = shared.clone();
+    screen.set(
+        "scaling",
+        lua.create_function(move |lua, args: mlua::MultiValue| {
+            host_call!("host.screen.scaling");
+            screen_scaling(lua, &*sh.backend, args)
+        })?,
+    )?;
     // host.screen.profile{ region = {x1,y1,x2,y2}, axes = "both"|"columns"|"rows" }
     //   -> { x, y, w, h, columns = {min,max,mean,r,g,b}, rows = {…}, time, inputEpoch }  |  nil
     //
@@ -9009,6 +9023,18 @@ fn install_host_api(lua: &Lua, shared: &Rc<Shared>, idx: usize) -> Result<Table>
                         // What the platform writes of the click before it goes (a Mac: the window at
                         // the point and whether it is the one the click is for).
                         sh.backend.note_click(x, y, c.window);
+                        // A click Windows would take for a double-click's second press — inside the
+                        // double-click time and rectangle of the host's last press of the button — is
+                        // made on the input-gesture thread once that time has passed, and so is one
+                        // asked for while such a click is still on its way, behind it
+                        // (backend/held_click.rs; the maintainer's D4 of 2026-10-31). Answered at once;
+                        // the outcome decides what the module holds once it is known, and goes to the
+                        // callback, as a double-click's does.
+                        if let Some(job) = sh.backend.held_click(x, y, button) {
+                            let release = acting::Release { idx, button, presses: sh.presses_of(idx) };
+                            sh.acting.run_releasing(acting::Lane::Gesture, job, answer, release);
+                            return acting::outcome_values(lua, Ok(()));
+                        }
                         let made = sh.backend.mouse_click(x, y, button);
                         // Its own release lets go of a button held down before it; one not made
                         // leaves it as it was, and a press left down is held (`after_release`).
@@ -10643,6 +10669,57 @@ pub(crate) fn pixel_coords(lua: &Lua, x: &mlua::Value, y: &mlua::Value) -> mlua:
     Ok((coord(x, "x")?, coord(y, "y")?))
 }
 
+/// What `host.screen.scaling` is asked about, from its arguments: a table is a window — a window
+/// or a control table, or any table with the window's `id`, which alone is read, cut toward zero —
+/// and two numbers are a point, converted as `pixel(x, y)`'s are. Anything else raises, naming what
+/// it got, and so does anything after the window or the point.
+pub(crate) fn scaling_at(lua: &Lua, args: &[mlua::Value]) -> mlua::Result<backend::ScalingAt> {
+    const F: &str = "host.screen.scaling";
+    let arg = |i: usize| args.get(i).cloned().unwrap_or(mlua::Value::Nil);
+    let raise = |m: String| Err(mlua::Error::external(format!("{F}: {m}")));
+    let (at, used) = match arg(0) {
+        mlua::Value::Table(t) => {
+            let id = t.get::<mlua::Value>("id")?;
+            match <i64 as mlua::FromLua>::from_lua(id.clone(), lua) {
+                Ok(id) => (backend::ScalingAt::Window(id as isize), 1),
+                Err(_) => return raise(format!("the window's id must be a number, got {}", describe_value(&id))),
+            }
+        }
+        x @ (mlua::Value::Integer(_) | mlua::Value::Number(_) | mlua::Value::String(_)) => {
+            let coord = |v: &mlua::Value, name: &str| {
+                <i32 as mlua::FromLua>::from_lua(v.clone(), lua).map_err(|_| {
+                    mlua::Error::external(format!(
+                        "{F}: {name} must be a number within the coordinate range (-2147483648 to 2147483647), got {}",
+                        describe_value(v)
+                    ))
+                })
+            };
+            (backend::ScalingAt::Point(coord(&x, "x")?, coord(&arg(1), "y")?), 2)
+        }
+        other => return raise(format!("takes a point, x and y, or a window table, not {}", describe_value(&other))),
+    };
+    if let Some(more) = args.get(used..).and_then(|rest| rest.iter().find(|v| !v.is_nil())) {
+        let what = if used == 1 { "the window" } else { "the point" };
+        return raise(format!("takes nothing after {what}, got {}", describe_value(more)));
+    }
+    Ok(at)
+}
+
+/// `host.screen.scaling`'s answer: `{ scale, system }`, a new table — or `nil, err` with what the
+/// platform could not say. A mistake in the arguments raises first ([`scaling_at`]).
+pub(crate) fn screen_scaling(lua: &Lua, backend: &dyn Backend, args: mlua::MultiValue) -> mlua::Result<mlua::MultiValue> {
+    let args = args.into_vec();
+    match backend.display_scaling(scaling_at(lua, &args)?) {
+        Ok(s) => {
+            let t = lua.create_table()?;
+            t.set("scale", s.scale)?;
+            t.set("system", s.system)?;
+            Ok(mlua::MultiValue::from_vec(vec![mlua::Value::Table(t)]))
+        }
+        Err(e) => errors_lua::with_error(lua, mlua::Value::Nil, &e),
+    }
+}
+
 /// The error of a capture that came back smaller than it said it was — which a backend should
 /// never do, and a binding must not index past.
 pub(crate) fn short_capture() -> HostError {
@@ -11678,7 +11755,7 @@ mod focus_step_binding_tests {
 /// moves, rather than silently when the rule goes.
 #[cfg(test)]
 mod ocr_wiring_tests {
-    use super::{one_value, pixel_coords, region, region_arg_on, with_reason};
+    use super::{one_value, pixel_coords, region, region_arg_on, scaling_at, screen_scaling, with_reason};
     use crate::save::png_path_only;
     use mlua::Lua;
 
@@ -12382,6 +12459,61 @@ mod ocr_wiring_tests {
         }
         let pixel = body(SNAP, "pub(crate) fn pixel_args(");
         assert!(pixel.contains("crate::pixel_coords(lua, a, b)?"), "host.screen.pixel reads its numbers another way");
+    }
+
+    /// `host.screen.scaling`: a table is a window, its `id` alone read; two numbers are a point, read
+    /// as `pixel(x, y)` reads them; anything else raises, naming what it got, and so does anything
+    /// after the window or the point. The answer is a new table `{ scale, system }`, or `nil, err`
+    /// with the platform's error — the build for other systems has none — and the backend is asked
+    /// about exactly the place given. Registered under its name, and asked nothing else.
+    #[test]
+    fn scaling_reads_a_point_or_a_window_and_answers_a_table_or_why_not() {
+        use crate::backend::{DisplayScaling, ScalingAt};
+        let lua = Lua::new();
+        let args = |src: &str| -> Vec<mlua::Value> { lua.load(format!("return {src}")).eval::<mlua::MultiValue>().unwrap().into_vec() };
+        for (src, want) in [
+            ("10, 20", ScalingAt::Point(10, 20)),
+            ("1.9, -2.7", ScalingAt::Point(1, -2)),
+            ("'12', '34'", ScalingAt::Point(12, 34)),
+            ("{ id = 655430 }", ScalingAt::Window(655430)),
+            ("{ id = 70, class = 'KalliGuiWin', client = { x = 248, y = 60, w = 1394, h = 898 } }", ScalingAt::Window(70)),
+            ("{ id = 70 }, nil", ScalingAt::Window(70)),
+            ("10, 20, nil", ScalingAt::Point(10, 20)),
+        ] {
+            assert_eq!(scaling_at(&lua, &args(src)).unwrap(), want, "{src}");
+        }
+        for (src, want) in [
+            ("10", "y must be a number within the coordinate range (-2147483648 to 2147483647), got nothing"),
+            ("1e10, 0", "x must be a number within the coordinate range (-2147483648 to 2147483647), got 10000000000"),
+            ("{}", "the window's id must be a number, got nothing"),
+            ("{ id = 'w' }", "the window's id must be a number, got the string \"w\""),
+            ("true", "takes a point, x and y, or a window table, not a boolean"),
+            ("nil", "takes a point, x and y, or a window table, not nothing"),
+            ("{ id = 70 }, 5", "takes nothing after the window, got 5"),
+            ("10, 20, {}", "takes nothing after the point, got a table"),
+        ] {
+            let e = scaling_at(&lua, &args(src)).expect_err(src).to_string();
+            assert!(e.contains(&format!("host.screen.scaling: {want}")), "{src}: {e}");
+        }
+        let stub = crate::backend::stub::StubBackend::default();
+        let answer = |src: &str| screen_scaling(&lua, &stub, mlua::MultiValue::from_vec(args(src))).unwrap().into_vec();
+        let none = answer("100, 200");
+        assert_eq!(none.len(), 2);
+        assert!(none[0].is_nil());
+        lua.globals().set("err", none[1].clone()).unwrap();
+        assert!(lua.load("return err.code == 'not_supported' and tostring(err) == 'not supported on this platform yet'").eval::<bool>().unwrap());
+        stub.set_scaling(Some(DisplayScaling { scale: 1.25, system: 1.0 }));
+        let got = answer("{ id = 70 }");
+        assert_eq!(got.len(), 1, "one value, nothing after it");
+        lua.globals().set("s", got[0].clone()).unwrap();
+        assert!(lua.load("return s.scale == 1.25 and s.system == 1").eval::<bool>().unwrap());
+        assert_eq!(stub.take_scaling_asked(), [ScalingAt::Point(100, 200), ScalingAt::Window(70)]);
+        assert!(screen_scaling(&lua, &stub, mlua::MultiValue::from_vec(args("true"))).is_err());
+        assert!(stub.take_scaling_asked().is_empty(), "a mistake asks nothing");
+        let api = body(LIB, "fn install_host_api(");
+        let scaling = bindings(api, "screen").into_iter().find(|b| b.0 == "scaling").expect("host.screen.scaling").1;
+        assert!(scaling.contains("host_call!(\"host.screen.scaling\");"));
+        assert!(scaling.contains("screen_scaling(lua, &*sh.backend, args)"));
     }
 
     /// The older calls answer as they always did when they look — ONE value, nothing after it —

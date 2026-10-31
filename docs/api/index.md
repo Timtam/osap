@@ -5,7 +5,7 @@ sidebar_position: 0
 
 # All functions
 
-Every call the platform offers a module, in one place. 243 entries.
+Every call the platform offers a module, in one place. 244 entries.
 
 A module reaches the host through the global `host` table, which is always there. The overlay is a module like any other and is imported: `local O = host.require("com.platform.overlay")`.
 
@@ -277,6 +277,7 @@ Reading pixels, profiling a region, reducing one to a grid of cells, and finding
 | [`host.screen.profile(opts?, cb?)`](screen#host-screen-profile) | Takes **one** capture of `opts.region` and reduces each of its columns and rows to a few statistics |
 | [`host.screen.save(path, opts?, cb?)`](screen#host-screen-save) | Captures `opts.region` and writes it to `path` as a PNG |
 | [`host.screen.saveMarked(path, opts, cb?)`](screen#host-screen-savemarked) | Everything `save` does |
+| [`host.screen.scaling(x, y)`](screen#host-screen-scaling) | The display scaling of the monitor that holds the point `(x, y)`, or of the one the window `win` is on |
 | [`host.screen.size()`](screen#host-screen-size) | Returns the primary screen dimensions in pixels as `{ w, h }`. |
 | [`host.screen.snapshot(opts, cb?)`](screen#host-screen-snapshot) | Takes one picture of `opts.region` now and keeps it |
 | [`host.screen.template(spec, cb?)`](screen#host-screen-template) | Builds a template in memory, for every search below to take wherever it takes a path. |

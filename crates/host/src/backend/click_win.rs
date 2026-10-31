@@ -622,8 +622,12 @@ pub(super) fn refusal_line(window: isize, x: i32, y: i32, why: &str) -> String {
 
 /// On the thread: the style given — or found already given, by this application or by the
 /// program itself — and the click made, as a real one: the pointer to the point, the button
-/// pressed and released.
+/// pressed and released. First, on this thread, the wait every single click through the input
+/// makes where Windows would take it for a double-click's second press (held_click.rs, the
+/// maintainer's D4 of 2026-10-31) — before the window is looked at, so what is looked at is the
+/// window as it is when the click is made.
 fn hold_and_click(who: &Identity, front: isize, owner: usize, x: i32, y: i32, button: MouseButton) -> Result<(), HostError> {
+    super::held_click::wait_here(x, y, button);
     if !who.still_there() {
         return Err(HostError::of(&WINDOW_GONE));
     }

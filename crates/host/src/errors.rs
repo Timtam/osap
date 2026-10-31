@@ -160,7 +160,18 @@ pub mod common {
     pub const NOT_YET: Reason = Reason {
         code: Code::NotSupported,
         message: "not supported on this platform yet",
-        entries: &["page-show", "page-prepare", "page-focus", "page-post", "host-window-focus", "host-element-press", "host-input-click", "host-input-send", "host-input-post"],
+        entries: &[
+            "page-show",
+            "page-prepare",
+            "page-focus",
+            "page-post",
+            "host-window-focus",
+            "host-element-press",
+            "host-input-click",
+            "host-input-send",
+            "host-input-post",
+            "host-screen-scaling",
+        ],
     };
     /// The system would not bring the window to the front.
     pub const DECLINED: Reason = Reason {
@@ -172,7 +183,7 @@ pub mod common {
     pub const WINDOW_GONE: Reason = Reason {
         code: Code::Gone,
         message: "the window is gone",
-        entries: &["host-element-press", "host-input-click", "host-input-post"],
+        entries: &["host-element-press", "host-input-click", "host-input-post", "host-screen-scaling"],
     };
 }
 
@@ -840,6 +851,11 @@ pub mod screen {
     pub const SAVE_UNWRITTEN: Reason = Reason { code: Code::Failed, message: "screen.save '…': …", entries: &["host-screen-save"] };
     pub const SAVE_MARKED_UNWRITTEN: Reason = Reason { code: Code::Failed, message: "screen.saveMarked '…': …", entries: &["host-screen-savemarked"] };
 
+    /// host.screen.scaling on Windows: the monitor's DPI not given — `GetDpiForMonitor` failed, with
+    /// its HRESULT, or no monitor was named at all, which `MONITOR_DEFAULTTONEAREST` never does on a
+    /// desktop with one. Never seen.
+    pub const SCALING_UNREAD: Reason = Reason { code: Code::Failed, message: "Windows did not give the display's DPI (…)", entries: &["host-screen-scaling"] };
+
     // Never handed to a module.
     /// The answer of a branch no request takes — a picture for a points request, a profile's
     /// reduction for a snapshot: never reaches a module.
@@ -1131,6 +1147,7 @@ pub static REASONS: &[&Reason] = &[
     &screen::TEMPLATE_UNREADABLE,
     &screen::SAVE_UNWRITTEN,
     &screen::SAVE_MARKED_UNWRITTEN,
+    &screen::SCALING_UNREAD,
     &screen::INTERNAL,
     &screen::NOT_WAITED,
     &ocr::CROP_OUTSIDE,

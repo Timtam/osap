@@ -240,6 +240,14 @@ impl Backend for MacBackend {
         capture::screen_size()
     }
 
+    /// 1 and 1, wherever it is asked (the maintainer's D5 of 2026-10-31): every coordinate here is
+    /// in points, and so is what a program draws — a Retina display's two pixels per point lie
+    /// below anything a coordinate addresses. Nothing is asked of the system, and the window is
+    /// not looked up.
+    fn display_scaling(&self, _at: crate::backend::ScalingAt) -> Result<crate::backend::DisplayScaling, HostError> {
+        Ok(crate::backend::DisplayScaling { scale: 1.0, system: 1.0 })
+    }
+
     // The capture source is accepted and ignored on this platform. `[screen] capture =
     // "duplication"` names a Windows mechanism; here every read keeps going through
     // ScreenCaptureKit or CoreGraphics exactly as it did before the key existed, and the host

@@ -22,7 +22,7 @@ The matching, unlike the capture, does grow with the area. A template search acr
 
 **The matching runs on a pool of threads**, one per logical processor, which the image worker hands each batch to once it has captured the batch's frames: the matches, the reductions, the copies and templates cut from a picture, and a shot's marks, PNG encode and file write all run there, every read of the batch at once, and the worker waits for the pool to finish them before it takes the next batch. Only the captures and the opening of the batch's templates run on the worker itself; wherever this page says other work runs on the image worker, it runs on this pool — the picture of a `template` from bytes or a file too, when its own task makes it. On Windows the worker and the pool's threads run **below normal priority** (`THREAD_PRIORITY_BELOW_NORMAL`), set as each thread starts: while an overlay polls, the matches can keep every processor busy several times a second, and at normal priority they would compete with every other program's normal-priority threads — among them other programs' low-level keyboard hooks, which Windows calls for every key and waits for. Below normal they take what the rest of the machine leaves, so a match is as fast as before on an otherwise idle machine and waits behind other programs' work on a busy one. The application's own keyboard hook runs on a thread of its own at the highest normal priority. On macOS both run at the default priority.
 
-**Coordinates are device pixels on Windows and points on macOS.** The application declares per-monitor DPI awareness (`PerMonitorV2`), so on Windows every coordinate on this page — and on every other page — is one physical pixel of the display; on macOS it is one point. The two numbers agree only at 100 % scaling. A region measured with a tool that is **not** DPI-aware on a Windows display scaled above 100 % is in that tool's scaled units: multiply it by the scale factor (1.5 at 150 %) before using it here. See [`host.screen.size`](#host-screen-size).
+**Coordinates are device pixels on Windows and points on macOS.** The application declares per-monitor DPI awareness (`PerMonitorV2`), so on Windows every coordinate on this page — and on every other page — is one physical pixel of the display; on macOS it is one point. The two numbers agree only at 100 % scaling. A region measured with a tool that is **not** DPI-aware on a Windows display scaled above 100 % is in that tool's scaled units: multiply it by the scale factor (1.5 at 150 %) before using it here. See [`host.screen.size`](#host-screen-size), and [`host.screen.scaling`](#host-screen-scaling) for the scale factor of the monitor at a point or a window.
 
 **What a call answers when it cannot.** Every call below has a **Returns** and an **Errors** section ([Reading an Errors table](./errors.md#reading-an-errors-table)). When a read gets no picture, or its work fails, the call answers an error value, `{ code, message, detail? }`, after what it answers when it could not look: `nil`, `{}` for `imageSearchAll`, `false` for a shot. **No call on this page answers a value and an error value together**: an error value always means that nothing was read. Compare `err.code` with a constant, never the message: a message may change between versions, and the code does not. The reasons many calls share are written once, under [Failure reasons](#failure-reasons). Besides the raises each entry lists, any call here can raise two more: the capability gate, when the module did not declare `screen` ([What to declare](#declare)), and the guard's `stopped by the host: …`, when the module has run too long ([the limits](../module-runtime-and-lifecycle.md#limits)).
 
@@ -972,6 +972,56 @@ None. It never answers an error value. It never raises.
 **Points.** The same panel reports 1920x1080 on a Retina Mac; a capture is downsampled so that one pixel of a captured image is one point, and no coordinate can address a single backing pixel.
 
 This is the difference most likely to waste a day. Coordinates and template images calibrated on a HiDPI Windows machine are exactly **twice** the numbers a Retina Mac needs, and nothing reports it — the click simply lands half a screen away.
+
+## host.screen.scaling(x, y) {#host-screen-scaling}
+
+**Signature:** `host.screen.scaling(x: number, y: number) -> (Scaling?, Error?)`, or `host.screen.scaling(win: Window) -> (Scaling?, Error?)`, where `Scaling = { scale: number, system: number }`
+
+The display scaling of the monitor that holds the point `(x, y)`, or of the one the window `win` is on: what a program's drawing is scaled by there, against this application's coordinates. On Windows, where every coordinate is a device pixel, a program that is aware of each monitor's DPI draws at its monitor's scaling — 1.5 on a monitor at 150 % — and one that is aware of the system's DPI only draws at the system's on every monitor: `scale` is the first, `system` the second. On a Mac every coordinate is a point and so is what every program draws, so both are 1. A factor a module learns from the size of what a program draws is that program's own — a plug-in's zoom — only where it knows this one; VPS Avenger takes a header it reads on its own window on Windows as the zoom alone only where both are 1.
+
+`win` is a [window table](./window.md#window-table) or a [control table](./window.md#control-table) — an overlay's origin among them — whose `id` alone is read; a table of your own with the `id` from `host.window` will do. The point is two numbers, read as [`host.screen.pixel`](#host-screen-pixel) reads its `x` and `y`. It asks the system at every call, on the event loop, and costs microseconds; nothing is asked of any program, and no picture is taken, so it needs no Screen Recording on a Mac.
+
+```luau
+-- A plug-in's own window on Windows: what its size says is its zoom alone only where nothing on
+-- the desktop is scaled. `win` is the window's table (or an overlay's origin).
+local s = host.screen.scaling(win)
+local display = (s and s.scale == 1 and s.system == 1) and 1 or nil
+
+-- The monitor under a point.
+local here, err = host.screen.scaling(1920, 540)
+if here then
+  host.log.info(string.format("%.0f %% there, %.0f %% system-wide", here.scale * 100, here.system * 100))
+else
+  host.log.info("no scaling: " .. tostring(err))
+end
+```
+
+### Returns {#host-screen-scaling-returns}
+
+- `{ scale, system }` — a new table at every call. On Windows, `scale` is the monitor's effective DPI over 96, the DPI of 100 %: 1 at 100 %, 1.25 at 125 %, 1.5 at 150 % — a custom scaling is the DPI Windows gives it over 96, so 110 % is 106 / 96 = 1.1041…, not 1.1 —, read afresh at every call, so a scaling the user changed holds from the next call on. `system` is Windows' system DPI over 96: the scaling a program aware of the system's DPI only draws at on every monitor, fixed from sign-in to sign-out whatever the scaling is changed to since (the start block's `system dpi` line). On a Mac `{ scale = 1, system = 1 }` wherever it is asked.
+- `nil, err` — the scaling could not be said; `err.code` is under Errors.
+
+### Errors {#host-screen-scaling-errors}
+
+None of these is raised.
+
+| code | arrives | when | message | platform |
+|---|---|---|---|---|
+| `gone` | return | `win.id` names no window now: `0`, a window closed since, a number made up. | `the window is gone` | Windows |
+| `failed` | return | Windows did not give the monitor's DPI: `GetDpiForMonitor` failed, its HRESULT in the brackets, or no monitor was named (`no monitor`). Never seen: every desktop has a monitor, and the nearest one is always named. | `Windows did not give the display's DPI (…)` | Windows |
+| `not_supported` | return | The build for other systems, which has no display. | `not supported on this platform yet` | other |
+
+**Raises** for a mistake in the call, each with a message that begins `host.screen.scaling: `: an `x` or `y` that is not a number within the 32-bit coordinate range — a `y` left out included (`y must be a number within the coordinate range (-2147483648 to 2147483647), got nothing`); a table whose `id` is not a number (`the window's id must be a number, got nothing`); a first argument that is neither a table nor a number (`takes a point, x and y, or a window table, not a boolean`); and anything but `nil` after the window or the point (`takes nothing after the window, got 5`). Of a table nothing but `id` is read.
+
+### Windows {#host-screen-scaling-windows}
+
+**Which monitor.** For a point the one that holds it, and for a point on no monitor the nearest one (`MonitorFromPoint`); for a window the one Windows places it on — the one that holds the largest part of its rectangle, the nearest one for a window on none (`MonitorFromWindow`, `MONITOR_DEFAULTTONEAREST`), a child window as well as a top-level one: a plug-in's own editor inside its DAW's window is on the monitor its rectangle is on. A window id is checked first (`IsWindow`): one that names no window answers `gone`. `scale` is that monitor's `GetDpiForMonitor(MDT_EFFECTIVE_DPI)` as this application, per-monitor aware, reads it — the scaling set in Windows Settings for that monitor now; `system` is `GetDpiForSystem`.
+
+**Neither says at which scaling a given window draws.** A per-monitor aware window draws at `scale`; a system-aware one draws at `system` on every monitor and Windows stretches it by `scale` over `system`; one that is not aware of DPI at all draws at 1 and is stretched by `scale`; and a DAW can host a plug-in's window in another awareness than its own. Where both are 1 — the monitor at 100 % and the system DPI 96 — every kind draws at 1. Local calls into user32 and the shell's scaling API, microseconds; nothing is sent to any window.
+
+### macOS {#host-screen-scaling-macos}
+
+`{ scale = 1, system = 1 }`, wherever it is asked: every coordinate is in points, and so is what a program draws. A Retina display's two pixels per point lie below anything a coordinate here addresses, as a capture is downsampled to one pixel per point (see [`host.screen.size`](#host-screen-size-macos)). Nothing is asked of the system, and the window is not looked up: an id of a window gone answers the same, never `gone`.
 
 ## host.screen.profile(opts?, cb?) {#host-screen-profile}
 

@@ -1156,6 +1156,20 @@ fn percent(dpi: u32) -> String {
     format!("{}%", (dpi as f32 / 96.0 * 100.0).round() as i32)
 }
 
+/// What `host.screen.scaling` answers on Windows (the maintainer's D5 of 2026-10-31): `monitor`,
+/// the monitor's effective DPI as `GetDpiForMonitor` gave it — or what was answered instead — and
+/// `system`, the system DPI `GetDpiForSystem` gives, each over 96, the DPI of 100 %. A DPI of 0,
+/// which neither gives, is a DPI not given. Pure.
+fn scaling_of(monitor: Result<u32, String>, system: u32) -> Result<super::DisplayScaling, HostError> {
+    let unread = |why: String| HostError::with(&errors::screen::SCALING_UNREAD, format!("Windows did not give the display's DPI ({why})"));
+    match (monitor, system) {
+        (Err(why), _) => Err(unread(why)),
+        (Ok(0), _) => Err(unread("GetDpiForMonitor answered 0".to_string())),
+        (_, 0) => Err(unread("GetDpiForSystem answered 0".to_string())),
+        (Ok(dpi), system) => Ok(super::DisplayScaling { scale: f64::from(dpi) / 96.0, system: f64::from(system) / 96.0 }),
+    }
+}
+
 /// A monitor as (left, top, right, bottom) in physical pixels, and its effective DPI now.
 type MonitorDpi = ((i32, i32, i32, i32), Option<u32>);
 
@@ -1458,6 +1472,13 @@ impl Backend for WindowsBackend {
         Ok(super::double_click::job(x, y, button, "counted by Windows", interval, move || WinHand { x, y, button, owed: false }))
     }
 
+    /// A single click Windows would pair with the host's last press of the button into a
+    /// double-click, or one behind such a click still on its way: the job that makes it once the
+    /// double-click time has passed (`held_click.rs`).
+    fn held_click(&self, x: i32, y: i32, button: MouseButton) -> Option<super::ActJob> {
+        super::held_click::held_job(x, y, button)
+    }
+
     fn give_back_activation(&self, when: super::GiveBackWhen, why: &str) -> Option<super::ActJob> {
         let rule = match when {
             super::GiveBackWhen::Stopped(idx) => super::click_win::GiveBack::Owner(idx),
@@ -1533,6 +1554,44 @@ impl Backend for WindowsBackend {
 
     fn screen_size(&self) -> (i32, i32) {
         unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) }
+    }
+
+    /// The monitor that holds the point — the nearest one for a point on none — or the one Windows
+    /// places the window on, which holds the largest part of its rectangle (the nearest for a window
+    /// on none), a child window's as well: its effective DPI as this per-monitor aware application
+    /// reads it, the monitor's scaling now, and the system DPI ([`scaling_of`]). Local calls,
+    /// microseconds; a handle that names no window is the window gone.
+    fn display_scaling(&self, at: super::ScalingAt) -> Result<super::DisplayScaling, HostError> {
+        use windows_sys::Win32::Graphics::Gdi::{MonitorFromPoint, MonitorFromWindow, MONITOR_DEFAULTTONEAREST};
+        use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
+        // SAFETY: local queries; a window handle is checked before it is passed on, and a stale one
+        // fails the calls rather than misbehave.
+        let monitor = unsafe {
+            match at {
+                super::ScalingAt::Point(x, y) => MonitorFromPoint(POINT { x, y }, MONITOR_DEFAULTTONEAREST),
+                super::ScalingAt::Window(id) => {
+                    let w = id as HWND;
+                    if w.is_null() || IsWindow(w) == 0 {
+                        return Err(HostError::of(&errors::common::WINDOW_GONE));
+                    }
+                    MonitorFromWindow(w, MONITOR_DEFAULTTONEAREST)
+                }
+            }
+        };
+        let dpi = if monitor.is_null() {
+            Err("no monitor".to_string())
+        } else {
+            let (mut dx, mut dy) = (0u32, 0u32);
+            // SAFETY: the monitor handle just named; two out-parameters.
+            let hr = unsafe { GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dx, &mut dy) };
+            if hr < 0 {
+                Err(format!("GetDpiForMonitor answered 0x{:08x}", hr as u32))
+            } else {
+                Ok(dx)
+            }
+        };
+        // SAFETY: a read of the session's system DPI.
+        scaling_of(dpi, unsafe { GetDpiForSystem() })
     }
 
     fn capture_fn(&self) -> CaptureFn {
@@ -1617,6 +1676,7 @@ impl Backend for WindowsBackend {
         place(x1, y1)?;
         send_inputs(&[(motion_input(x1, y1, virtual_desk()), Holds::Neither), (mouse_input(down, 0), Holds::Down(held))], &[])
             .answer()?;
+        super::held_click::note_press(button, x1, y1);
         let stepped = drag_steps((x1, y1), (x2, y2), |at| {
             let taken = send_inputs(&[(motion_input(at.0, at.1, virtual_desk()), Holds::Neither)], &[]).answer();
             if taken.is_ok() {
@@ -1635,6 +1695,7 @@ impl Backend for WindowsBackend {
         place(x, y)?;
         send_inputs(&[(mouse_input(down, 0), Holds::Down(button_code(button)))], &[]).answer()?;
         note_button(button, true);
+        super::held_click::note_press(button, x, y);
         Ok(())
     }
 
@@ -4632,10 +4693,11 @@ fn place(x: i32, y: i32) -> Result<(), HostError> {
     Err(HostError::with(&errors::input::NOT_PLACED, format!("Windows did not put the pointer there (error {e})")))
 }
 
-/// `host.input.click` through the system's input, on the event loop or click_win.rs's thread: the
-/// pointer placed, then the press and the release in one `SendInput`. Placed nowhere, or the press
-/// not taken, nothing is clicked; a press Windows took without its release has the release sent on
-/// its own ([`released`]).
+/// `host.input.click` through the system's input, on the event loop, click_win.rs's thread or the
+/// gesture thread (held_click.rs): the pointer placed, then the press and the release in one
+/// `SendInput`. Placed nowhere, or the press not taken, nothing is clicked; a press Windows took
+/// without its release has the release sent on its own ([`released`]). A press that went out is
+/// the host's last press, which the next single click is measured against (held_click.rs).
 pub(super) fn click_input(x: i32, y: i32, button: MouseButton) -> Result<(), HostError> {
     let (down, up) = button_flags(button);
     let held = button_code(button);
@@ -4644,6 +4706,7 @@ pub(super) fn click_input(x: i32, y: i32, button: MouseButton) -> Result<(), Hos
     if sent.taken == 0 {
         return sent.answer();
     }
+    super::held_click::note_press(button, x, y);
     released(button, &sent)
 }
 
@@ -4680,6 +4743,7 @@ impl super::double_click::Hand for WinHand {
         let (down, _) = button_flags(self.button);
         place(self.x, self.y)?;
         send_inputs(&[(mouse_input(down, 0), Holds::Down(button_code(self.button)))], &[]).answer()?;
+        super::held_click::note_press(self.button, self.x, self.y);
         note_button(self.button, true);
         self.owed = true;
         Ok(())
@@ -5134,6 +5198,46 @@ mod cpu_line_tests {
         assert!(line.starts_with('"') && line.contains(" cores, ") && line.ends_with(" threads"), "{line}");
         #[cfg(target_arch = "x86_64")]
         assert!(cpu_brand().is_some_and(|b| !b.is_empty() && !b.contains('\0')), "{line}");
+    }
+}
+
+/// `host.screen.scaling` on Windows: each DPI over 96, and a DPI not given said with what was
+/// answered instead.
+#[cfg(test)]
+mod scaling_tests {
+    use super::*;
+    use crate::backend::DisplayScaling;
+
+    #[test]
+    fn a_dpi_is_its_share_of_96_and_one_not_given_is_said() {
+        let s = |m: u32, sys: u32| scaling_of(Ok(m), sys).unwrap();
+        assert_eq!(s(96, 96), DisplayScaling { scale: 1.0, system: 1.0 }, "nothing scaled");
+        assert_eq!(s(120, 96), DisplayScaling { scale: 1.25, system: 1.0 });
+        assert_eq!(s(144, 144), DisplayScaling { scale: 1.5, system: 1.5 });
+        assert_eq!(s(96, 144), DisplayScaling { scale: 1.0, system: 1.5 }, "a monitor at 100 % beside a primary at 150 % at sign-in");
+        assert_eq!(s(106, 96).scale, 106.0 / 96.0, "a custom 110 % is the DPI Windows gives it, not 1.1");
+        let e = scaling_of(Err("GetDpiForMonitor answered 0x80070057".to_string()), 96).unwrap_err();
+        assert!(e.reason() == &errors::screen::SCALING_UNREAD && e.code() == crate::errors::Code::Failed);
+        assert_eq!(e.message(), "Windows did not give the display's DPI (GetDpiForMonitor answered 0x80070057)");
+        assert_eq!(scaling_of(Ok(0), 96).unwrap_err().message(), "Windows did not give the display's DPI (GetDpiForMonitor answered 0)");
+        assert_eq!(scaling_of(Ok(96), 0).unwrap_err().message(), "Windows did not give the display's DPI (GetDpiForSystem answered 0)");
+        assert_eq!(scaling_of(Err("no monitor".into()), 96).unwrap_err().message(), "Windows did not give the display's DPI (no monitor)");
+    }
+
+    /// Asked of this desktop: the monitor at the primary's origin and the desktop's own window
+    /// answer a DPI, as every session has; a handle that names no window is the window gone. Asks
+    /// nothing of any program and shows nothing.
+    #[test]
+    fn this_desktop_answers_and_a_window_gone_is_said() {
+        let b = WindowsBackend::new();
+        let point = b.display_scaling(crate::backend::ScalingAt::Point(0, 0)).expect("the primary monitor");
+        assert!(point.scale >= 1.0 && point.system >= 1.0, "{point:?}");
+        // SAFETY: a plain query.
+        let desktop = unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetDesktopWindow() };
+        assert!(b.display_scaling(crate::backend::ScalingAt::Window(desktop as isize)).is_ok());
+        for gone in [0, 0x7fff_fff0] {
+            assert_eq!(b.display_scaling(crate::backend::ScalingAt::Window(gone)), Err(HostError::of(&errors::common::WINDOW_GONE)), "{gone}");
+        }
     }
 }
 
@@ -6879,7 +6983,9 @@ mod input_answer_tests {
         assert!(drag.contains("let up = send_inputs(&[(mouse_input(up, 0), Holds::Up(held))], &[held]);\n        drag_answer(stepped, released(button, &up))"));
         assert!(drag.contains("let stepped = drag_steps((x1, y1), (x2, y2), |at| {"));
         let click = body("pub(super) fn click_input(x: i32, y: i32, button: MouseButton)");
-        assert!(click.contains("if sent.taken == 0 {\n        return sent.answer();\n    }\n    released(button, &sent)"));
+        assert!(click.contains(
+            "if sent.taken == 0 {\n        return sent.answer();\n    }\n    super::held_click::note_press(button, x, y);\n    released(button, &sent)"
+        ));
         assert!(body("fn released(button: MouseButton, sent: &Sent)").contains("note_button(button, down);"));
     }
 
