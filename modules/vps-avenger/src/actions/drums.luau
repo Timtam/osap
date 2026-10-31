@@ -25,7 +25,7 @@
 --                         and Save Drumkit as, whose file dialog is waited for (the tool wrote the
 --                         locks and moved the names in memory, and clicked the submenu after 0.08 s
 --                         whether or not anything had opened, at its item's row plus the target's,
---                         which a submenu JUCE opens upward does not have)
+--                         which a submenu opened upward, as JUCE opens one, does not have)
 --   drumkit_column        a slot's Back, Next (its name read) and Edit Sample (the selection and the
 --                         central tab read); its Browse is a hand-over (src/handover.luau)
 --   reset_drumkit_control   a double-click on a slot's Volume, Pan or Pitch: no reader reads a drum

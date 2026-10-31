@@ -113,7 +113,8 @@ G.WIDTH_AT_50_MEASURED = 871.25
 -- And about 561 points tall at 50 %: 897 at 80 % in the same log of the tester's, which is 560.6 —
 -- worked out from where Logic's header ends and its footer begins, not measured on its own. Used
 -- beside the width for the header's band only (header.luau), for a DAW that keeps its window
--- narrower than the plug-in.
+-- narrower than the plug-in. The Windows child was 894 tall at 80 % (2026-10-30), 558.75 at 50 %;
+-- left at 561 for now, since it moves the band wherever the height decides it (TODO.md).
 G.HEIGHT_AT_50 = 561
 
 -- ── Avenger's corner ─────────────────────────────────────────────────────────

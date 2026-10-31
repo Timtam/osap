@@ -3,6 +3,76 @@
 Project backlog for the cross-platform automation platform.
 Architecture and feasibility foundation: [docs/architecture-feasibility-study.md](docs/architecture-feasibility-study.md).
 
+## The first Windows session with VPS Avenger (2026-10-30)
+
+The maintainer's first session with VPS Avenger on Windows: REAPER, the VST3 in a track's FX chain,
+Avenger at 80 %, the display at 100 %, JAWS. The screen reader's screen curtain has to be off for
+captures: with it on, every picture and every read is of a blank screen. The window probe's lines
+gave the chain: REAPER's FX window (`#32770` at 24,25), an inner `#32770`, `reaperPluginHostWrapProc`
+in that, and in it Avenger's editor, `KalliGuiWin18360-000000000D72C850` at 242,129, 1394 x 894 at
+80 %. Not a JUCE window: the module's `^JUCE_%x+$` never matched, and the overlay never came up.
+
+Built 2026-10-31 on wip/avenger-kalli from the maintainer's decisions of 2026-10-30; tested
+headless, not yet run on Windows:
+
+- [x] **The class** (VPS Avenger 0.15.1): `control = { windows = "^KalliGuiWin" }` (main.luau), the
+      prefix only — the number and the hex after it look like a build and an address. The test
+      fixtures use the class the probe read.
+- [x] **A1. No read is a "no" on Avenger's own window** (header.luau; the module only, the runtime
+      untouched). The runtime keeps a verdict per control there for as long as the child lives, so a
+      first read of "Loading", a slow first paint or one read that mangled both captions kept the
+      overlay off that Avenger until the FX window was closed and opened again, which nothing told
+      the user. Now, on Avenger's own window: neither MENU nor UNDO read, blank or other text, is
+      "not yet", never `false`; `identify` raises for every "not yet", one message (`VPS Avenger's
+      header has given no verdict yet`), which the runtime takes as "could not tell yet, and not
+      counted" and logs once per control; every read that stays undecided asks for the next at once
+      through `again`; and the module bounds itself, at most 8 undecided reads per visit
+      (`VISIT_READS_MAX`, the runtime's own 8). A visit is the window in front changing — counted by
+      an onFocus callback registered at the first `identify` about Avenger's own window (a Mac never
+      registers it) and by `identify` itself — so Alt+Tab away and back reads again. `READS_MAX`
+      bounds only the re-reads of a state held as Avenger's. The cost: at most eight header reads
+      per visit to a KalliGui editor that is not Avenger; nothing for any other plug-in. The Mac
+      panel's rule is as it was. The log: `… — no verdict yet (read n of 8 in this visit)`, `8 reads
+      of the header in this visit gave no verdict …` once at the stop, `another visit — the header
+      is read again, up to 8 times` once at the re-arming. Tests (overlay_avenger_tests.rs): a first
+      "Loading" read again at once; twelve evaluations while a read is out never a "no"; a blank and
+      a half read read again through `again`; a mixed-case "Menu"/"Undo" editor read eight times a
+      visit, a moment with nothing in front no visit, and eight more after another window; a read
+      out while the user went away and back counted in the visit it landed in (the review of
+      2026-10-31: counted in the one it started in, the visit's eighth read stopped the new visit
+      before it had read once); seven undecided reads leaving a state held as Avenger's all its
+      `READS_MAX` re-reads; a Mac panel's "no" for the stay, with no callback.
+- [x] **A2. The width's factor, logged only**: on Avenger's own window the factor line adds `; by
+      the window's width <k> (<w> / 871.25), logged only` (geometry.luau `WIDTH_AT_50_MEASURED`).
+      The factor, the zoom and every refusal are as before. Not on a Mac's panel, whose width is
+      the DAW's window's.
+- [x] **A3. Clean-up**: comments and test names that took Avenger on Windows for JUCE say "a Mac
+      finding / JUCE-like, unmeasured on KalliGui" where they describe a mechanism (the behaviours
+      kept); amount.luau's warp attribution is ON:EAR's Width slider's, not Avenger's; the header's
+      log names REAPER's FX window rather than `window <id>`; `T.juce` is `T.kalliGui`.
+
+Open:
+
+- [ ] **The next Windows session's checks** (the screen curtain off; the log and the calibration
+      folder after it):
+      1. The first open: the FX window opened, the keyboard in Avenger — `attachEmbedded: matched
+         control [KalliGuiWin…] id=… identify=true` and `[avenger] 'FX: …' (1394x894): VPS
+         Avenger, the zoom field reads 80 % — zoom 80 % (read), factor 1.6000, display factor 1.00;
+         by the window's width 1.6000 (1394 / 871.25), logged only.` with the MENU and UNDO offsets
+         with and without (-2, +2); how many `no verdict yet` lines came before it.
+      2. A preset step (Next preset): the click lands, the new name said.
+      3. Zoom 80 % to 75 % and back to 80 %: the zoom list's entry chosen, the window resized, and
+         at 75 % the logged width factor — the child expected 1307 wide, give or take one.
+      4. UNDO, and its right-click list: whether the list is a window (`newWindow: a window
+         appeared …`) or painted inside (`drawn: a popup …`), and the screen reader in it.
+      5. A rename's Return: W1 below — whether REAPER hands Return to Avenger's text field.
+      6. A macro knob held from the page or the ring, Page Down twice, Return: HG1 below — whether
+         Avenger's knob follows the held press's motion, and the value read after.
+- [ ] **Avenger's height on Windows**: the child was 894 tall at 80 %, 558.75 at 50 %, against the
+      561 of `G.HEIGHT_AT_50` (from a Mac log, worked out, not measured). Left at 561, since it
+      moves the header's band wherever the height decides it; change it once a second zoom's height
+      agrees.
+
 ## The second Mac tester's log (2026-10-30)
 
 A second Mac tester's log (build c9f403f, macOS 26.6.2, Apple silicon, VoiceOver on): REAPER with
@@ -8714,7 +8784,9 @@ of it has run on either system.
       again, n of 4` lines. JUCE's quarter of a second after its popup opens is from its source as
       read for this, not measured against the JUCE Avenger ships; if JUCE ignores more than three
       clicks, the count is too small — detection all the same, never a wait. `ownsPoint` against
-      the popup's HWND: `true` expected.
+      the popup's HWND: `true` expected. Avenger's editor on Windows is a KalliGui window, not
+      JUCE's (2026-10-30, "The first Windows session with VPS Avenger", at the top): the JUCE
+      figures here are JUCE-like assumptions, unmeasured there.
 - [x] **Avenger's popups — macOS, in Logic and in REAPER.** The same questions, plus: at which
       window level; whether the popup becomes the application's focused window (then the overlay
       holds its place over it, as tested); whether a tooltip appears under the parked pointer first
@@ -8751,8 +8823,10 @@ Windows at 100, 110, 125 and 150 % display scaling); nothing of it has met a rea
 tester's stage-1 instructions are a text of their own, not in the repository.
 
 - [x] **The module.** Bound with `daw.all`: on a Mac the DAW's plug-in panel, on Windows Avenger's
-      own child window by the shape of a JUCE class (`^JUCE_%x+$`). Which plug-in and which zoom
-      are one read of Avenger's header off the event loop (`header.luau`): MENU and UNDO in
+      own child window by the shape of a JUCE class (`^JUCE_%x+$`; since 2026-10-30 by its own
+      class's prefix, `^KalliGuiWin`: "The first Windows session with VPS Avenger", at the top).
+      Which plug-in and which zoom are one read of Avenger's header off the event loop
+      (`header.luau`): MENU and UNDO in
       capitals, in boxes the recogniser located, in the table's proportion from Avenger's corner,
       and a factor that fits them say it is Avenger (never the window title; half an answer is read
       again, never a "no"); the zoom field's caption — left of where the preset's name begins — is
@@ -8828,7 +8902,8 @@ tester's stage-1 instructions are a text of their own, not in the repository.
 - [ ] **OCR of Avenger's header and name at 50 %.** The project's recogniser read "Init Preset" as
       "hit Presst" at 50 %; the tester's good reads were at 80 %. A MENU or UNDO the recogniser
       does not read (one wrong character is accepted) leaves the overlay down at that zoom — the log
-      says `not VPS Avenger — no MENU was read` or `… — read again`; a zoom field it does not read
+      says `not VPS Avenger — neither MENU nor UNDO was read` or `… — read again` on a Mac's panel,
+      and `… — no verdict yet (read n of 8 in this visit)` on Windows; a zoom field it does not read
       leaves the zoom `seen from the header's size, not read`. On Windows, captions only in the
       neural fallback's shared-out boxes are no evidence (`read only in boxes the recogniser
       guessed`) and are read again. If 50 % fails, the header band is read enlarged, or the zoom
@@ -8890,10 +8965,12 @@ tester's stage-1 instructions are a text of their own, not in the repository.
       carried over after our own popup that shows another plug-in after all is overturned by two
       reads (`not VPS Avenger after all`), but the runtime keeps a panel's verdict for the stay:
       the overlay stays up, placing nothing, until the stay ends.
-- [ ] **Windows, if an Avenger is ever there**: REAPER's FX chain and floating window, Ableton.
-      Whether Avenger's editor is a `JUCE_<hex>` child and the only one (the calibration shot's
-      roster), the header line at 100 and 150 % display scaling (`display factor 1.50`) and its
-      offsets with and without the (-2, +2), and NVDA in the redo list.
+- [ ] **Windows, now that an Avenger is there**: REAPER's FX chain and floating window, Ableton.
+      Avenger's editor is a `KalliGuiWin…` child, the only one in REAPER's
+      `reaperPluginHostWrapProc` (2026-10-30, "The first Windows session with VPS Avenger", at the
+      top). Still open: the header line at 100 and 150 % display scaling (`display factor 1.50`) and
+      its offsets with and without the (-2, +2), REAPER's floating window and Ableton, and the
+      screen reader in the redo list.
 - [x] **◀, ▶ and the redo list's right click are the module's own clicks**, with the runtime's
       checks repeated (placed through the frame and scale, inside the plug-in, `ownsPoint`),
       because a hotspot has no hook for what its click changed or that it opened a popup. A hotspot
@@ -9308,14 +9385,16 @@ Built and tested against the scripted host only (`overlay_avenger_tests.rs`,
         after Return before the page comes back, and whether it says anything there (U7).
       Send the calibration folder's `editor-<preset|osc|macro>-<before|open|end>-<zoom>pct.png`:
       they settle the editor's thresholds (`read/editor.luau`), which are starting values.
-- [ ] **Slice 6 on Windows** (there is no Avenger tester there): W1, whether REAPER hands Return to
-      a JUCE text field in a floating FX window or takes it for itself — REAPER's per-FX "Send all
-      keyboard input to plug-in" — answered by U1's lines; a verification patch on ON:EAR's JUCE
-      search field (a trip, a click into the field, a typing hand-over, Return, the field read
-      back), applied only when the maintainer asks for it. W2, NVDA has nothing to announce when
-      Avenger's editor opens (Avenger publishes no element): the rename stays silent as the tool's
-      is, the page's Rename button carrying the help — the maintainer's call (Q1) whether to say
-      "Type the new name, then press Return." on both platforms instead.
+- [ ] **Slice 6 on Windows** (the maintainer's own Avenger since 2026-10-30, "The first Windows
+      session with VPS Avenger", at the top): W1, whether REAPER hands Return to Avenger's text
+      field — in a KalliGui editor, not a JUCE one — in an FX window or takes it for itself —
+      REAPER's per-FX "Send all keyboard input to plug-in" — answered by U1's lines from a rename's
+      Return in the next Windows session. A verification patch on ON:EAR's JUCE search field (a
+      trip, a click into the field, a typing hand-over, Return, the field read back) would answer it
+      for a JUCE field only; applied only when the maintainer asks for it. W2, NVDA has nothing to
+      announce when Avenger's editor opens (Avenger publishes no element): the rename stays silent
+      as the tool's is, the page's Rename button carrying the help — the maintainer's call (Q1)
+      whether to say "Type the new name, then press Return." on both platforms instead.
 - [ ] **Residuals of slice 6**: a hover drawn over more than a tenth of a name field, standing
       still, would be taken for the editor, and the user's typing would then reach Avenger without
       a field — and in Logic, Logic's key commands (the tool has the same exposure, and checks
@@ -9388,12 +9467,15 @@ Built and tested against the scripted host only (`overlay_avenger_tests.rs`,
       units per point at 50, 100 and 200 % (the log's before and after against the net steps); GM7,
       whether the reader's rings hold at his display, from the pictures; and whether Avenger draws a
       value box over a knob while it is dragged.
-- [ ] **Slice 7 on Windows** (there is no Avenger tester there): HG1 has met no JUCE knob with a
-      held press yet — a verification patch on a JUCE plug-in the maintainer has (ON:EAR's Width or
-      Kontakt's knobs: a trip-less `mouseDown`, ten `move`s, `mouseUp`, the value read), applied
-      only when he asks for it; and NVDA's mouse tracking may now hear the injected motion — a
-      placement went past the low-level hook, motion does not — and say what lies under the pointer
-      while a drag leaves Avenger's window: listen for it.
+- [ ] **Slice 7 on Windows** (the maintainer's own Avenger since 2026-10-30, "The first Windows
+      session with VPS Avenger", at the top): HG1 has met no Avenger knob with a held press yet —
+      Avenger's editor is a KalliGui window there, not JUCE — and the next Windows session holds a
+      macro knob with Page Down twice and Return. A verification patch on a JUCE plug-in the
+      maintainer has (ON:EAR's Width or Kontakt's knobs: a trip-less `mouseDown`, ten `move`s,
+      `mouseUp`, the value read) would answer it for JUCE only; applied only when he asks for it;
+      and NVDA's mouse tracking may now hear the injected motion — a placement went past the
+      low-level hook, motion does not — and say what lies under the pointer while a drag leaves
+      Avenger's window: listen for it.
 - [ ] **Residuals of slice 7**: a move whose repaint comes after the 50 ms settle that follows
       Return is not read (the log's "the last N ms before" says how close they came); travel past
       the screen's edge is cut by the system, so an end of the range may be out of reach at large

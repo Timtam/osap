@@ -778,20 +778,21 @@ function T.logic(zoom)
     bounds = { x = 0, y = 30, w = w + 4, h = h + 117 }, client = { x = 0, y = 30, w = w + 4, h = h + 117 } }
 end
 
--- REAPER's FX chain on Windows, with Avenger's JUCE child at (248, 60) sized for `zoom` on a
--- display of factor `d`, the keyboard in it.
+-- REAPER's FX chain on Windows, with Avenger's own child window (its class as the first Windows
+-- session's probe read it) at (248, 60) sized for `zoom` on a display of factor `d`, the keyboard
+-- in it.
 T.WFX = { id = 60, title = 'FX: Track 1 "VPS Avenger"', class = "#32770",
   app = { pid = 4242, exe = "reaper.exe" },
   bounds = { x = 0, y = 0, w = 3800, h = 2600 }, client = { x = 8, y = 30, w = 3784, h = 2562 } }
 T.WLIST = { id = 61, class = "SysListView32", bounds = { x = 8, y = 60, w = 230, h = 600 },
   client = { x = 8, y = 60, w = 230, h = 600 } }
-function T.juce(zoom, d)
+function T.kalliGui(zoom, d)
   local w, h = T.size(zoom, d)
   return { id = 70, class = "KalliGuiWin18360-000000000D72C850", bounds = { x = 248, y = 60, w = w, h = h },
     client = { x = 248, y = 60, w = w, h = h } }
 end
 function T.onWindows(zoom, d)
-  local j = T.juce(zoom, d)
+  local j = T.kalliGui(zoom, d)
   S.listed = { T.WFX }
   S.front, S.controls, S.chain = T.WFX, { T.WLIST, j }, { j, T.WFX }
   T.turn()
@@ -2133,7 +2134,7 @@ fn a_step_overtaken_by_a_second_press_leaves_the_last_word_to_it() {
     "##);
 }
 
-/// On Windows Avenger is its own JUCE child window, matched by the shape of JUCE's class and
+/// On Windows Avenger is its own child window, matched by its class's KalliGuiWin prefix and
 /// identified by the same header read; its corner is the child's, with no DAW difference added —
 /// the log line gives the offsets with the panel's (-2, +2) as well, so one Windows session says
 /// which of the two it is. At 150 % display scaling Avenger is drawn half again as large at the
@@ -2142,7 +2143,7 @@ fn a_step_overtaken_by_a_second_press_leaves_the_last_word_to_it() {
 /// fits nothing: the captions are Avenger's, but it is not taken as Avenger until a factor fits.
 /// Where English OCR is not installed the header is read in the user's own language.
 #[test]
-fn on_windows_avenger_is_its_juce_child_and_a_display_factor_is_learned_from_the_header() {
+fn on_windows_avenger_is_its_kalligui_child_and_a_display_factor_is_learned_from_the_header() {
     run(r##"
         local S = T.S
         local J = T.onWindows(80, 1.5)
@@ -2784,8 +2785,9 @@ fn a_name_before_the_click_that_cannot_be_read_is_not_taken_for_a_change() {
 /// MENU's items are chosen in Avenger's own popup once newWindow sees it — not after a wait —
 /// across the popup's middle, at the row the table puts the item from Avenger's corner, and on a
 /// Mac asked of the popup's own window by its number in the window list. A popup that opened above
-/// MENU, where JUCE puts one with no room below, is not chosen in, and is closed by clicking MENU
-/// again. On Windows the popup's own window is asked whether it is drawn at the item.
+/// MENU, where JUCE puts one with no room below (JUCE-like behaviour, unmeasured on Avenger's
+/// Windows toolkit, KalliGui), is not chosen in, and is closed by clicking MENU again. On Windows
+/// the popup's own window is asked whether it is drawn at the item.
 #[test]
 fn menu_items_are_chosen_in_avengers_popup_once_it_is_seen() {
     run_mac(r##"
@@ -2811,8 +2813,8 @@ fn menu_items_are_chosen_in_avengers_popup_once_it_is_seen() {
         T.ok(T.count("its window 300 of the window list is asked what is drawn there") == 1)
         T.closePopups()
         T.tick(2)
-        -- Save as, and a popup JUCE moved up above MENU: (28 - 84) / 1.6 = -35. Said, and closed with
-        -- a second click on MENU.
+        -- Save as, and a popup moved up above MENU, as JUCE moves one: (28 - 84) / 1.6 = -35. Said,
+        -- and closed with a second click on MENU.
         T.pressAt(header, 6)
         T.popup(301, 490, 28, 192, 96)
         T.tick(1)

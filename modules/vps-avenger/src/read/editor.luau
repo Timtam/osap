@@ -2,7 +2,8 @@
 -- knob's or button's — as the renames see it (the plan's slice 6, src/handover.luau). A double-click
 -- on the field opens it: Avenger puts a text editor in the field's place with the old name
 -- selected, and Return keeps what was typed there, Escape the old name — the avenger_control tool's
--- account (its actions.py), and JUCE's Label with its editor on a double-click. Avenger publishes no
+-- account (its actions.py) on a Mac, and how JUCE's Label behaves with its editor on a double-click:
+-- JUCE-like behaviour, unmeasured on Avenger's Windows toolkit (KalliGui). Avenger publishes no
 -- element for it, so it is seen only in pictures of the field:
 --
 --   OPEN     a change wait on the field's PICTURE — the field and a margin round it, where an

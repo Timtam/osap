@@ -51,6 +51,8 @@ T.SUBMENU_Y_STEP = 11.5
 -- its first row's middle this far below it, the project's place where the submenu opens downward —
 -- its top at its item's top, less JUCE's border, taken as nothing here: half a row above the item's
 -- middle. A starting value, which the submenu's calibration picture settles (`-submenu-item.png`).
+-- JUCE's rule and a Mac finding: on Windows, where Avenger's toolkit is its own (KalliGui,
+-- 2026-10-30), where a submenu opens is unmeasured.
 T.SUBMENU_FIRST_ROW = T.SUBMENU_Y_STEP / 2
 T.MENU_Y_OFFSET = {
   lock_all = 6,

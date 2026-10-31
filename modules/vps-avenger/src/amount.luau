@@ -54,8 +54,10 @@
 -- observed, so PageUp, PageDown and Return reached Logic as well (Return moved the playhead); it
 -- had no Escape; it slept 50 ms per key, waited 0.12 s after Return and gave up after five
 -- minutes; it read the knob after Return without waiting for anything; and its Windows driver
--- dragged by warping the pointer, which a held knob does not follow — this host moves it as motion
--- while the button is held (docs/api/input.md, move). Its sentence #6 said "ammount", and #7 the
+-- dragged by warping the pointer. A held control that sat still through warps was measured on
+-- ON:EAR's Width slider, not on Avenger, whose knobs nobody has held on Windows yet; this host moves
+-- the pointer as motion while the button is held (docs/api/input.md, move), which a control that
+-- follows either reaches. Its sentence #6 said "ammount", and #7 the
 -- control's key ("fine_tune"): here "amount", and the key with a space. Its #9, a drum slot's
 -- knob, named the slot by its factory name even where its own state had another: here the slot's
 -- name as last read, and the factory name where none was. Its #10, the sample editor's knob, named

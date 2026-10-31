@@ -13,13 +13,16 @@
 -- either click (not a calibrating run). So the drawn test looks where the popup will be, and its
 -- log lines say which it was: `drawn: a popup …`, or `drawn: nothing has changed …` (no popup
 -- opened). newWindow stays on the list for a DAW that draws the popups as windows (JUCE's other
--- case, and most likely Windows'), and a choice follows the test that placed its item.
+-- case, and possibly Windows'), and a choice follows the test that placed its item. All of that is
+-- a Mac finding and JUCE-like behaviour: on Windows Avenger's editor is a window of a toolkit of its
+-- own (KalliGuiWin…, the first Windows session, 2026-10-30), whose popups nobody has seen yet.
 --
 -- THE REGIONS, at 50 % from Avenger's corner as every table of this module, cut to Avenger's 871 x
 -- 561 and placed at the factor of the press: STARTING VALUES worked out from the project's points,
 -- not seen. A popup's whole rectangle has to lie in its region — the item is placed in the area the
 -- test sees, and a popup cut by its region's edge is taken as smaller than it is — so they are
--- generous:
+-- generous. Where a region says what JUCE does, that is JUCE's behaviour read in its source, which
+-- Avenger's popups follow on a Mac as far as seen; unmeasured on its Windows toolkit (KalliGui):
 --   the zoom list   below the zoom field, 21 rows of 11.5 from y 18, as wide as the field
 --   MENU's popup    below MENU, its four rows from y 18
 --   the redo list   below UNDO, as many rows as there are steps to redo
@@ -169,8 +172,9 @@ end
 -- drum slot's target, actions/drums.luau): `sub` = { x, below, row, first } in table points at 50 %
 -- — across at x from Avenger's corner, kept inside what was seen as Pp.row keeps it, and down
 -- `below` from the SUBMENU's own top at the factor the opener was clicked at; never from the item
--- that opened it, since JUCE opens a submenu upward from an item low in the plug-in
--- (tables/drums.luau). A popup too short to hold the target is not the submenu (`false`). The log
+-- that opened it, since JUCE opens a submenu upward from an item low in the plug-in, as Avenger's
+-- did on a Mac (tables/drums.luau; unmeasured on KalliGui). A popup too short to hold the target is
+-- not the submenu (`false`). The log
 -- gives the submenu's place in the table's units and how far its first row (`first` below its top)
 -- lies from its item's row (`row`, from Avenger's corner): 0 where it opened downward, as the
 -- project took every submenu to, less where it opened upward or was pushed up.

@@ -11,8 +11,9 @@
 //! others shows so, one that does not shows that), the slot selected by its background — one row that
 //! stands out, or "not read" — and the slots' names as text. A slot's menu is right-clicked, its item
 //! chosen in Avenger's painted popup, and Copy Sample to's target chosen in the submenu that item opens,
-//! followed by the drawn test and counted from the submenu's own top, which JUCE opens upward low in
-//! Avenger; no submenu, or one too short for the target, is said, and the menu left open closed with
+//! followed by the drawn test and counted from the submenu's own top, which opens upward low in
+//! Avenger as JUCE opens one (a Mac finding, unmeasured on Avenger's Windows toolkit, KalliGui); no
+//! submenu, or one too short for the target, is said, and the menu left open closed with
 //! Escape; Save Drumkit as waits for its file dialog. A name a text read missed is no change. Browse
 //! hands the keyboard over and decides by the slot's name read before and after Return; a knob is
 //! pressed, held and moved through the keys; its reset says what the change wait saw.
@@ -509,7 +510,8 @@ fn copy_sample_to_opens_its_submenu_and_the_target_is_chosen_in_it() {
 }
 
 /// Slot 10's Swap Slot with, its item at (323, 300.5) — (615, 565) — in the lower half of Avenger:
-/// JUCE opens the submenu UPWARD, its bottom at the item's, and the target is counted from the
+/// the submenu opens UPWARD, its bottom at the item's, as JUCE opens one (on a Mac; unmeasured on
+/// KalliGui), and the target is counted from the
 /// submenu's own top — slot 1 on its first row and slot 12 on its last, where the tool's point for
 /// slot 1, the item's own row, lies on slot 12's. A submenu too short to hold the target is none to
 /// choose in: "no submenu it can be chosen in was seen", never "did not open", and the popup left

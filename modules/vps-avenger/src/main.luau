@@ -224,9 +224,11 @@ end
 -- popup did not take the click — leaves Avenger's popup open, and while a menu test sees it the
 -- keys are the popup's: the Zoom control's Left and Right would go to the list, and the user was
 -- only told the choice failed. So it is closed, and only while the menu still counts as open, so
--- that a popup already gone is not opened again:
+-- that a popup already gone is not opened again. How it is closed goes by JUCE's behaviour, read in
+-- its source — Avenger's popups behave JUCE-like on a Mac (popups.luau), and on Windows, where
+-- Avenger's toolkit is its own (KalliGui, 2026-10-30), none of it is measured:
 --   * MENU's and the zoom field's (`opener`): the way the project closes the zoom list, by
---     clicking the opener again. JUCE's popup is modal, and a click on the component it was
+--     clicking the opener again. A JUCE popup is modal, and a click on the component it was
 --     opened from dismisses it later and goes no further (juce_PopupMenu.cpp, MenuWindow::
 --     inputAttemptWhenModal);
 --   * a right click's (no `opener`): with Escape, which the modal popup takes (its keyPressed
@@ -564,15 +566,17 @@ local function presetInfo(ov)
 end
 
 -- ── MENU's items ─────────────────────────────────────────────────────────────
--- Chosen in Avenger's own menu, a popup JUCE draws itself — painted inside Avenger's editor in
--- Logic, most likely a window of its own elsewhere (popups.luau): MENU is clicked, and the item
+-- Chosen in Avenger's own menu, a popup it draws itself — painted inside Avenger's editor in
+-- Logic, as a JUCE popup given a parent is (a Mac finding), possibly a window of its own elsewhere
+-- (popups.luau; unmeasured on Avenger's Windows toolkit, KalliGui): MENU is clicked, and the item
 -- once a menu test (below, the binding) sees the popup and says where it is — never after a wait
 -- — and the choice counts once the popup has taken it (O:chooseMenuItem).
 --
 -- The item is placed from Avenger's corner, where the project's figures are, across the middle of
 -- the popup's own width, in screen pixels at the factor MENU was clicked at (the runtime hands it
 -- over); and only in a popup that opened where those figures hold — its top below MENU's middle
--- and above Load's — since JUCE moves a popup that has no room below its opener, and a row counted
+-- and above Load's — since JUCE moves a popup that has no room below its opener (JUCE-like
+-- behaviour; unmeasured on KalliGui), and a row counted
 -- from Avenger's corner is then another row. Such a popup is not chosen in, and the log says where
 -- it was. MENU sits at the top of Avenger, whose own height lies below it, so that is not expected
 -- to happen; the menu item shot of a calibrating run shows where the rows really are, and the log
@@ -729,7 +733,7 @@ end
 -- rows, drawn at the zoom it opened at (geometry.luau), so its rows are 11.5 × the factor the zoom
 -- field was clicked at apart, and whatever the popup has beyond them is its border, the same above
 -- and below: entry t lies (height − 21 rows) / 2 + (t − ½) rows down from the popup's top,
--- wherever JUCE put the popup — below the field, or moved up because it had no room there, which
+-- wherever the plug-in put the popup — below the field, or moved up because it had no room there, which
 -- at high zooms it will not. A popup too short to hold 21 rows scrolls, and a row counted in it
 -- would be another zoom, so nothing is chosen in it; one under three rows tall is no zoom list at
 -- all (a tooltip), and the runtime looks at the next answer. Where the project's figures put the
@@ -929,14 +933,15 @@ Page.start({
 })
 
 -- Avenger's popups — MENU, the zoom list, the redo list, the tabs', knobs' and buttons' menus — are
--- drawn by JUCE itself, and two tests see them, each saying where so an item can be chosen in one:
--- `drawn`, a popup painted inside Avenger's editor where popups.luau says it is drawn — what the
--- first Mac test of the page found in Logic, where no window of the process came for the zoom list
--- (TODO.md, item 5) — and `newWindow`, a popup that is a window of the DAW's process (JUCE's other
--- case, and most likely Windows'; a DAW that runs plug-ins apart is the popup's owner then,
--- unmeasured). A choice is followed by the test that placed its item. Not `nativePopup`: JUCE
--- draws its menus itself rather than as the system's, and a test that says only "a menu is open"
--- places no item.
+-- drawn by Avenger itself, and two tests see them, each saying where so an item can be chosen in
+-- one: `drawn`, a popup painted inside Avenger's editor where popups.luau says it is drawn — what
+-- the first Mac test of the page found in Logic, where no window of the process came for the zoom
+-- list (TODO.md, item 5) — and `newWindow`, a popup that is a window of the DAW's process (JUCE's
+-- other case, and possibly Windows', where Avenger's toolkit is KalliGui and its popups are
+-- unmeasured; a DAW that runs plug-ins apart is the popup's owner then, unmeasured). A choice is
+-- followed by the test that placed its item. Not `nativePopup`: Avenger draws its menus itself
+-- rather than as the system's — on a Mac no system menu came for them — and a test that says only
+-- "a menu is open" places no item.
 header:bind(BINDING, { specificity = O.layer.base,
   menus = { O.menuTests.newWindow, O.menuTests.drawn(Popups.spec) } })
 

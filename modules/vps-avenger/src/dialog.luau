@@ -31,7 +31,8 @@
 -- and in the calibration picture, which is how a tester's run settles whether the two agree.
 --
 -- WHETHER IT IS A WINDOW AFTER ALL is unmeasured. Avenger's popups are painted inside its editor in
--- Logic (popups.luau), and the box most likely is too. If JUCE draws it as a window of its own, the
+-- Logic (popups.luau), and the box most likely is too. If it is a window of its own (JUCE's other
+-- case, and unmeasured on Avenger's Windows toolkit, KalliGui), the
 -- header overlay's menu test (newWindow) can see it as a new window of the process while the press
 -- of MENU is still being compared against, the header overlay then holds its place with no keys,
 -- and the buttons' clicks would be refused as covered — each said. The drawn test looks only in
