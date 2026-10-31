@@ -108,7 +108,18 @@ name = "Overlay runtime"
 # the module's sentence of how it ends is said once, at the first of them; every end gives them back
 # with the rest. VPS Avenger swallows Tab and Shift+Tab, which switch its oscillators on Windows. A
 # module that uses it depends on "com.platform.overlay >= 0.16".
-version = "0.16.0"
+# 0.16.1 (the developer's Mac test of VPS Avenger, 2026-10-31): a popup O.menuTests.drawn has seen
+# stays seen where the lines that changed since its sighting are one band of rows shorter than the
+# smallest popup and most of them read otherwise than before the press — a row highlighted, which
+# had read as the popup gone; anything else is gone as before. And O:afterDialog, while it has seen
+# no window in front, takes a window of the process that the window server lists since the call
+# (host.window.windowsOf) for the dialog — not the press's menu, nor one at a menu's level — and
+# tells `fn` after such a dialog only once that list no longer holds it. Nothing a module calls is
+# new; a module that relies on either depends on "com.platform.overlay >= 0.16.1".
+# 0.16.2 hands an OCR button's `value` hook the reading itself after its text, whose words say which
+# boxes the recogniser only guessed (`approx`): VPS Avenger says no name read that way. A module
+# that uses it depends on "com.platform.overlay >= 0.16.2".
+version = "0.16.2"
 # Loaded into the VM of every module that depends on it, so its functions
 # (O.new, O.container, the Overlay methods) are reachable via host.require.
 code_module = true

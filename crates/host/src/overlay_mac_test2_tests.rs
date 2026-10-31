@@ -675,6 +675,105 @@ fn after_dialog_does_not_take_the_presss_own_menu_window_for_the_dialog() {
     run_dialog(&scenario(false, true, true));
 }
 
+/// The developer's Mac test of 2026-10-31 (its finding 9): Logic's "Load Preset..." panel was on
+/// screen — a window of Logic's own at level 8, 1214 x 726 — while Logic did not answer
+/// accessibility and host.window.active() went on naming the plug-in's window; nothing was seen in
+/// front, and Logic's arrange window, coming forward after the Escape, was taken for the dialog just
+/// inside the bound. Now, while nothing is seen in front, a window of the process the window server
+/// lists since the call is the dialog: said once, nothing bounds the wait — not told at 8000 ms —
+/// and with the overlay in front on its window it waits, said once, while the panel is listed;
+/// told `true` once the panel is listed no more. Not the dialog: a window listed at the call, one at a
+/// menu's level (101), and the press's menu as a window of its own that a menu test answers, with
+/// the call made before the press — those end at the bound, `false`, with no dialog seen.
+#[test]
+fn after_dialog_takes_a_listed_window_of_the_process_when_none_is_in_front() {
+    run_dialog(r##"
+        local S = T.S
+        local PANEL8 = { id = 32101, layer = 8, class = "", x = 353, y = 111, w = 1214, h = 726 }
+        local TIP = { id = 32102, layer = 101, class = "", x = 420, y = 180, w = 60, h = 18 }
+        local o = T.avenger()
+        local told = {}
+        local ok, err
+        assert(T.call("key", function()
+          ok, err = o:chooseMenuItem({ label = "MENU", at = { 10, 10 }, menuItem = { 5, 5 }, retries = 0,
+            onDone = function(m, chosen)
+              if not chosen then return end
+              assert(m:afterDialog(function(ov, seen) told[#told + 1] = { seen = seen, active = ov.active } end) == true)
+            end })
+        end) == "Ran")
+        assert(ok == true, "opened: " .. T.what(err))
+        S.inside = true
+        T.tick(1)
+        S.inside = false
+        assert(#S.clicks == 2 and T.count("[menu] 'Avenger': waits for the dialog that comes next") == 1, T.dump())
+        -- A window at a menu's level first: no dialog.
+        S.windows = { T.INST, TIP }
+        T.event()
+        T.tick(1)
+        assert(T.count("a dialog came forward") == 0 and T.count("a dialog is on screen") == 0,
+          "a menu's level is no dialog: " .. T.dump())
+        -- The panel, listed while Logic's plug-in window is still the one in front.
+        S.windows = { T.INST, TIP, PANEL8 }
+        T.event()
+        T.tick(1)
+        assert(o.active and S.front == T.LOGIC, "the plug-in still named in front")
+        assert(T.count("[menu] 'Avenger': a dialog is on screen, not in front — window id 32101 of pid 6000, 1214x726 at "
+          .. "353,111, level 8, listed by the window server since the wait began, with 'Inst 1' (Logic Pro X) in front")
+          == 1, T.dump())
+        -- The next look, with the overlay on its window: the panel is listed still.
+        T.event()
+        T.tick(1)
+        assert(#told == 0 and T.count("[menu] 'Avenger': in front on 'Inst 1' (Logic Pro X), with the dialog, window id "
+          .. "32101, still listed — waits for it to go") == 1, T.dump())
+        -- The user's time in the panel: past the 8 seconds, nothing told.
+        T.run(9000)
+        T.event()
+        T.tick(1)
+        assert(#told == 0 and T.count("no dialog came within") == 0, "nothing bounds the wait: " .. T.dump())
+        assert(T.count("still listed — waits for it to go") == 1, "said once: " .. T.dump())
+        -- The panel goes; the plug-in's window was in front all along.
+        S.windows = { T.INST }
+        T.event()
+        T.tick(1)
+        assert(#told == 1 and told[1].seen == true and told[1].active, "told once, after the panel: " .. #told
+          .. " " .. T.dump())
+        assert(T.count("[menu] 'Avenger': 'Inst 1' (Logic Pro X) is in front again after the dialog") == 1, T.dump())
+        T.event()
+        T.tick(2)
+        assert(#told == 1, "once: " .. #told)
+
+        -- A window listed at the call, and one at a menu's level since: neither is the dialog.
+        local OTHER = { id = 32200, layer = 0, class = "", x = 0, y = 25, w = 1440, h = 875 }
+        S.windows = { T.INST, OTHER }
+        local none = {}
+        assert(o:afterDialog(function(_, seen) none[#none + 1] = seen end) == true)
+        S.windows = { T.INST, OTHER, TIP }
+        T.event()
+        T.run(8100)
+        assert(#none == 1 and none[1] == false and T.count("a dialog is on screen") == 1, "the bound: " .. T.dump())
+
+        -- The press's menu, a window of Logic's that newWindow answers and nothing brings to the front,
+        -- with the wait begun before the press: no dialog.
+        local MENU_WIN = { id = 33, layer = 0, class = "", x = 300, y = 200, w = 120, h = 90 }
+        S.windows = { T.INST }
+        local early = {}
+        assert(T.call("key", function()
+          assert(o:afterDialog(function(_, seen) early[#early + 1] = seen end) == true)
+          o:chooseMenuItem({ label = "MENU", at = { 10, 10 }, menuItem = { 5, 5 }, retries = 0 })
+        end) == "Ran")
+        S.windows = { T.INST, MENU_WIN }
+        T.tick(1)
+        T.event()
+        T.tick(1)
+        assert(o:menuOpen() and not o:_heldOnMenu(), "the menu open, nothing held: " .. T.dump())
+        assert(T.count("a dialog is on screen") == 1, "the menu is no dialog: " .. T.dump())
+        S.windows = { T.INST }
+        T.event()
+        T.run(8100)
+        assert(#early == 1 and early[1] == false and T.count("a dialog is on screen") == 1, "the bound: " .. T.dump())
+    "##);
+}
+
 /// A hold of keys on one plug-in window ends "left" once the overlay is in front on another it also
 /// matches — a second instance of the plug-in — where the hold's keys, scoped to the first, would
 /// never come: onEnd told once, with why, and nothing held any more. A recheck on the same window

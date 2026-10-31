@@ -384,9 +384,11 @@ fn blank_none_and_failed_say_what_an_empty_read_said() {
 }
 
 /// An OCR button's `value` (runtime 0.5.6) says what the text read means: asked with the overlay
-/// and the text as read, its answer is said in the text's place, and the `[read]` line keeps the
-/// text and adds what was said; `nil` says the text as read, with nothing added, and a reading
-/// that is not text never asks it. One that raises is logged once and the text is said as read.
+/// and the text as read — and since 0.16.2 the reading itself, whose words say which boxes the
+/// recogniser only guessed (`approx`) — its answer is said in the text's place, and the `[read]` line
+/// keeps the text and adds what was said; `nil` says the text as read, with nothing added, and a
+/// reading that is not text never asks it. One that raises is logged once and the text is said as
+/// read.
 #[test]
 fn an_ocr_buttons_value_says_what_the_text_read_means() {
     run(r#"
@@ -394,9 +396,10 @@ fn an_ocr_buttons_value_says_what_the_text_read_means() {
         local asked = {}
         local o = T.O.new("Synth")
         o:addOCRButton({ label = "Preset", region = { 34, 7, 214, 22 }, hotkey = "Alt+P",
-          value = function(ov, text)
-            asked[#asked + 1] = { ov = ov, text = text }
+          value = function(ov, text, reading)
+            asked[#asked + 1] = { ov = ov, text = text, reading = reading }
             if text == "hit Presst" then return "Init Preset" end
+            if reading.words[1].approx then return "cannot be read now" end
             return nil
           end })
         o:addCustomButton({ label = "Init", onActivate = function() end })
@@ -405,6 +408,8 @@ fn an_ocr_buttons_value_says_what_the_text_read_means() {
         T.answerList(1, { value = { status = "text", text = "hit Presst" } })
         assert(T.last().text == "Preset, button, Alt+P, Init Preset", T.last().text)
         assert(#asked == 1 and asked[1].ov == o and asked[1].text == "hit Presst", "asked with the overlay and the text")
+        assert(asked[1].reading.status == "text" and asked[1].reading.text == "hit Presst"
+          and asked[1].reading.words[1].text == "hit Presst" and not asked[1].reading.words[1].approx, "and the reading")
         assert(T.count('[read] \'Preset\' = "hit Presst", said as "Init Preset" (region 34,7 180x15, 0 ms, 1 word, en-US); spoken') == 1,
           T.dump())
         T.tab(); T.tab()
@@ -414,6 +419,11 @@ fn an_ocr_buttons_value_says_what_the_text_read_means() {
         T.tab(); T.tab()
         T.answerList(3, { value = { status = "none" } })
         assert(T.last().text == "Preset, button, Alt+P, no text" and #asked == 2, "not asked for an empty read")
+        -- A reading only in boxes the recogniser guessed, which the hook knows by its words.
+        T.tab(); T.tab()
+        T.answerList(4, { value = { status = "text", text = "PY", approx = true } })
+        assert(T.last().text == "Preset, button, Alt+P, cannot be read now" and asked[3].reading.words[1].approx == true,
+          T.last().text)
     "#);
     run(r#"
         local S = T.S

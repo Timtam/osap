@@ -614,6 +614,116 @@ fn a_sparse_popup_goes_by_most_of_its_lines() {
     "##);
 }
 
+/// The developer's Mac test of 2026-10-31 (its finding 1): two Tabs went through to VPS Avenger's
+/// MENU popup and highlighted one of its four rows, and the drawn test said the popup had gone —
+/// "29 columns and 19 rows not as they were, a popup at least 48x36.8; 63 of its 111 lines as they
+/// were" — while the strip's reads still photographed it; every later press began with it on
+/// screen. Replayed in MENU's region at 80 % (152 x 96, the smallest popup 48 x 36.8): a popup of
+/// 92 x 78 at the region's left, its item clicked and chosen at the click (`retries = 0`, as MENU's
+/// items were), then a band of 19 rows of a lighter colour across it — every column of the popup
+/// and the band's rows no longer read as at the sighting, 111 of its 170 lines, so the share rule
+/// alone says gone. It is ONE band of rows, under the smallest popup's height, and none of those
+/// lines reads as before the press: the popup is still there, said once, and the keys stay the
+/// popup's. Cleared, it has gone and the keys come back.
+#[test]
+fn a_highlighted_row_in_a_four_row_popup_is_not_its_close() {
+    run_mac(r##"
+        local S = T.S
+        S.region = { 384, 162, 536, 258 }
+        local o = T.overlayWith({ T.drawnTest({ 48, 36.8 }) })
+        T.choose(o, { retries = 0 })
+        T.drawPopup(384, 162, 476, 240, { 60, 60, 60 })
+        T.tick(3)
+        T.ok(T.count("[menu] 'Avenger': drawn: a popup 92x78 at 384,162, alike at readings") == 1, T.dump())
+        T.ok(#S.clicks == 2 and T.clickAt(2) == "394,182", "the item: " .. T.clickAt(2))
+        T.ok(T.open() == true, "open")
+        -- The row highlighted.
+        T.drawPopup(384, 181, 476, 200, { 140, 140, 140 })
+        T.tick(4)
+        T.ok(T.count("has gone") == 0 and T.open() == true, "still there, the keys the popup's: " .. T.dump())
+        T.ok(T.count("[menu] 'Avenger': drawn: the popup 92x78 at 384,162 is still there at reading ") == 1
+          and T.count("though 111 of its 170 lines are not as they were — one band of 19 rows at 181-199, under a "
+          .. "popup's height (36.8), 0 of the 111 lines not as they were read as before the press: a row highlighted, "
+          .. "not its close") == 1, "said once: " .. T.dump())
+        T.ok(#S.clicks == 2, "not clicked again: " .. #S.clicks)
+        T.clearPopup()
+        T.tick(4)
+        T.ok(T.count("[menu] 'Avenger': drawn: the popup 92x78 at 384,162 has gone at reading ") == 1, T.dump())
+        T.ok(T.open() == false and #S.clicks == 2, "closed, the keys back")
+    "##);
+}
+
+/// The guard on the rule above: a popup that differs from what lies under it in six bands of rows
+/// (rows between them unchanged by it, and so not compared), gone with the plug-in redrawn in
+/// another colour under it — none of its lines reads as before the press any more, nor as at the
+/// sighting — is gone: the rows that changed span more than the smallest popup's height, which no
+/// highlighted row does. And two of its bands changed with one between them as it was are two
+/// bands, no highlighted row either: gone, the rule erring toward "gone", though the lines read
+/// otherwise than before the press. The log says why each time.
+#[test]
+fn a_sparse_popup_closing_over_a_redrawn_plugin_is_still_gone() {
+    let scenario = |change: &str, why: &str| {
+        format!(r##"
+        local S = T.S
+        local o = T.overlayWith({{ T.drawnTest({{ 100, 100 }}) }})
+        T.choose(o)
+        for b = 0, 5 do T.drawPopup(362, 80 + b * 20, 482, 90 + b * 20) end
+        T.tick(3)
+        T.ok(T.count("[menu] 'Avenger': drawn: a popup 120x110 at 362,80, alike at readings 1 and 2") == 1, T.dump())
+        T.ok(#S.clicks == 2, "the item")
+        {change}
+        T.tick(4)
+        T.ok(T.count("[menu] 'Avenger': drawn: the popup 120x110 at 362,80 has gone at reading ") == 1
+          and T.count("{why} — not comparing until the next press") == 1, T.dump())
+        T.ok(T.count("is still there") == 0, T.dump())
+        T.ok(#S.clicks == 2 and T.open() == false, "closed, clicked once")
+        "##)
+    };
+    run(&scenario(
+        "T.clearPopup()
+        T.background({ 70, 50, 30 })",
+        "(120 columns and 60 rows not as they were, a popup at least 100x100; 0 of its 180 lines as they were), the \
+         rows not as they were span 110 pixels, not under a popup's height",
+    ));
+    run(&scenario(
+        "T.drawPopup(362, 80, 482, 90, { 90, 90, 200 })
+        T.drawPopup(362, 120, 482, 130, { 90, 90, 200 })",
+        "(120 columns and 20 rows not as they were, a popup at least 100x100; 40 of its 180 lines as they were), the \
+         rows not as they were in 2 bands, with rows as they were between them",
+    ));
+}
+
+/// The rule's second half (the review of 0.16, its finding 2): a popup whose fill differs from the
+/// plug-in under it in one band of rows only — 21 rows across its top, its sides a line of a pixel
+/// below them, which changes the rows' extremes and not their fill — fewer than the smallest popup's
+/// height (36.8), so that all its rows changing back are one band under a popup's height, as a
+/// highlighted row is. It closes over the plug-in as it was: every one of those lines reads as
+/// before the press again, more than half of them, which no highlight does — gone, and the log says
+/// why. Without that half the popup would be "still there" for good, the keys the plug-in's.
+#[test]
+fn a_popup_of_one_band_closing_over_the_plugin_as_it_was_is_gone() {
+    run_mac(r##"
+        local S = T.S
+        local o = T.overlayWith({ T.drawnTest({ 48, 36.8 }) })
+        T.choose(o)
+        T.drawPopup(362, 80, 454, 101)
+        T.drawPopup(362, 101, 363, 120)
+        T.drawPopup(453, 101, 454, 120)
+        T.tick(3)
+        T.ok(T.count("[menu] 'Avenger': drawn: a popup 92x40 at 362,80, alike at readings") == 1, T.dump())
+        T.ok(#S.clicks == 2, "the item")
+        T.ok(T.open() == true, "open")
+        T.clearPopup()
+        T.tick(4)
+        T.ok(T.count("[menu] 'Avenger': drawn: the popup 92x40 at 362,80 has gone at reading ") == 1
+          and T.count("(92 columns and 21 rows not as they were, a popup at least 48x36.8; 0 of its 113 lines as they "
+            .. "were), the rows not as they were one band, but 113 of the 113 lines not as they were read as before the "
+            .. "press — not comparing until the next press") == 1, T.dump())
+        T.ok(T.count("is still there") == 0, T.dump())
+        T.ok(#S.clicks == 2 and T.open() == false, "closed, clicked once, the keys back")
+    "##);
+}
+
 /// The smallest popup: a change smaller than it is no menu, whether the smallest is the test's own
 /// default (12 x 12) or the one the region answers with its rectangle; the log says which.
 #[test]

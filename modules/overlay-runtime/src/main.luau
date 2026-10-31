@@ -2232,7 +2232,10 @@ end
 -- What an OCR control's value says, from its region's reading (nil: a region with nothing of it
 -- left on screen). Text is said as read — or as the control's `value` hook says it, when it
 -- answers text of its own (hookValue: a hook that raises is logged once, and the text is said as
--- read). A region with nothing drawn in it, or nothing the recogniser read, says the control's
+-- read). The hook is handed the reading itself after the text (0.16.2): its words say which boxes
+-- the recogniser only guessed (`approx`, docs/api/ocr.md), which VPS Avenger's preset name takes
+-- for no name — PaddleOCR alone invented every one of them in the developer's Mac test of
+-- 2026-10-31. A region with nothing drawn in it, or nothing the recogniser read, says the control's
 -- `fallback` — "no text" without one — as an empty read said before the read moved off the event
 -- loop. A read that FAILED says "cannot be read now", as a region that cannot be placed does: "no
 -- text" would describe a read that was never made.
@@ -2243,7 +2246,7 @@ local function valueWords(self, c, reading)
   if reading == nil then return c.fallback or "no text" end
   if reading.status == "text" and reading.text ~= "" then
     local text = oneLine(reading.text)
-    local said = hookValue(self, c, "value", text)
+    local said = hookValue(self, c, "value", text, reading)
     if type(said) == "string" and said ~= "" then return said end
     return text
   end
@@ -7511,12 +7514,27 @@ end
 --   * STILL THERE while, of the lines whose fill changed at the opening, those that no longer read
 --     as at the sighting are fewer than a popup — under the smallest popup's height of rows or
 --     under its width of columns — AND DRAWN_STILL of them still read as they did. A highlighted
---     row passes both: one band of rows, fewer than the smallest popup's (a menu of two rows may
---     not pass the second). A popup that goes fails one: every line it covered changes back —
---     a popup's worth of them, however much else of the span reads as it did, such as a tab the
---     same right click selected under the rectangle, which outlasts the popup; and where the popup
---     differed from what lies under it in fewer lines than that, most of its own lines. The same
---     rectangle is answered, so a click the menu did not take is clicked again;
+--     row passes the first: one band of rows, fewer than the smallest popup's. A popup that goes
+--     fails one: every line it covered changes back — a popup's worth of them, however much else
+--     of the span reads as it did, such as a tab the same right click selected under the
+--     rectangle, which outlasts the popup; and where the popup differed from what lies under it in
+--     fewer lines than that, most of its own lines. The same rectangle is answered, so a click the
+--     menu did not take is clicked again;
+--   * and STILL THERE, where the second fails, when the rows that no longer read as at the sighting
+--     are ONE BAND — no row whose fill changed at the opening reads as it did between the first and
+--     the last of them — shorter than the smallest popup's height, AND most of the lines that no
+--     longer read as at the sighting, rows and columns, do not read as in the picture before the
+--     press either (highlightBand). A highlighted row of a popup of few rows: the developer's Mac
+--     test of 2026-10-31, where two Tabs that went through to VPS Avenger's MENU highlighted one of
+--     its four rows — 19 rows and 29 columns changed in a popup of 92 x 78, "63 of its 111 lines as
+--     they were", 57 % — and the popup, which the strip's reads still photographed afterwards, was
+--     said to have gone; every later press then began with it on screen, and its "before" picture
+--     held it. A popup that goes gives back what lay under it, which a highlight does not; and one
+--     that goes over the plug-in redrawn in another colour changes every row whose fill it changed
+--     at the opening, which span more than the smallest popup's height — unless those were one band
+--     shorter than that, the one case taken wrongly. Anything else is gone, as before: a false
+--     "still there" keeps every key of the overlay with the plug-in, with no bound, where a false
+--     "gone" costs one more press;
 --   * GONE otherwise: `false`, and the test stops comparing until the next press, as newWindow
 --     does — the plug-in redrawn under the popup is not a new one.
 -- No timer decides any of it: readings are counted, and the one bound is the time the tests are
@@ -7659,6 +7677,51 @@ do
 
   local function rectWords(r) return ("%dx%d at %d,%d"):format(r.w, r.h, r.x, r.y) end
 
+  -- Whether the lines of seen popup `s` that no longer read as at its sighting, in reading `p` of
+  -- arm `w`, are a highlighted row's (see above): `rowsNow` and `colsNow`, the lines of s.fillRows
+  -- and s.fillCols whose fill changed since, in the order of those lists. True when the rows are one
+  -- band — no line of s.fillRows between the first and the last of them reads as at the sighting —
+  -- from its first row to its last, each standing for its step, shorter than the smallest popup's
+  -- height, and more than half of all of them do not read as in w.base, the picture before the
+  -- press. Otherwise false and why, in words for the "has gone" line. A band is counted in
+  -- s.fillRows, not on the screen: rows whose fill did not change at the opening are not compared,
+  -- and a popup's are many — in the developer's pictures of 2026-10-31 VPS Avenger's MENU popup at
+  -- 80 % changed the fill of 48 of the 97 rows of its region and 61 of its 152 columns, in runs of 1
+  -- to 14 rows, so one row of it highlighted is several runs on the screen and one band here. Costs
+  -- at most 512 comparisons of a line's six numbers, asked only where the rule above says gone.
+  local function highlightBand(w, s, p, rowsNow, colsNow)
+    if #rowsNow == 0 then return false, "no row among them" end
+    local first, last = rowsNow[1], rowsNow[#rowsNow]
+    local now = {}
+    for _, i in ipairs(rowsNow) do now[i] = true end
+    local bands, inBand = 0, false
+    for _, i in ipairs(s.fillRows) do
+      if now[i] and not inBand then bands += 1 end
+      inBand = now[i] == true
+    end
+    if bands > 1 then
+      return false, ("the rows not as they were in %d bands, with rows as they were between them"):format(bands)
+    end
+    local tall = last - first + w.rowStep
+    if tall >= w.minH then
+      return false, ("the rows not as they were span %d pixels, not under a popup's height"):format(tall)
+    end
+    local before, n = 0, #rowsNow + #colsNow
+    for _, i in ipairs(rowsNow) do
+      if lineDiffers(p.rows, w.base.rows, i) < 2 then before += 1 end
+    end
+    for _, i in ipairs(colsNow) do
+      if lineDiffers(p.columns, w.base.columns, i) < 2 then before += 1 end
+    end
+    if before * 2 >= n then
+      return false, ("the rows not as they were one band, but %d of the %d lines not as they were read as before "
+        .. "the press"):format(before, n)
+    end
+    return true, ("one band of %d rows at %d-%d, under a popup's height (%g), %d of the %d lines not as they were "
+      .. "read as before the press"):format(#rowsNow * w.rowStep, p.y + first - 1, p.y + last + w.rowStep - 2,
+      w.minH, before, n)
+  end
+
   -- The answer for a popup `s` seen, in reading `p`: its rectangle, and `print` — how the lines
   -- whose fill changed at the opening read now, their means rounded — so that an item's click can
   -- tell a popup drawn exactly as at the click (the plug-in has stopped drawing while it acts on it)
@@ -7739,19 +7802,47 @@ do
         -- most lines read as they did (see above).
         local s = w.seen
         local cols, rows, lines, same = 0, 0, 0, 0
+        local colsNow, rowsNow = {}, {}
         for _, i in ipairs(s.fillCols) do
           lines += 1
-          if lineDiffers(p.columns, s.profile.columns, i) == 2 then cols += w.colStep else same += 1 end
+          if lineDiffers(p.columns, s.profile.columns, i) == 2 then
+            cols += w.colStep
+            colsNow[#colsNow + 1] = i
+          else
+            same += 1
+          end
         end
         for _, i in ipairs(s.fillRows) do
           lines += 1
-          if lineDiffers(p.rows, s.profile.rows, i) == 2 then rows += w.rowStep else same += 1 end
+          if lineDiffers(p.rows, s.profile.rows, i) == 2 then
+            rows += w.rowStep
+            rowsNow[#rowsNow + 1] = i
+          else
+            same += 1
+          end
         end
         local share = lines > 0 and same / lines or 0
         if (cols < w.minW or rows < w.minH) and share >= DRAWN_STILL then return answerOf(s, p) end
+        -- A highlighted row of a popup of few rows (see above): asked only where rows are under a
+        -- popup's height, since a band shorter than one has fewer.
+        local why = nil
+        if rows < w.minH then
+          local band, words = highlightBand(w, s, p, rowsNow, colsNow)
+          if band then
+            -- Said once per sighting: the popup is followed on every tick while it stays so.
+            if not s.bandSaid then
+              s.bandSaid = true
+              log(o, "the %s %s is still there at reading %d though %d of its %d lines are not as they were — %s: "
+                .. "a row highlighted, not its close", w.sub and "submenu" or "popup", rectWords(s.rect), n,
+                lines - same, lines, words)
+            end
+            return answerOf(s, p)
+          end
+          why = words
+        end
         log(o, "the %s %s has gone at reading %d (%d columns and %d rows not as they were, a popup at "
-          .. "least %gx%g; %d of its %d lines as they were) — %s", w.sub and "submenu" or "popup",
-          rectWords(s.rect), n, cols, rows, w.minW, w.minH, same, lines,
+          .. "least %gx%g; %d of its %d lines as they were)%s — %s", w.sub and "submenu" or "popup",
+          rectWords(s.rect), n, cols, rows, w.minW, w.minH, same, lines, why and (", " .. why) or "",
           w.sub and "its menu is followed" or "not comparing until the next press")
         return "gone"
       end
@@ -8036,9 +8127,10 @@ end
 -- A test's state for one stay in front: its word (`saw`, and the misses since it last saw),
 -- the question it has not answered yet (`asking`, a token; a later answer to an earlier
 -- question does not match it), how many ticks that has been outstanding, and the tick it was
--- last asked on.
+-- last asked on — and `seenId`, the `id` its last sighting answered (newWindow's: the window
+-- server's, as host.window.windowsOf lists it), which O:afterDialog never takes for a dialog.
 local function resetMenuTest(t)
-  t.saw, t.misses, t.asking, t.waited, t.lastAsked = false, 0, nil, 0, nil
+  t.saw, t.misses, t.asking, t.waited, t.lastAsked, t.seenId = false, 0, nil, 0, nil, nil
 end
 
 -- Is overlay `o` holding its place over its own menu's window (see "holding its place")? It
@@ -8191,6 +8283,7 @@ function Overlay:_menuAnswer(t, seen, value, late)
   local st = self._menu
   if seen then
     t.saw, t.misses = true, 0
+    t.seenId = type(value) == "table" and value.id or nil
     st.seenThisTick = true
     -- Counted, so that holding its place can ask whether a test sees a menu NOW rather than read
     -- the word, which stays "open" for a miss after the menu has gone (see _menuHold).
@@ -8203,7 +8296,7 @@ function Overlay:_menuAnswer(t, seen, value, late)
   -- One missed read is not a close: the test's next answer decides.
   t.misses += 1
   if t.misses < 2 then return end
-  t.saw, t.misses = false, 0
+  t.saw, t.misses, t.seenId = false, 0, nil
   if not st.open then return end
   for _, u in ipairs(st.tests) do
     if u.saw then return end
@@ -8906,6 +8999,15 @@ function Overlay:_menuItemClicked()
     st.press.itemClicked = true
     local a = host.window.active()
     st.press.itemClickedIn = a and a.id
+    -- And the windows a menu test answers as the menu at the click (newWindow's, in the window
+    -- server's numbering): the menu still, whether in front or not, never the item's dialog that
+    -- O:afterDialog may see only in that list (_dialogListedSince). A window a test answers after
+    -- the click is the item's, as the hold takes one (`dialog`, _menuHold).
+    local ids = {}
+    for _, t in ipairs(st.tests) do
+      if t.saw and t.seenId ~= nil then ids[t.seenId] = true end
+    end
+    st.press.menuIds = ids
   end
 end
 
@@ -9656,6 +9758,25 @@ end
 -- call begins a wait. Looked at at the call, by every recheck of the overlay and at its activation
 -- (_dialogLook); fn runs on the module's next turn, as a handler, and the overlay is asked again
 -- there.
+--
+-- A DIALOG THAT NEVER COMES TO THE FRONT (since 0.16.1). In the developer's Mac test of 2026-10-31
+-- Logic's "Load Preset..." panel was on screen — newWindow listed it, a window of Logic's own at
+-- level 8, 1214 x 726 — while Logic did not answer accessibility ("skipping pid …: it did not answer
+-- a moment ago"), and host.window.active() went on naming the plug-in's window, the one it had last
+-- read. Nothing was seen in front, and after the Escape Logic's arrange window, the first window of
+-- the process to come forward, was taken for the dialog 7058 ms into the wait, just inside its
+-- bound: a user who stays nine seconds in the panel would have had fn(o, false) with it still up.
+-- So the call takes the window server's list of the process's windows too (host.window.windowsOf,
+-- one system-wide list, no message to the application, which answers while the application does
+-- not), and while nothing has been seen in front, a window of the process that list did not hold
+-- at the call is the dialog — the largest, if several: not the window noted, not the press's menu
+-- (a window a menu test answers as the menu before an item of it was clicked, or answered so at
+-- that click; the window held over for it before an item was clicked; the one an item was clicked
+-- in), not one at a menu's level or above (101: an NSMenu's; every window is at 0 on Windows), and
+-- none while the overlay holds its place over a menu's window. A dialog seen only so is over once
+-- the overlay is in front on its window AND that list no longer holds it: active() can name the
+-- plug-in's window with the panel still over it. No timer decides any of it; the bound stays the
+-- bound on looking.
 
 -- The overlay's own window and its application's pid, for O:afterDialog, or nil: not in front. As
 -- the overlay leaves the front in a choice's onDone (_menuLeave), the window its press was made in;
@@ -9688,7 +9809,11 @@ function Overlay:afterDialog(fn)
     host.log.info(("[menu] '%s': the wait for a dialog since %d ms ago is dropped — another begins"):format(
       tostring(self.label), host.now() - self._dialog.since))
   end
-  local d = { fn = fn, window = a.id, pid = pid, front = a, seen = false, since = host.now() }
+  -- `listed`: the windows the window server lists for the process at the call, which no later
+  -- listing takes for the dialog; nil when they could not be listed, and then only the window in
+  -- front is looked at.
+  local d = { fn = fn, window = a.id, pid = pid, front = a, seen = false, since = host.now(),
+    listed = self:_dialogListing(pid) }
   self._dialog = d
   host.log.info(("[menu] '%s': waits for the dialog that comes next — a window of pid %s other than %s — "
     .. "for up to %d ms"):format(tostring(self.label), tostring(pid), frontName(a), MENU_LOOK_MS))
@@ -9707,23 +9832,89 @@ function Overlay:afterDialog(fn)
   return true
 end
 
+-- The windows the window server lists for process `pid` now (host.window.windowsOf), keyed by
+-- id, or nil when they cannot be listed — for O:afterDialog's dialog that never comes to the front
+-- (see above). One system-wide list, no message to the application: an EnumWindows on Windows, a
+-- CGWindowListCopyWindowInfo on a Mac.
+function Overlay:_dialogListing(pid)
+  local ok, list = pcall(host.window.windowsOf, pid)
+  if not (ok and type(list) == "table") then return nil end
+  local ids = {}
+  for _, w in ipairs(list) do ids[w.id] = w end
+  return ids
+end
+
+-- The dialog of wait `d` as the window server lists it while none is seen in front (see above): the
+-- largest window of its process not listed at the call — not the window noted, not the press's menu,
+-- not one at a menu's level or above, and none while the overlay holds its place over a menu's
+-- window — or nil. The press's menu: before an item of it was clicked, any window a menu test
+-- answers as the menu now; after, the ones a test answered so at the click (`menuIds`,
+-- _menuItemClicked) — a window newWindow sees after the click is the item's, Logic's panel among
+-- them in the developer's Mac test — and, as for a window in front, the one held over for it before
+-- the click and the one in front at the click.
+function Overlay:_dialogListedSince(d)
+  local st = self._menu
+  if not d.listed or (st and st.hold) then return nil end
+  local now = self:_dialogListing(d.pid)
+  if not now then return nil end
+  local p = st and st.press
+  local menus = p and p.itemClicked and p.menuIds or {}
+  if p and not p.itemClicked then
+    for _, t in ipairs(st.tests) do
+      if t.saw and t.seenId ~= nil then menus[t.seenId] = true end
+    end
+  end
+  local best = nil
+  for id, w in pairs(now) do
+    local area = (tonumber(w.w) or 0) * (tonumber(w.h) or 0)
+    if not d.listed[id] and id ~= d.window and not menus[id]
+      and not (p and ((not p.dialog and p.menuWindow == id) or p.itemClickedIn == id))
+      and (tonumber(w.layer) or 0) < 101
+      and (best == nil or area > best.area or (area == best.area and id < best.w.id)) then
+      best = { w = w, area = area }
+    end
+  end
+  return best and best.w or nil
+end
+
+-- Whether the dialog of wait `d`, seen only in the window server's list, is listed still. A list
+-- that cannot be taken holds nothing back.
+function Overlay:_dialogStillListed(d)
+  if d.listedId == nil then return false end
+  local now = self:_dialogListing(d.pid)
+  return now ~= nil and now[d.listedId] ~= nil
+end
+
 -- The wait of O:afterDialog looked at, at the call, at a recheck of the overlay and at its
--- activation: a dialog seen, or the overlay in front again on the window of the call after it — fn
--- then on the next turn, where it is asked again — or in front on another window, which drops the
--- wait. Costs one host.window.active(), memoised per epoch, while a wait stands; nothing otherwise.
+-- activation: a dialog seen — in front, or while none is, in the window server's list — or the
+-- overlay in front again on the window of the call after it, and a dialog seen only in that list
+-- gone from it: fn then on the next turn, where it is asked again; or in front on another window,
+-- which drops the wait. Costs one host.window.active(), memoised per epoch, while a wait stands, and
+-- one host.window.windowsOf while nothing is seen, or while the overlay is back on its window after
+-- a dialog seen only so; nothing otherwise.
 function Overlay:_dialogLook()
   local d = self._dialog
   if not d or d.telling then return end
   local a = host.window.active()
   if not d.seen then
-    if not (a and a.id ~= d.window and a.app and a.app.pid == d.pid) then return end
-    -- The press's menu, a window of its own held before an item of it was clicked or the one its
-    -- item was clicked in, is no dialog.
-    local p = self._menu and self._menu.press
-    if p and ((not p.dialog and p.menuWindow == a.id) or p.itemClickedIn == a.id) then return end
-    d.seen = true
-    host.log.info(("[menu] '%s': a dialog came forward — %s, window id %s of pid %s, %d ms after the wait "
-      .. "began"):format(tostring(self.label), frontName(a), tostring(a.id), tostring(d.pid), host.now() - d.since))
+    if a and a.id ~= d.window and a.app and a.app.pid == d.pid then
+      -- The press's menu, a window of its own held before an item of it was clicked or the one its
+      -- item was clicked in, is no dialog.
+      local p = self._menu and self._menu.press
+      if not (p and ((not p.dialog and p.menuWindow == a.id) or p.itemClickedIn == a.id)) then
+        d.seen = true
+        host.log.info(("[menu] '%s': a dialog came forward — %s, window id %s of pid %s, %d ms after the wait "
+          .. "began"):format(tostring(self.label), frontName(a), tostring(a.id), tostring(d.pid), host.now() - d.since))
+        return
+      end
+    end
+    local w = self:_dialogListedSince(d)
+    if not w then return end
+    d.seen, d.listedId = true, w.id
+    host.log.info(("[menu] '%s': a dialog is on screen, not in front — window id %s of pid %s, %sx%s at %s,%s, "
+      .. "level %s, listed by the window server since the wait began, with %s in front, %d ms after the wait "
+      .. "began"):format(tostring(self.label), tostring(w.id), tostring(d.pid), tostring(w.w), tostring(w.h),
+      tostring(w.x), tostring(w.y), tostring(w.layer), a and frontName(a) or "nothing", host.now() - d.since))
     return
   end
   if not self.active or self.away or (self._menu and self._menu.hold) or not a then return end
@@ -9733,11 +9924,21 @@ function Overlay:_dialogLook()
       :format(tostring(self.label), frontName(a), frontName(d.front)))
     return
   end
+  -- A dialog seen only in the window server's list: over when that list no longer holds it.
+  if self:_dialogStillListed(d) then
+    if not d.saidListed then
+      d.saidListed = true
+      host.log.info(("[menu] '%s': in front on %s, with the dialog, window id %s, still listed — waits for it to go")
+        :format(tostring(self.label), frontName(a), tostring(d.listedId)))
+    end
+    return
+  end
   d.telling = true
   host.timer.after(0, function()
     if self._dialog ~= d then return end
     local now = host.window.active()
-    if not (self.active and not self.away and not (self._menu and self._menu.hold) and now and now.id == d.window) then
+    if not (self.active and not self.away and not (self._menu and self._menu.hold) and now and now.id == d.window)
+      or self:_dialogStillListed(d) then
       d.telling = false
       return
     end
