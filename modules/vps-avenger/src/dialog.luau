@@ -1,4 +1,6 @@
--- Avenger's own warning box: Initialize's "Are you sure?", and Save's overwrite question.
+-- Avenger's own warning box: Initialize's "Are you sure?". Save's overwrite question is the same
+-- kind of box by the project's account; this module no longer chooses Save (since 0.16: main.luau,
+-- the maintainer's decision of 2026-10-31), as the project never did.
 --
 -- The box is drawn INSIDE Avenger's window, by the project's account (geometry.luau): no window
 -- of its own, no accessibility element, no notification. So nothing tells the overlay it is up
@@ -7,8 +9,8 @@
 -- the box, it takes the keyboard from the header overlay, and it hands it back when the box goes.
 -- Its three stops are the box's own text, read, and its two buttons.
 --
--- WHEN IT IS LOOKED FOR. Only after this module chose Initialize or Save in Avenger's MENU and
--- saw the menu take the choice — "armed" — and only until the box has come and gone, or
+-- WHEN IT IS LOOKED FOR. Only after this module chose Initialize in Avenger's MENU and saw the
+-- menu take the choice — "armed" — and only until the box has come and gone, or
 -- DIALOG_READS_MAX reads have not seen it. A read of a region this size is Vision's hundred-odd
 -- milliseconds on a Mac, and polling one every half second for as long as Avenger is in front
 -- would be a recogniser running for nobody. A count, not a clock: the reads the gate's poll makes,
@@ -25,9 +27,8 @@
 -- failed), which says nothing about the box: those are counted apart, up to DIALOG_READS_MAX. A box
 -- given up for gone while it is up would hand the keyboard back to the header over a modal box.
 --
--- WHERE IT IS CLICKED. Where YES and NO are READ, not where the table puts them. The project's
--- figures are Initialize's box only; it never opened Save's, so the one geometry that would hold
--- for both is the words themselves. The table's pair is compared with what was read, in the log
+-- WHERE IT IS CLICKED. Where YES and NO are READ, not where the table puts them: the words are
+-- the one geometry nothing can move. The table's pair is compared with what was read, in the log
 -- and in the calibration picture, which is how a tester's run settles whether the two agree.
 --
 -- WHETHER IT IS A WINDOW AFTER ALL is unmeasured. Avenger's popups are painted inside its editor in
@@ -151,7 +152,7 @@ local function read(origin, a)
       }
       if first then
         -- Where the table puts the pair, against where it was read: the measurement a tester's run
-        -- brings back for Initialize's box, and the first figures at all for Save's.
+        -- brings back for Initialize's box.
         local tx, ty = G.place(origin, k, G.YES[1], G.YES[2])
         local ux, uy = G.place(origin, k, G.NO[1], G.NO[2])
         host.log.info(string.format("[avenger] '%s': Avenger's warning box is up: \"%s\"; YES read at "
@@ -200,7 +201,7 @@ local function read(origin, a)
   end
 end
 
--- `label` (Initialize or Save) was chosen in the MENU of window `id` — the one it was pressed in,
+-- `label` (Initialize) was chosen in the MENU of window `id` — the one it was pressed in,
 -- which the overlay may already have left for a box that is a window of its own: its box is
 -- looked for from now on.
 function D.arm(id, label)

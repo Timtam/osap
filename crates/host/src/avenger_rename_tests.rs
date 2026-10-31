@@ -441,13 +441,14 @@ fn rename_osc_double_clicks_the_tab_reads_its_name_unsnapped_and_focuses_its_ren
     "##));
 }
 
-/// The ring names a tab as the page last read it (the review of 2026-10-26): on AR Band Pass Slide,
-/// whose tabs the database names Arp, OSC 2 and Lead, the key reads the first as Pluck, and OSC 2
-/// is renamed Wobble from the page. Back in Avenger the Oscillator stepper says Wobble, and Pluck a
-/// step to the left. A rename is an edit of the preset's tabs, so the third, its name not read, is
-/// OSC 3 — not the database's Lead. ▶ to AR Deep Arp forgets the edit, and ◀ back to AR Band Pass
-/// Slide loads it from its file again: the names read before are the preset before's, and the
-/// stepper says the database's Arp.
+/// The ring names a tab as the page last took it (the review of 2026-10-26): on AR Band Pass Slide,
+/// whose tabs the database names Arp, OSC 2 and Lead, the key's read of the first as Pluck is the
+/// check of the database's names since 0.16 (D3), and the page shows "Arp, from the database"; OSC 2
+/// is renamed Wobble from the page. Back in Avenger the Oscillator stepper says Wobble. A rename is
+/// an edit of the preset's tabs, so the database's names name none of them any more — not even as
+/// the page key took them: the first is OSC 1 a step to the left, and the third OSC 3, not Lead.
+/// ▶ to AR Deep Arp forgets the edit, and ◀ back to AR Band Pass Slide loads it from its file again:
+/// the stepper says the database's Arp.
 #[test]
 fn the_rings_stepper_says_a_tab_as_the_page_read_it_and_none_of_the_databases_after_a_rename() {
     run_mac(&scenario(r##"
@@ -466,13 +467,15 @@ fn the_rings_stepper_says_a_tab_as_the_page_read_it_and_none_of_the_databases_af
         T.pageReady()
         T.openPage()
         T.event()
-        T.ok(T.lastPost("state").state.osc_panel.names[1] == "Pluck", "read at the key")
+        T.ok(T.lastPost("state").state.osc_panel.names[1] == "Arp, from the database", "checked at the key: "
+          .. tostring(T.lastPost("state").state.osc_panel.names[1]))
         T.reads("AR Band Pass Slide", "Wobble", { preset = "AR Band Pass Slide", ["osc 1"] = "Pluck" })
         T.renameOpen({ action = "rename_osc", args = { index = 2 }, focused = true }, W, SEL2, { 341.4, 28, 438.6, 42 })
         T.ok(S.holding["Return"], "handed over")
         T.commit("Return", SEL2)
         local o = T.lastPost("state").state.osc_panel
-        T.ok(o.names[1] == "Pluck" and o.names[2] == "Wobble" and o.names[3] == nil, tostring(o.names[2]))
+        T.ok(o.names[1] == nil and o.names[2] == "Wobble" and o.names[3] == nil, tostring(o.names[1]) .. " "
+          .. tostring(o.names[2]))
         T.event()
         S.focusAtOnce, S.focusLands = true, function() S.front, S.chain = W, { W } end
         T.pageKey()
@@ -483,7 +486,8 @@ fn the_rings_stepper_says_a_tab_as_the_page_read_it_and_none_of_the_databases_af
         T.stepAt(header, i, -1)
         T.repaint(SEL1)
         T.tick(4)
-        T.ok(string.find(T.lastSaid() or "", "Pluck", 1, true) ~= nil, T.said())
+        T.ok(string.find(T.lastSaid() or "", "OSC 1", 1, true) ~= nil and string.find(T.lastSaid(), "Arp", 1, true) == nil,
+          T.said())
         T.stepAt(header, i, 1)
         T.repaint(SEL2)
         T.tick(4)
@@ -544,8 +548,8 @@ fn rename_osc_takes_no_selection_for_the_editor_and_double_clicks_a_selected_tab
     "##));
 }
 
-/// An OSC tab past the count, or a strip whose dots read no count, is refused with nothing clicked;
-/// no index at all is refused at once, with no trip.
+/// An OSC tab past the count, a strip whose dots read no count, or one covered — no dot at OSC 1's
+/// place — is refused with nothing clicked; no index at all is refused at once, with no trip.
 #[test]
 fn rename_osc_refuses_a_tab_past_the_count_or_with_no_count_and_clicks_nothing() {
     run_mac(&scenario(r##"
@@ -556,11 +560,20 @@ fn rename_osc_refuses_a_tab_past_the_count_or_with_no_count_and_clicks_nothing()
         T.ok(#S.clicks == clicks and T.lastPost("error").text
           == "Renaming an oscillator: OSC 4 is not there; VPS Avenger shows 3 oscillators", tostring(T.lastPost("error").text))
         T.event()
-        T.paintAvenger(98, 84, 1.6, {})
+        -- OSC 1's dot and one that fits no count's step: not counted.
+        local GREEN = { 100, 220, 180 }
+        T.paintAvenger(98, 84, 1.6, { osc = 3, dots = { { 246, 3, GREEN }, { 266, 3, GREEN } } })
         T.tripFrom({ action = "rename_osc", args = { index = 1 }, focused = true }, W)
         T.settle(2)
         T.ok(#S.clicks == clicks and T.lastPost("error").text == "Renaming an oscillator: the oscillator tabs cannot be "
           .. "counted now", tostring(T.lastPost("error").text))
+        -- No dot at all, OSC 1's among them: the strip covered (read/strip.luau, A COVERED STRIP).
+        T.event()
+        T.paintAvenger(98, 84, 1.6, {})
+        T.tripFrom({ action = "rename_osc", args = { index = 1 }, focused = true }, W)
+        T.settle(2)
+        T.ok(#S.clicks == clicks and T.lastPost("error").text == "Renaming an oscillator: the oscillator strip is covered "
+          .. "now, perhaps by a menu of VPS Avenger's; nothing was clicked", tostring(T.lastPost("error").text))
         T.event()
         focus = #S.focusCalls
         T.pageMsg({ action = "rename_osc", args = {}, focused = true })
@@ -635,7 +648,8 @@ fn browse_presets_says_the_tools_sentence_holds_only_return_clicks_nothing_and_r
         T.ok(S.holding["Return"] and not S.holding["Escape"] and T.open() == true, "Return alone, let through")
         T.ok(T.lastSaid() == "Browse presets in Avenger. To return to Avenger Control, press Return."
           and S.speech[#S.speech].interrupt == false, tostring(T.lastSaid()))
-        T.answer(T.lastRead("vps-avenger browse"), T.nameRead("LD Palm´s Lead 1"))
+        -- No read of the name before (until 0.16 one, for a log line alone: mt-verified, finding 13).
+        T.ok(T.lastRead("vps-avenger browse") == nil, "no read before the hand-over")
         T.ok(T.typed("Escape") == "passed", "Escape is Avenger's browser's")
         -- Tab does nothing in Avenger's browser (Act.SWALLOWED): taken, the browser's sentence once.
         T.ok(S.menuTaken["Tab"] and S.menuTaken["Shift+Tab"], "Tab and Shift+Tab swallowed")
@@ -653,8 +667,7 @@ fn browse_presets_says_the_tools_sentence_holds_only_return_clicks_nothing_and_r
         T.ok(st.preset == "AR Deep Arp" and st.expansion == "Alpha",
           tostring(st.preset) .. " " .. tostring(st.expansion))
         T.ok(T.lastPost().kind == "focus" and T.lastPost().id == "browse-expansion-presets-button", tostring(T.lastPost().id))
-        T.ok(T.count("[avenger] [browse] the name at the start 'LD Palm´s Lead 1', after Return 'AR Deep Arp' (read ") == 1,
-          T.dump())
+        T.ok(T.count("[avenger] [browse] the name after Return 'AR Deep Arp' (read ") == 1, T.dump())
         T.ok(S.front == T.PAGE_WIN and not S.holding["Return"] and not S.menuTaken["Tab"], "the page back, the keys back")
         T.ok(T.held() == 0, "every picture released: " .. T.held())
     "##));
@@ -687,19 +700,19 @@ fn browse_presets_ended_by_the_page_key_or_another_window_posts_the_name_as_not_
 }
 
 /// Browse Presets with Avenger's window leaving the front between the act's check and the hand-over
-/// (while the name's read is asked): handOver answers `not_in_front`, having given the trip up itself,
+/// (as handOver reads its keys): handOver answers `not_in_front`, having given the trip up itself,
 /// so the module ends nothing — the page hears the give-up's words, and no "the keyboard was not
 /// handed over" follows on a trip already over.
 #[test]
 fn browse_presets_refused_for_the_front_leaves_the_words_to_the_give_up() {
     run_mac(&scenario(r##"
         local _, _, W = T.pageOn({ osc = 1, selected = "osc", index = 1 }, { preset = "LD Lead 1" })
-        local recognize = T.host.ocr.recognize
-        rawset(T.host.ocr, "recognize", function(r, opts, cb)
-          if type(opts) == "table" and opts.key == "vps-avenger browse" then
+        local normalize = T.host.keys.normalize
+        rawset(T.host.keys, "normalize", function(k)
+          if debug.info(2, "n") == "handOver" then
             S.listed, S.front, S.chain = { W, T.OTHER }, T.OTHER, { T.OTHER }
           end
-          return recognize(r, opts, cb)
+          return normalize(k)
         end)
         T.tripFrom({ action = "browse_expansion_presets", args = {}, focused = true }, W)
         T.settle(2)

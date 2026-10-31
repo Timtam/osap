@@ -3,6 +3,182 @@
 Project backlog for the cross-platform automation platform.
 Architecture and feasibility foundation: [docs/architecture-feasibility-study.md](docs/architecture-feasibility-study.md).
 
+## The second Windows session and the developer's Mac test (2026-10-31)
+
+Two sessions of 2026-10-31, both on build c70dacf (VPS Avenger 0.15.1, overlay runtime 0.16.0):
+the second Windows session (REAPER, the VST3 at 80 %, the display at 100 %, calibration off) and
+the avenger_control developer's Mac test (Logic, Avenger at 80 %), with his calibration pictures
+sent after it. Both analysed and adversarially verified (avw2-verified, mt-verified, in the
+session's notes). Built on wip/avenger-1031 as VPS Avenger 0.16.0 and overlay runtime 0.16.2;
+tested headless, not yet run on either platform.
+
+The maintainer's decisions of 2026-10-31:
+
+- **D1.** MENU's Load preset and Save preset as, in the ring and on the page, go like the original
+  (its `_pick_menu_item`): MENU clicked once, its `_MENU_OPEN_DELAY_SEC` (0.18 s) waited with
+  `host.timer.after` from MENU's click made (its callback: a click D4 holds would otherwise take the
+  item with it), the item clicked ONCE at its fixed point — no drawn-menu test, no second item
+  click, no clean-up click on MENU, no retry. The maintainer's documented exception to the rule
+  against timers: the drawn test missed a popup already open at the press, ten presses given up
+  after 8 s. Initialize stays on the drawn test.
+- **D2.** Save preset leaves the ring, as the project leaves it out; Save preset as stays.
+- **D3.** The OSC tabs' and the macros' names and the macro tabs' count come from the preset
+  database first wherever it places the preset; the screen is read for them once per page key, as a
+  check. This reverses 0.14's order for the ring's Oscillator stepper.
+- **D4.** Windows: a `host.input.click` with `clicks = 1` within the double-click time and rectangle
+  of this host's last press of the same button is made, from the input-gesture thread, once that
+  time has passed (docs/api/input.md, its Windows block).
+- **D5.** `host.screen.scaling` (docs/api/screen.md): the monitor's effective DPI / 96 and the
+  system's on Windows, 1 on a Mac. VPS Avenger takes its own window's display factor as 1 only
+  where both are 1. The width's factor stays logged only until a 75 % step is measured.
+- Also decided: B4 as its variant that claims nothing (the Drums controls kept, nothing claimed,
+  read again); B5 yes (the twelve fixed role names, no slot-label reads); B6 "Preset name not read
+  after Next; before it: …"; B7 the open expansion posted as not read after a step into another;
+  B8 keep reading names after ◀ and ▶; B9 no host OCR change. Not built: the open-popup record
+  (R1/R1b) and Escape for a popup left open (M2), both superseded by D1; the separate zoom-field
+  read (avw2 A3's 1b and 1c), superseded by D5.
+
+Built (one line each, and the tests in `crates/host/src` below it):
+
+- [x] **D4, the held single click** (host, `backend/held_click.rs`, its pure `wait_before_single`):
+      `held_click::tests`;
+      `a_held_single_click_reaches_the_grids_last_page_where_a_paired_one_does_not`.
+- [x] **D5, `host.screen.scaling`** (host), and `knownDisplay` (header.luau): 80 % seen, 1.6000:
+      `scaling_reads_a_point_or_a_window_and_answers_a_table_or_why_not`;
+      `on_windows_a_display_scaled_nowhere_gives_the_zoom_from_the_headers_size`.
+- [x] **A9, the page's OVER share with one decimal** (host):
+      `the_share_a_page_is_over_has_one_decimal`.
+- [x] **The drawn test's false "gone"** (runtime 0.16.1, mt-verified R2 as corrected):
+      `a_highlighted_row_in_a_four_row_popup_is_not_its_close`;
+      `a_sparse_popup_closing_over_a_redrawn_plugin_is_still_gone`;
+      `a_popup_of_one_band_closing_over_the_plugin_as_it_was_is_gone`.
+- [x] **`O:afterDialog` takes a window listed since the call** (runtime 0.16.1, R3):
+      `after_dialog_takes_a_listed_window_of_the_process_when_none_is_in_front`.
+- [x] **D1, Load preset and Save preset as like the original** (main.luau `pickFileItem`), its guard
+      logging what it decided where the popup could be a window of its own, the 0.18 s from MENU's
+      click made, and an item left unclicked because Avenger left the front said in the ring:
+      `menus_load_and_save_as_are_clicked_like_the_original_and_initialize_in_the_popup_seen`;
+      `menus_load_waits_from_menus_click_made_and_an_item_left_unclicked_is_said`;
+      `menus_file_items_are_clicked_once_at_the_projects_points_and_initialize_is_followed`.
+- [x] **A cancelled Load or Save as said "<label>: <name>, unchanged"** (F8):
+      `load_preset_cancelled_says_the_name_unchanged`.
+- [x] **D2, Save preset out of the ring**:
+      `menus_items_in_the_ring_are_load_save_as_and_initialize`.
+- [x] **D3, the database's names first, checked once per page key** (read/open.luau):
+      `the_databases_names_come_first_and_the_page_key_checks_them`.
+- [x] **The loading bar is no name, nor a reading only guessed** (F7; runtime 0.16.2 hands an OCR
+      button's `value` the reading):
+      `a_step_does_not_take_avengers_loading_bar_even_read_twice_alike`;
+      `a_bar_near_full_is_still_loading`;
+      `the_preset_read_out_says_no_guessed_name_and_drops_a_lone_bullet`.
+- [x] **The macros' dot, look-alike letters, default names and "UACRO 1"** (F12, avw2 A2 and A6):
+      `a_macro_fields_dot_is_no_part_of_its_name`;
+      `avengers_default_macro_names_are_taken_through_look_alike_letters`;
+      `the_macro_tab_count_comes_from_the_database_when_the_caption_reads_uacro`.
+- [x] **Reads nobody needed gone** (F13: the central captions, Browse Presets' first name, a macro
+      button's toggle):
+      `the_page_keys_first_text_read_holds_no_central_captions`;
+      `a_macro_button_toggle_reads_no_text`.
+- [x] **What a trip told the page, one log line** (avw2 A7: `'<label>': answered — …`).
+- [x] **The presets' place not known after a category's click** (avw2 A1, the developer's
+      correction): the reset from the end of the whole category, stored only once a series went
+      through. Where the list already stood at its top, its first up-click stands still for one
+      change wait's bound, 2 s (the tool spends 9 × 0.35 s):
+      `the_tools_tables_place_an_expansion_a_category_and_a_preset_and_their_scrollbars_clicks`;
+      `a_category_click_leaves_the_preset_list_not_known_and_it_goes_up_from_the_categorys_end`;
+      `a_give_up_mid_reset_leaves_the_presets_place_not_known`;
+      `the_stars_are_not_read_where_the_presets_place_is_not_known`;
+      `a_preset_far_down_its_category_is_reached_by_the_tools_scrollbar_clicks` (6 clicks planned).
+- [x] **The gap between two clicks at one point, in the log** (avw2 A4: `… ms after the click before
+      it at this point`), in the second test above.
+- [x] **FAV off a settled picture after an Open** (avw2 A5); where Avenger draws the open expansion
+      whole in its first picture, the wait runs to its bound:
+      `fav_after_an_open_is_read_off_the_settled_picture`.
+- [x] **The view's icon by its pixels, the caption read only where neither** (F10):
+      `the_view_icon_tells_an_open_expansion_from_the_grid_without_a_text_read`.
+- [x] **The SELECTED row moves with a step** (F3), the open expansion not read after a step into
+      another (B7), an unread step's name before said as that (B6), the heading's log lines:
+      `a_step_moves_the_selected_row_of_the_open_expansion`.
+- [x] **The selection by the band's floor, under the level meter** (F4B):
+      `the_level_meter_under_a_tab_moves_no_selection`.
+- [x] **A covered strip decides nothing** (F4A: OSC 1's dot, `O:menuOpen`, MENU's items' words):
+      `a_strip_under_avengers_menu_is_not_read_and_not_kept`;
+      `the_rings_strip_under_a_menu_is_read_again_at_each_press`;
+      `a_missing_first_dot_with_the_others_seen_is_covered`.
+- [x] **The Drums controls kept while the selection is not read; a tab's click held only on a decided
+      read** (F4C as B4's variant):
+      `an_undecided_read_keeps_the_rings_drums_group_and_reads_again_at_the_next_press`;
+      `an_undecided_read_before_a_drum_click_keeps_the_pages_drums_section`;
+      `a_tab_click_whose_read_after_decides_nothing_is_looked_on_from`.
+- [x] **Mute and Solo leave the selected tab alone** (avw2 A8):
+      `a_mute_whose_read_after_decides_no_tab_leaves_the_selected_tab_alone`.
+- [x] **The OSC names read from 32 to 38.3** (F11):
+      `the_osc_name_regions_leave_out_the_tabs_rule_and_the_meter`.
+- [x] **The drumkit's and a slot's Back and Next: one click, said as sent** (F5):
+      `back_and_next_send_one_click_and_say_it_sent`;
+      `a_slots_back_next_and_edit_sample_are_read_after`.
+- [x] **The twelve fixed role names, no slot-label read** (F6, B5); Browse and a slot menu's items
+      decided by the change wait on the rows:
+      `drum_reads_ask_no_slot_names_and_the_page_shows_the_fixed_roles`;
+      `browse_decides_by_the_change_wait_on_the_slots_row`.
+
+What the developer's calibration pictures of 2026-10-31 settled: D1's points land on MENU's rows
+at 80 % (Load on "Load preset…", Save as on "Save as…"); the band's floor and TAB_LEAD (on the
+second Mac test's `OSC Tabs` pictures and `strip-80pct.png`, MENU's popup over OSC 1's dot there);
+the view icon's box and thresholds (`browser*-80pct.png` with the second Mac test's 25
+`Expansions` pictures); the first picture after an Open still showing the grid's tiles
+(`browser-open-80pct.png`); the macro fields' dot; the drums' rows (15.5 apart from 49, within
+0.6 of a unit).
+
+Open:
+
+- [ ] **B3. ◀ and ▶ on Init Preset after a page Select** (avw2 X-F2): wait for the tester's answer
+      (question 1 below). If Avenger stepped from the Select's row: refuse only while this window
+      has had no page Select or Load row click since the overlay came (a per-window fact, forgotten
+      at Close and wherever `browserAt` is), otherwise click and watch. Test:
+      `previous_and_next_step_from_init_preset_once_a_select_has_clicked_a_row`; the existing
+      fresh-instance test stays.
+- [ ] **Initialize still on the drawn test** (D1 left it there): a popup already open at its press
+      is missed as Load's was. If a log shows it, the open-popup record (mt-verified R1/R1b) is the
+      fix, with its tests `a_popup_open_at_the_press_is_chosen_in_without_clicking_its_opener` and
+      `an_opener_is_not_clicked_when_a_test_sees_its_menu_open_at_the_press`.
+- [ ] **The 75 % step on Windows** (A2): with D5 the Zoom stepper works on a display at 100 %; one
+      step to 75 % and back shows whether the width follows the zoom (1307 ± 1 px at 75 %). Then the
+      width's factor (w / 871.25) may be taken on the own window, the header as a check
+      (avw2-verified B2(b)): the 110 % display test flips then.
+- [ ] **The pump blocked 1002 ms by `window.focusChain()`** (host) while Logic did not answer
+      accessibility (the developer's Mac test, around the Load Preset panel).
+- [ ] **Unmeasured**: a KalliGui popup as a window of its own (D1's guard logs what it decided);
+      the loading bar on Windows; a popup that takes the front; the meter at 50 %, 100 % and 200 %;
+      Avenger's first picture after an Open on Windows; whether a state of Avenger draws OSC 1 with
+      no dot (it would read as covered).
+- [ ] **For the tester (Windows)**, the next session with calibration on and the screen curtain off:
+      1. How did you get from "AR A State of Trance" selected on the page to "VO Hey Mr Robo" —
+         Avenger's ◀ (JAWS cursor), the arrow keys in Avenger, or otherwise? How often?
+      2. Does your Avenger show all 129 expansions of the list chosen? Is "Vocal Dreams 1" second to
+         last on the last page of 8 per Row?
+      3. What did you hear at "Zoom", "Macro tab" and "Macro 1"? Did you leave Zoom, Undo, a macro
+         held and the renames out for that, or for time?
+      4. Was FAV on in Avenger when Factory opened? The page said on right after the open, off soon
+         after.
+      5. Load a preset, open Factory, then Vocal Dreams 1, and step the zoom once to 75 % and back.
+         Is Windows' double-click speed (mouse settings) at its default?
+- [ ] **For the developer (Mac)**:
+      1. Escape on Avenger's open MENU popup in Logic: does it close it without a file dialog? A
+         second click on MENU: does the popup close and open again, or nothing? (The menu pictures
+         say it stays open.)
+      2. Is there a state in which OSC 1 shows no dot at all, an oscillator switched off? Is the
+         bright bar under a tab's name, growing with the sound, the level meter?
+      3. **C4. Do "Copy to" and "Swap with" change the abbreviations on screen (CRSH … BD), or do the
+         abbreviations stay and only the samples move?** If they move: **B10**, a slot-label read once
+         per Drums visit to notice it (the original moves its names in memory on Copy, Swap and
+         Remove: panel/pages.py).
+      4. What does VoiceOver say on the page's heading right after Next: the new name with its
+         expansion, "Preset name, not read", or the old name? (The heading's log lines now say what
+         the page was posted and showed.)
+      5. A calibrating run with MENU closed and a note held, at 50, 80, 100 and 200 % zoom, once
+         with Drums and once with an OSC tab selected: the meter against the selection's band.
+
 ## The first Windows session with VPS Avenger (2026-10-30)
 
 The maintainer's first session with VPS Avenger on Windows: REAPER, the VST3 in a track's FX chain,
@@ -54,7 +230,8 @@ headless, not yet run on Windows:
 Open:
 
 - [ ] **The next Windows session's checks** (the screen curtain off; the log and the calibration
-      folder after it):
+      folder after it). The second Windows session of 2026-10-31 answered 1 (the identity: "not
+      yet" once, then the header matched); 3 to 6 left no trace (the section of that day above):
       1. The first open: the FX window opened, the keyboard in Avenger — `attachEmbedded: matched
          control [KalliGuiWin…] id=… identify=true` and `[avenger] 'FX: …' (1394x894): VPS
          Avenger, the zoom field reads 80 % — zoom 80 % (read), factor 1.6000, display factor 1.00;
@@ -1126,7 +1303,10 @@ double-click and O.doubleClick on it (the overlay runtime 0.15.0), the 1,034 ms 
       on this Avenger (the tool's tables, measured on the tool's), and how long a scrollbar click's
       list takes to stand still (its change wait looks 2 s at most, with a still spell of 60 ms:
       the `… clicked at … — the list moved | stood still` lines); whether a click on the category
-      shown takes its presets back to their top (the tool takes it so, and so does this module);
+      shown takes its presets back to their top (the tool takes it so, and so did this module) —
+      **answered** by the avenger_control developer's correction of 2026-10-31: it does not, the list
+      stays where Avenger last had it; taken over in vps-avenger 0.16.0 (the section of 2026-10-31
+      above);
       whether a single click on a row loads the preset (D16) — **answered** by the avenger_control
       developer's feedback of 2026-10-26 on 0.13.0: it does not; it lets the preset be heard, and
       the header's name stays, so Select watches no name since 0.14.0 (F1 above); and an
@@ -8908,13 +9088,17 @@ tester's stage-1 instructions are a text of their own, not in the repository.
       neural fallback's shared-out boxes are no evidence (`read only in boxes the recogniser
       guessed`) and are read again. If 50 % fails, the header band is read enlarged, or the zoom
       told apart some other way — decided on the pictures.
-- [ ] **A misread zoom caption on Windows.** On a DAW's panel a caption misread as another step
+- [x] **A misread zoom caption on Windows.** On a DAW's panel a caption misread as another step
       never fits (the display factor is 1). On Windows the display factor is learned from the
       header, and a misread can land on a quarter step that fits within 3 %: 60 % read as "50%" at
       150 % display is 1.8 against 1.75. The factor is then 3 % off and the zoom wrong. A host
       primitive for the display scaling a window is drawn at (a general one, `GetDpiForWindow` on
       Windows, 1 on a Mac, where coordinates are points) would make the display factor known there
-      as it is on a panel. Build it once an Avenger on Windows shows the case.
+      as it is on a panel. Build it once an Avenger on Windows shows the case. **Built** on
+      2026-10-31 (the decision D5, the section of that day above): `host.screen.scaling`, and
+      VPS Avenger's own window taken at a display factor of 1 where its monitor and the system are
+      both at 100 %. What is left is a desktop scaled somewhere: there the factor is learned from the
+      header as before.
 - [x] **Avenger's popups as windows** (MENU, the zoom list, the redo list): the `newWindow: a window
       appeared …` lines; whether one comes to the front (`came to the front after …`: the overlay
       holds its place over it); how many clicks an item took (`clicking … again, n of 4`); whether
@@ -8929,17 +9113,21 @@ tester's stage-1 instructions are a text of their own, not in the repository.
       it; the tester text asks for that sentence.
       Obsolete: the popups are painted inside the editor, and the drawn test handles them (item 5,
       "Avenger's own popups on a Mac"), triage 2026-10-24.
-- [ ] **A popup a choice left open is closed with a second click on its opener.** The project
+- [x] **A popup a choice left open is closed with a second click on its opener.** The project
       closes the zoom list that way; that MENU's popup closes the same way is JUCE's modal popup,
       not measured. The `[avenger] '…': its popup was left open (…) — clicking its opener again`
-      line and the `[menu] … the menu has closed` after it show whether it did.
+      line and the `[menu] … the menu has closed` after it show whether it did. **Answered: no**,
+      for MENU's popup (the developer's Mac test of 2026-10-31: the log, and his pictures of the
+      popup before and after a click on MENU, pixel for pixel the same). Load preset and Save
+      preset as no longer close it at all (the decision D1, the section of that day above).
 - [ ] **The zoom list at high zooms on a small screen.** At 150–200 % on a MacBook the list may not
       fit below the field. Moved, it is placed by its own height; cut short with scroll arrows it
       is refused (`cut short, so it scrolls; nothing chosen`) and closed, which leaves no way down
       from that zoom through the overlay — measure first, then read the list's visible rows.
 - [ ] **The warning boxes.** Inside Avenger, as the project says, or windows? Initialize's YES and
       NO against the table (the offsets in the log line). Save's box: whether Save always opens
-      one (and not a file dialog for a factory preset), its words and its YES and NO. A box that is
+      one (and not a file dialog for a factory preset), its words and its YES and NO (moot since
+      Save preset left the ring: vps-avenger 0.16.0, the decision D2 of 2026-10-31). A box that is
       a window leaves the header holding its place over it with no keys and would have its buttons
       refused as covered; the box overlay then needs the box's window as its origin.
 - [ ] **A warning box off the screen.** Save and Initialize are refused when the box's band, placed

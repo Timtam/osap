@@ -348,7 +348,28 @@ function P.bandMean(prof, x1, x2)
   return sum / (to - from + 1), to - from + 1
 end
 
--- The same over a profile's ROWS between screen y1 and y2 (a profile asked with `axes` "both"),
+-- A column profile's FLOOR between screen x1 and x2: the mean over those columns of each one's
+-- darkest pixel (`columns.min`, a luminance, ITU-R BT.601 — not on bandMean's (r + g + b) / 3
+-- scale), and how many columns that is, and bandMean's mean over them in the same loop; nil
+-- outside it. A feature one row tall in a band of three — a level meter's bar, a glyph's foot —
+-- moves a column's mean and leaves its darkest pixel alone (read/strip.luau, THE SELECTED TAB).
+function P.bandFloor(prof, x1, x2)
+  local cols = prof and prof.columns
+  if not (cols and cols.min) then return nil end
+  local from = math.max(x1, prof.x) - prof.x + 1
+  local to = math.min(x2, prof.x + prof.w) - prof.x
+  if to < from then return nil end
+  local sum, mean = 0, 0
+  local mins, r, g, b = cols.min, cols.r, cols.g, cols.b
+  for i = from, to do
+    sum += mins[i]
+    mean += r[i] + g[i] + b[i]
+  end
+  local n = to - from + 1
+  return sum / n, n, mean / 3 / n
+end
+
+-- P.bandMean's mean over a profile's ROWS between screen y1 and y2 (a profile asked with `axes` "both"),
 -- and how many rows that is; nil outside it.
 function P.rowMean(prof, y1, y2)
   local rows = prof and prof.rows

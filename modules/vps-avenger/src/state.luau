@@ -8,16 +8,19 @@
 -- and the page says it as "not read". A state goes whole, so a key that is missing from it was not
 -- read. Values that come from the preset database rather than the screen — the expansions list,
 -- the expansion the preset is in, an open expansion's categories and presets, the database's
--- spelling of a name read near it, a count of the OSC tabs — are posted as they are, with no key
--- that marks them: the maintainer's decision of 2026-10-26 (src/presets.luau, WHAT IT MAY DO).
--- Only a count the user confirmed is said so (`count_from`).
+-- spelling of a name read near it, a count of the OSC tabs, and since 0.16 the OSC tabs' and the
+-- macros' names and the macro tabs' count where it has the preset (the maintainer's decision of
+-- 2026-10-31: the database first, the screen read at the page key as a check) — are posted as they
+-- are, with no key that marks them: the maintainer's decision of 2026-10-26 (src/presets.luau,
+-- WHAT IT MAY DO). Only a name of the database's that the page key's read disagrees with carries
+-- ", from the database" in its own words, and a count the user confirmed is said so (`count_from`).
 --
 -- The values are read/open.luau's, all of them at the page key: the preset's name and the zoom,
 -- the browser's view, an open expansion and FAV; the oscillator strip — the count, the names, the
 -- tab selected, Mute and Solo, on the Drums tab its switches and mode, and the selected
 -- oscillator's knobs; the central tab with the Drums tab, and DRUM SQ on it; on the Drums tab the
--- drumkit table — every slot's Mute, Solo, Lock and Loop, the slot selected and the slots' names
--- (read/drums.luau) — and with EDITOR the sample editor's tab shown, the editor or the browser in
+-- drumkit table — every slot's Mute, Solo, Lock and Loop and the slot selected (read/drums.luau)
+-- — and with EDITOR the sample editor's tab shown, the editor or the browser in
 -- its place and the tab's switch for the slot selected (read/sample.luau); DRUM SQ's length where an
 -- action or the page key read it; the macro tabs, the tab shown, its names, buttons and knobs. A
 -- value read that the page has no place for — a menu's field, DRUM SQ's speed, the envelope's
@@ -26,9 +29,13 @@
 -- read/open.luau's Open.keptNames) and a strip read's words for its tabs (`oscWords`, and
 -- `oscWordsOf` the name they were taken for), which are never posted — the words are the read's
 -- own, for the sentences of the action that read them, never taken from here later: a step
--- replaces only the name (S.set), and its words would be the preset's before. A slot's name not
--- read is a hole, which the page shows by the slot's role in the kit, said as not read — never as
--- the kit's name, as the tool showed its factory names.
+-- replaces only the name (S.set), and its words would be the preset's before. A slot's name is
+-- never read: the twelve slots are Avenger's fixed roles, which the table draws abbreviated (CRSH
+-- … BD) whatever the kit, and the page and the ring say them as the project's table has them
+-- (read/drums.luau, THE NAMES: the maintainer's decision of 2026-10-31, B5). Until 0.16 the names
+-- were read and posted, and this rule said a name not read was never to be shown as the kit's —
+-- on the premise that the column held kit names, which the developer's Mac test of that day
+-- refuted.
 --
 -- The browser's (src/actions/browser.luau, src/read/browser.luau): its view, an open expansion and
 -- its name read in the header — or, where the header did not read it after this session's own click
@@ -91,12 +98,22 @@ local function ownSlot(values)
   if on then values.editorOn = { tab = on.tab, on = on.on, slot = values.kitSelected } end
 end
 
+-- The tab the last read of the strip that DECIDED one read as selected in window `st` (the fact
+-- `tab`): the page keeps its Drums section by it while a later read decides none — said as
+-- "selection not read now", every value of it not read — until one decides another (the developer's
+-- Mac test of 2026-10-31, mt-verified finding 4C; the maintainer's decision of that day, B4's
+-- variant that claims nothing). A layout, never a value: nothing is said or clicked by it.
+local function noteTab(st, values)
+  if values.selectionState == "read" then st.facts.tab = values.selectedType end
+end
+
 -- Window `id`'s values as read just now: `values` replaces what was read there before, keys
 -- absent from it included — a value a read did not find is not kept from an earlier read.
 function S.read(id, values)
   local st = forWindow(id)
   st.values = values
   ownSlot(values)
+  noteTab(st, values)
   st.at = host.now()
 end
 
@@ -117,6 +134,7 @@ function S.part(id, keys, values)
   local st = forWindow(id)
   for _, k in ipairs(keys) do st.values[k] = values[k] end
   if table.find(keys, "editorOn") then ownSlot(st.values) end
+  if table.find(keys, "selectionState") then noteTab(st, values) end
   st.partAt = host.now()
 end
 
@@ -173,7 +191,10 @@ end
 -- Where this session's own clicks left the open expansion's lists in window `id`, which nothing
 -- read shows: { expansion, categories = "top" | "bottom" | nil (the end of its list of categories
 -- the scrollbar's clicks took it to), category = the category clicked, presets = { page, first,
--- final } of that category's list (src/tables/pages.luau, Pg.presetPlace's) }, or nil: not known —
+-- final } of that category's list as this session's completed scrollbar clicks left it
+-- (src/tables/pages.luau, Pg.presetPlace's), or Pg.presetsUnknown() — after the category's own
+-- click, which leaves Avenger's list where Avenger had it, and while a series of clicks is out (the
+-- avenger_control developer's correction of 2026-10-31) }, or nil: not known —
 -- the expansion opened by another way, the user's own Browse Presets, a read naming another one,
 -- a preset's name after a click that is not the one asked.
 function S.browserAt(id)
@@ -251,6 +272,24 @@ function S.tabsEdited(id, preset)
   if e.preset == nil then e.preset = preset end
   if e.preset ~= preset then
     st.facts.oscEdited = nil
+    return false
+  end
+  return true
+end
+
+-- The same for the macros (the fact `macrosEdited`, { preset = the name read before }): a macro
+-- tab added or deleted (src/actions/macros.luau, a count read changed), a macro's field renamed
+-- (handover.luau's rename_macro, Return). The database's count and names of the preset's macros
+-- are then its file's, and are not taken (read/open.luau) — the screen is read for them as for a
+-- preset the database does not have — until a name read there differs.
+function S.macrosEdited(id, preset)
+  local st = id and byWindow[id] or nil
+  local e = st and st.facts.macrosEdited
+  if not e then return false end
+  if preset == nil then return true end
+  if e.preset == nil then e.preset = preset end
+  if e.preset ~= preset then
+    st.facts.macrosEdited = nil
     return false
   end
   return true
@@ -338,6 +377,10 @@ local function oscPanel(v, facts)
     solo_states = list(v.oscSolo, n),
     selected_type = v.selectedType,
     selected_index = v.selectedType == "osc" and v.selectedIndex or nil,
+    -- Keys of the port's: the strip read covered (read/strip.luau, A COVERED STRIP), said in the OSC
+    -- area; and the Drums section kept while the selection is not read now (noteTab).
+    strip_covered = v.stripCovered or nil,
+    drums_kept = (v.selectedType == nil and facts and facts.tab == "drums") or nil,
     drums_mute = v.drumsMute,
     drums_solo = v.drumsSolo,
     trig_mute = v.trigMute,
@@ -399,7 +442,6 @@ local function oscPanel(v, facts)
   -- The drumkit table: twelve slots, a hole where a value was not read, and a key left out where
   -- its part was not read.
   out.drumkit_part_selected = v.kitSelected and tostring(v.kitSelected) or nil
-  if v.kitNames then out.drumkit_part_labels = slots(v.kitNames) end
   if v.kitMute then out.drumkit_mute_states = slots(v.kitMute) end
   if v.kitSolo then out.drumkit_solo_states = slots(v.kitSolo) end
   if v.kitLock then out.drumkit_lock_states = slots(v.kitLock) end
@@ -449,6 +491,11 @@ function S.snapshot(id, shown, opts)
   local v = st and st.values or {}
   local out = {
     preset = v.preset,
+    -- Where a click's name was not read: the name before it and its expansion, and after what — a
+    -- key of the port's, which the heading says as that, never as the preset now (actions.luau, go:
+    -- the maintainer's decision of 2026-10-31, B6).
+    preset_before = v.preset == nil and v.presetBefore and { name = v.presetBefore.name,
+      expansion = v.presetBefore.expansion, after = v.presetBefore.after } or nil,
     preset_steps_unavailable = stepsWhy(v),
     zoom = v.zoom,
     expansion_view = v.expansionView,

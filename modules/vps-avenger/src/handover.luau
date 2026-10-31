@@ -101,13 +101,20 @@ local function placer(o)
 end
 
 -- The text of table rectangle `rect` in snapshot `snap`, tidied, or nil: the name read back, in a
--- handler, where the read waits.
+-- handler, where the read waits. A reading only in boxes the recogniser guessed is none (R.guessedOnly:
+-- PaddleOCR alone, whose readings of Avenger's name field were all inventions in the developer's Mac
+-- test of 2026-10-31) — a name the user typed is never looked for in the database (the tool's
+-- skip_db_snap), so nothing can vouch for it.
 local function textIn(pl, snap, rect)
   local r = pl:rect(rect)
   if not r then return nil end
   local ok, res = pcall(host.ocr.recognize, { name = "the field renamed", region = r }, { snapshot = snap, lang = H.lang() })
   if not (ok and type(res) == "table" and res.status == "text") then return nil end
   local t = R.tidy(res.text)
+  if t ~= "" and R.guessedOnly(res) then
+    log("the field reads '%s' only in boxes the recogniser guessed — not taken", t)
+    return nil
+  end
   return t ~= "" and t or nil
 end
 
@@ -307,7 +314,7 @@ function Hv.renamePreset(o, trip, forget)
   if not pl then return trip:done({ error = "VPS Avenger's size cannot be told now" }) end
   Hv.rename(o, trip, {
     kind = "preset", label = "Renaming the preset", pl = pl, at = G.NAME, field = G.NAME_REGION,
-    first = function() forget("renaming from the page") end,
+    first = function() forget("renaming from the page", nil, was) end,
     read = function(_, _, now, pl2, info)
       local text = now and textIn(pl2, now, G.NAME_REGION)
       if not text then
@@ -320,7 +327,9 @@ function Hv.renamePreset(o, trip, forget)
       log("'preset': %s — read '%s'%s", tostring(info.key), name,
         kept and (", the name before ('" .. tostring(was) .. "') kept") or ", the user's own")
       if kept then return { set = E.named(name), focus = "rename-preset-button" } end
-      return { set = { preset = name, expansion = false }, focus = "rename-preset-button" }
+      -- The user's own name: no expansion's, and no row of the open expansion's the loaded one.
+      return { set = { preset = name, expansion = false, loadedIndex = false, presetBefore = false },
+        focus = "rename-preset-button" }
     end,
   })
 end
@@ -342,11 +351,13 @@ local function renameTab(o, trip, i, n, pl, label, before)
       log("'osc %d': %s — %s", i, tostring(info.key), name and ("read '" .. name .. "'") or "nothing read")
       local part = { keys = keys, values = va }
       if not name then return { part = part, facts = facts, error = Hv.NOT_READ } end
-      -- The other tabs' names as last read where they were read under this preset's name and over
-      -- this count (Open.keptNames) — kept as read under them again — and holes otherwise.
+      -- The other tabs' names as last read where they were read off the screen under this preset's
+      -- name and over this count (Open.keptReadNames) — kept as read under them again — and holes
+      -- otherwise: the database's, which the page key took (read/open.luau, THE DATABASE FIRST), name
+      -- none of an edited preset's tabs.
       local w = E.plugin()
       local count = va.oscCount or n
-      local keptNames = Open.keptNames(S.values(w and w.id), preset, count)
+      local keptNames = Open.keptReadNames(S.values(w and w.id), preset, count)
       local names = {}
       for j = 1, count do names[j] = keptNames and keptNames[j] end
       names[i] = name
@@ -426,7 +437,10 @@ function Hv.renameMacro(o, trip, index)
     kind = "macro", label = "Renaming macro field " .. index, pl = pl, at = M.FIELDS[field],
     field = M.FIELD_NAMES[field], after = "macros", part = before,
     read = function(_, _, now, pl2, info)
-      if not now then return { part = before, error = Hv.NOT_READ } end
+      -- Return may have renamed the field, read back or not: the database's names of the preset's
+      -- macros are not taken from now on (state.luau, S.macrosEdited). Escape renamed nothing.
+      local facts = info.key ~= "Escape" and { macrosEdited = { preset = vb.macrosOf } } or nil
+      if not now then return { part = before, facts = facts, error = Hv.NOT_READ } end
       local va, keys = Open.part(now, "macros", { pl = pl2, macroCount = vb.macroCount })
       local name = textIn(pl2, now, M.FIELD_NAMES[field])
       log("'macro %s': %s — %s", field, tostring(info.key), name and ("read '" .. name .. "'") or "nothing read")
@@ -436,38 +450,31 @@ function Hv.renameMacro(o, trip, index)
       va.macroCount, va.macroLabels = vb.macroCount, labels
       for _, k in ipairs({ "macroCount", "macroLabels" }) do keys[#keys + 1] = k end
       local part = { keys = keys, values = va }
-      if not name then return { part = part, error = Hv.NOT_READ } end
-      return { part = part, focus = focus }
+      if not name then return { part = part, facts = facts, error = Hv.NOT_READ } end
+      return { part = part, facts = facts, focus = focus }
     end,
   })
 end
 
 -- ── Browse Presets ───────────────────────────────────────────────────────────
 -- A trip with no click: the preset may change while the user browses, so the database's position is
--- forgotten first and a give-up posts the preset as not read (actions.luau, go). The name as it
--- stands is read once with a callback, for the log only (U5); the keyboard is handed over with
--- Return alone — Escape and the arrows are Avenger's browser's — and the tool's sentence said
--- behind the screen reader. Once Return has gone through, the name is read until two readings agree
--- or it is a catalog name (main.luau), in the place of the tool's quarter-second sleep, and posted
--- with the database's place, as the tool snaps it.
+-- forgotten first and a give-up posts the preset as not read (actions.luau, go). The keyboard is
+-- handed over with Return alone — Escape and the arrows are Avenger's browser's — and the tool's
+-- sentence said behind the screen reader. Once Return has gone through, the name is read until two
+-- readings agree or it is a catalog name (main.luau), in the place of the tool's quarter-second
+-- sleep, and posted with the database's place, as the tool snaps it. The name as it stood before
+-- is not read: until 0.16 it was, with a callback, for a log line alone (mt-verified, finding 13).
 function Hv.browse(o, trip, forget)
   forget("browsing presets in VPS Avenger")
   if not trip:inFront() then return end
-  local start = {}
-  local r = o:toScreenRect(G.NAME_REGION)
-  if r then
-    pcall(host.ocr.recognize, r, { lang = H.lang(), key = "vps-avenger browse" }, function(res)
-      if res.status == "text" then start.name = R.tidy(res.text) end
-    end)
-  end
   local handed, err = trip:handOver({
     kind = "browse",
     swallow = Act.swallow(Hv.BROWSE_ENDS),
     onEnd = function(o2, t2, how)
       if how ~= "ended" or not t2:inFront() then return end
       E.ring.settledName(o2, function(name, n)
-        host.log.info(string.format("[avenger] [browse] the name at the start %s, after Return %s (read %d times)",
-          start.name and ("'" .. start.name .. "'") or "not read", name and ("'" .. name .. "'") or "not read", n or 0))
+        host.log.info(string.format("[avenger] [browse] the name after Return %s (read %d times)",
+          name and ("'" .. name .. "'") or "not read", n or 0))
         if name == nil then return t2:done({ error = "the preset name cannot be read now" }) end
         t2:done({ set = E.named(name), focus = "browse-expansion-presets-button" })
       end, "Browse Presets")
@@ -484,27 +491,25 @@ end
 -- ── A drum slot's Browse, and a row of the sample browser ────────────────────
 -- A trip whose act opens Avenger's sample browser on slot `i`, or one of its rows, and hands the
 -- keyboard over, as Browse Presets does — Return alone held, Escape and the arrows the browser's —
--- and once Return has gone through, reads the slot's name. In order:
+-- and once Return has gone through, looks at the slot's row. In order:
 --   1. a part read first, and nothing clicked where it refuses: the strip off the Drums tab
 --      (Drums.refusal) for a slot's Browse; the sample editor's part for a row, unless it shows the
 --      sample browser and a slot read as selected, which the row loads into (Sa.browserRefusal);
---   2. the slot's name pictured and HELD through the hand-over — one row of the name column, as
---      the knobs' hand-over holds the knob's box (src/amount.luau): the baseline of the one change
---      wait after Return — and its text read off that picture with a callback, while the user
---      browses (one region, nothing waits for it);
+--   2. the slot's row right of its name pictured and HELD through the hand-over (D.sampleRect: its
+--      sample's box, its Loop, Lock, Mute and Solo and its knobs), as the knobs' hand-over holds the
+--      knob's box (src/amount.luau): the baseline of the one change wait after Return;
 --   3. the hand-over, before the click, so that a hand-over refused clicks nothing;
 --   4. the click at the tool's point — Browse (345, the slot's row), or the row (294, 277 + 10 per
---      row) — and the slot's name noted as not read in the state, which a give-up then posts, and
---      the read after Return overwrites;
+--      row);
 --   5. the tool's sentence #13, behind the screen reader;
---   6. Return through: a change wait on the name from the held picture, then the part read with its
---      text — the drumkit table, and for a row the sample editor with it, whose view Avenger may
---      change once a sample is loaded — and the slot's name said as read, "unchanged" where it reads
---      as it read before. By the names, as Back and Next decide: the name's box holds the band the
---      selected slot is drawn in (read/drums.luau), and the tool took every click in a slot's row
---      for its selection, so Browse on a slot not selected repaints the box whatever is chosen.
---      Only where either name was not read do the pixels decide: "unchanged" where Avenger drew no
---      change. Every picture is let go on every path.
+--   6. Return through: a change wait on the row from the held picture, then the part read — the
+--      drumkit table's switches, and for a row the sample editor with it, whose view Avenger may
+--      change once a sample is loaded — and what the change wait saw said: the row redrawn, or no
+--      change at its bound. No name is read: the slot's name is a fixed role (read/drums.luau, THE
+--      NAMES), which a sample loaded does not change — until 0.16 Browse compared it before and
+--      after, and said "unchanged, Bassdrum reads BD" whatever was loaded. The name column itself is
+--      left out of the watch: the selected and the triggered slot's names flash while a sequence
+--      plays (the developer's Mac test of 2026-10-31). Every picture is let go on every path.
 -- No change wait sees the browser open, as the rename's does: whether a second Browse closes an
 -- open browser is not known, so a change in the central area would not say "open". Where none
 -- opened the hand-over is harmless: Return goes to Avenger and ends it. The log says what was
@@ -516,31 +521,21 @@ end
 local function browseName(o, trip, F)
   local i, pl, slog, before = F.i, F.pl, F.log, F.before
   local role = D.PART_LABELS[i]
-  local region = Open.region(pl, D.nameRect(i))
+  local region = Open.region(pl, D.sampleRect(i))
   if not region then
-    slog("nothing clicked — the slot's name is not on the screen")
+    slog("nothing clicked — the slot's row is not on the screen")
     return trip:done({ part = before, error = "that part of VPS Avenger is not on the screen" })
   end
   local okS, snap, whyS = pcall(host.screen.snapshot, { region = region })
   if not (okS and snap) then
-    slog("nothing clicked — no picture of its name: %s", tostring(okS and whyS or snap))
+    slog("nothing clicked — no picture of its row: %s", tostring(okS and whyS or snap))
     return trip:done({ part = before, error = "VPS Avenger cannot be read now" })
   end
   local held = { before = snap }
   if not trip:inFront() then return release(held) end
-  -- The name before, off the held picture, answered while the user browses: the read keeps the
-  -- pixels it needs whatever becomes of the picture.
-  local start = {}
-  pcall(host.ocr.recognize, { name = "slot " .. i, region = region }, { snapshot = snap, lang = H.lang(),
-    key = "vps-avenger browse slot" }, function(res)
-    local t = type(res) == "table" and res.status == "text" and R.tidy(res.text) or ""
-    if t ~= "" then start.name = t end
-    start.answered = true
-  end)
 
-  -- The slot's name read after Return, off a picture of the part read after, and the trip done
-  -- with it; `changed` the change wait's verdict on the name's box, which decides only where a name
-  -- is missing.
+  -- The part read after Return, off a picture of it, and the trip done with what the change wait on
+  -- the slot's row saw (`changed`).
   local function readAfter(t2, changed)
     local partRegion = Open.partRegion(pl, F.after)
     local okP, pic = false, nil
@@ -551,25 +546,18 @@ local function browseName(o, trip, F)
     end
     if not (okP and pic) then
       slog("no picture after Return: %s", tostring(pic))
-      return t2:done({ part = before, error = role .. "'s name cannot be read now" })
+      return t2:done({ part = before, error = role .. "'s row cannot be read now" })
     end
-    local okR, va, keys = pcall(Open.part, pic, F.after, { pl = pl, text = true, preset = E.ring.lastName(),
-      fields = F.fields })
+    local okR, va, keys = pcall(Open.part, pic, F.after, { pl = pl, preset = E.ring.lastName(), fields = F.fields })
     pic:release()
     if not okR then
       slog("the read after Return failed: %s", tostring(va))
       return t2:done({ part = before, error = "reading VPS Avenger failed" })
     end
     local part = { keys = keys, values = va }
-    local name = va.kitNames and va.kitNames[i]
-    local was = start.name
-    if name and was then changed = name ~= was end
-    slog("after Return — %s, %s by %s (before: %s)", name and ("'" .. name .. "'") or "no name read",
-      changed and "changed" or "unchanged", (name and was) and "the names" or "the pixels",
-      was and ("'" .. was .. "'") or (start.answered and "no name read" or "not answered yet"))
-    if not name then return t2:done({ part = part, error = role .. "'s name cannot be read now" }) end
-    if not changed then return t2:done({ part = part, note = "unchanged, " .. role .. " reads " .. name }) end
-    t2:done({ part = part, said = role .. " reads " .. name, focus = F.focus })
+    slog("after Return — %s", changed and "the slot's row changed" or "no change at the slot's row by the bound")
+    if not changed then return t2:done({ part = part, note = "unchanged: VPS Avenger drew no change at " .. role .. "'s row" }) end
+    t2:done({ part = part, said = role .. ": VPS Avenger redrew its row", focus = F.focus })
   end
 
   local function onEnd(_, t2, how)
@@ -598,15 +586,6 @@ local function browseName(o, trip, F)
   local clicked, said = E.ring.clickAt(o, F.label, F.at, nil, true)
   -- Refused: done ends the hand-over, and onEnd lets the picture go.
   if not clicked then return trip:done({ part = before, sentence = said }) end
-  -- What the browser does to the slot's name, not read yet: posted as not read by a give-up.
-  local w = E.plugin()
-  if w then
-    local known = S.values(w.id) or {}
-    local names = {}
-    for j = 1, #D.PART_LABELS do names[j] = known.kitNames and known.kitNames[j] end
-    names[i] = nil
-    S.part(w.id, { "kitNames" }, { kitNames = names })
-  end
   host.speech.output(Hv.BROWSE_SLOT, { interrupt = false })
 end
 

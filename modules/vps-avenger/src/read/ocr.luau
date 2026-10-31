@@ -1,7 +1,10 @@
 -- What a recogniser makes of Avenger's text, read the avenger_control project's way: its helpers
--- for misreads it measured — the blank preset, the OSC tabs' captions, the macro tabs' count —
--- taken over with its developer's permission (NOTICE), and the check of a name read against the
--- preset database's. Plain work on strings, at once and anywhere: nothing here reads the screen.
+-- for misreads it measured — the blank preset, the OSC tabs' captions, the macro tabs' count, the
+-- default macro names — taken over with its developer's permission (NOTICE), and the check of a
+-- name read against the preset database's; and this module's own for what the developer's Mac
+-- test and the second Windows session of 2026-10-31 found: a lone bullet word before a name, the
+-- look-alike letters of other scripts, words a recogniser only guessed. Plain work on strings, at
+-- once and anywhere: nothing here reads the screen, and only R.presetName writes to the log.
 
 local R = {}
 
@@ -66,6 +69,31 @@ function R.ratio(x, y)
   return 2 * matched(bytesOf(x), bytesOf(y), 1, #x, 1, #y) / n
 end
 
+-- Cyrillic and Greek letters a recogniser gives for the Latin letter they look like — the ones
+-- Unicode's confusables list (UTS #39) maps to one Latin letter, of the shapes Avenger's names
+-- use: Vision read Avenger's grey default "Macro 3" as "Масrо 3", Cyrillic М, а and о, under Init
+-- Preset in the developer's Mac test of 2026-10-31, four times, and no name could be compared with
+-- it (mt-verified, finding 12). Folded before any comparison of a reading (R.snap, R.oneOf,
+-- R.roughlySame, R.macroTabCount, R.cleanOscName); a name is never said folded.
+local CONFUSABLE = {
+  -- Cyrillic
+  ["а"] = "a", ["е"] = "e", ["о"] = "o", ["р"] = "p", ["с"] = "c", ["у"] = "y", ["х"] = "x",
+  ["і"] = "i", ["ј"] = "j", ["ѕ"] = "s", ["һ"] = "h", ["ԁ"] = "d", ["ӏ"] = "l",
+  ["А"] = "A", ["В"] = "B", ["Е"] = "E", ["К"] = "K", ["М"] = "M", ["Н"] = "H", ["О"] = "O", ["Р"] = "P",
+  ["С"] = "C", ["Т"] = "T", ["Х"] = "X", ["У"] = "Y", ["І"] = "I", ["Ј"] = "J", ["Ѕ"] = "S",
+  -- Greek
+  ["Α"] = "A", ["Β"] = "B", ["Ε"] = "E", ["Ζ"] = "Z", ["Η"] = "H", ["Ι"] = "I", ["Κ"] = "K", ["Μ"] = "M",
+  ["Ν"] = "N", ["Ο"] = "O", ["Ρ"] = "P", ["Τ"] = "T", ["Υ"] = "Y", ["Χ"] = "X",
+  ["α"] = "a", ["ι"] = "i", ["ν"] = "v", ["ο"] = "o", ["ρ"] = "p", ["υ"] = "u",
+}
+
+-- `s` with those letters as the Latin ones; a string with none comes back as it is.
+function R.foldConfusables(s)
+  s = tostring(s or "")
+  if not string.find(s, "[\205-\212]") then return s end
+  return (string.gsub(s, "[\192-\255][\128-\191]*", function(ch) return CONFUSABLE[ch] end))
+end
+
 -- Whether `text` is a reading of "Init Preset", Avenger's blank preset: the project's
 -- _looks_like_init_preset_ocr (its actions.py), which says that at 50 % on a display that is not
 -- Retina its recogniser often read "Init Preset" as "hit Presst" or the like. The text with runs
@@ -92,17 +120,63 @@ end
 R.SAME_RATIO = 0.88
 
 function R.roughlySame(a, b)
-  local x, y = string.lower(R.tidy(a)), string.lower(R.tidy(b))
+  local x, y = string.lower(R.foldConfusables(R.tidy(a))), string.lower(R.foldConfusables(R.tidy(b)))
   if x == "" or y == "" then return false end
   if x == y then return true end
   return R.ratio(x, y) >= R.SAME_RATIO
 end
 
+-- A lone bullet-like word a recogniser reads before a name: "o", "O", "°", "•", "·" or "*" and a
+-- space, which the second Windows session (2026-10-31) read before every name, preset and macro
+-- alike ('o VO Hey Mr Robo', 'o Flanger') — as the project drops "•", "·" and "*" from an OSC tab's
+-- name (its _clean_osc_ocr_name; R.cleanOscName). Not "0": a user's own preset may begin with one
+-- ("0 dB Lead"). None of the catalog's 18,446 preset names, and no macro or OSC name of it, begins
+-- with one of these and a space (avw2-verified, R6), so only a user's own name "o …" loses it.
+local LONE_BULLETS = { ["o"] = true, ["O"] = true, ["°"] = true, ["•"] = true, ["·"] = true, ["*"] = true }
+
+-- `text` (tidied) without such a word before it, and the word dropped, or nil where there was none.
+function R.withoutBullet(text)
+  local t = R.tidy(text)
+  local first, rest = string.match(t, "^(%S+) (.+)$")
+  if first and LONE_BULLETS[first] then return rest, first end
+  return t, nil
+end
+
+-- The texts R.presetName has dropped a bullet word from, so that the log says it once per text:
+-- one line a reading would be one line every tenth of a second while a watch is out. At most 64.
+local bulletsSaid, bulletsCount = {}, 0
+
 -- `text` as a preset's name: "Init Preset" for a reading of it (R.isInitPreset), and whether it
--- was taken so; any other text as it is.
+-- was taken so; any other text as it is — without a lone bullet word before it (R.withoutBullet),
+-- the log saying so once per text, so that the next session's log says whether the factor's
+-- correction made it unnecessary.
 function R.presetName(text)
   if R.isInitPreset(text) then return R.INIT_PRESET, true end
-  return text, false
+  local name, dropped = R.withoutBullet(text)
+  if not dropped then return text, false end
+  local t = tostring(text)
+  if not bulletsSaid[t] then
+    if bulletsCount >= 64 then bulletsSaid, bulletsCount = {}, 0 end
+    bulletsSaid[t], bulletsCount = true, bulletsCount + 1
+    host.log.info(string.format("[avenger] the name read '%s' begins with a lone '%s' — taken as '%s'", R.forLog(t),
+      dropped, name))
+  end
+  if R.isInitPreset(name) then return R.INIT_PRESET, true end
+  return name, false
+end
+
+-- Whether every word of reading `res` (host.ocr.recognize's) is one the recogniser only guessed
+-- (`approx`: shared out by the text's length, docs/api/ocr.md) — on a Mac PaddleOCR's text alone,
+-- where Vision read nothing: every one of the 28 such readings in this module's regions in the
+-- developer's Mac test of 2026-10-31 was an invention ("PY" for a preset's name). False for a
+-- reading with no words, and for one with any word located.
+function R.guessedOnly(res)
+  local words = type(res) == "table" and res.words
+  if type(words) ~= "table" or #words == 0 then return false end
+  for _, w in ipairs(words) do
+    if not w.approx then return false end
+  end
+  return true
 end
 
 -- ── Text as the page's reads take it ─────────────────────────────────────────
@@ -144,7 +218,7 @@ function R.cleanOscName(raw, index)
   clean = R.tidy(clean)
   if index == nil then return clean end
   local idx = math.clamp(math.floor(index), 1, 8)
-  local compact = string.upper((string.gsub(clean, "[^A-Za-z0-9|Il]", "")))
+  local compact = string.upper((string.gsub(R.foldConfusables(clean), "[^A-Za-z0-9|Il]", "")))
   if compact == "" then return clean end
   local function once(s, a, b)
     local i = string.find(s, a, 1, true)
@@ -165,15 +239,45 @@ end
 -- How many macro tabs Avenger shows, from its tabs' captions read as text: the highest "MACRO n"
 -- from 1 to 4; 1 for "Macro" with no number read (the project's own case: "macro i" for "Macro
 -- 1", which says the first tab is there). The project's _parse_macro_tab_count
--- (macro_collector.py), except that a reading with no "macro" at all is no count — the project
--- answered 1 for it.
+-- (macro_collector.py), except that a reading with nothing like "macro" is no count — the project
+-- answered 1 for it — and that a word of five letters that is "macro" with ONE letter misread, a
+-- zero for an O no misread at all, counts as it: the second Windows session (2026-10-31) read the
+-- caption "UACRO 1" in all four of its reads, and the count, the Macro tab and the database's names
+-- were gone with it (avw2-verified, A2). The database's count comes first where it has the preset
+-- (read/macros.luau); this is the count where it has none.
+local function macroLike(word)
+  if #word ~= 5 then return false end
+  local off = 0
+  for i = 1, 5 do
+    if string.sub(word, i, i) ~= string.sub("macro", i, i) then off += 1 end
+  end
+  return off <= 1
+end
+
 function R.macroTabCount(text)
-  local norm = string.lower(R.tidy(text))
-  local hi = 0
-  for n in string.gmatch(norm, "macro%s*([1-4])") do hi = math.max(hi, tonumber(n)) end
+  local norm = string.gsub(string.lower(R.foldConfusables(R.tidy(text))), "0", "o")
+  local hi, seen = 0, false
+  -- Each word of letters, and the digit after it, alone or glued on ("macro2").
+  for word, n in string.gmatch(norm, "(%a+)%s*(%d?)") do
+    if macroLike(word) then
+      seen = true
+      local k = tonumber(n)
+      if k and k >= 1 and k <= 4 then hi = math.max(hi, k) end
+    end
+  end
   if hi > 0 then return hi end
-  if string.find(norm, "macro", 1, true) then return 1 end
+  if seen then return 1 end
   return nil
+end
+
+-- Avenger's own name for macro field `i` (1 to 3 the knobs, 4 and 5 the buttons) of macro tab
+-- `tab`, the one it shows where the sound designer named none: the project's _current_macro_label
+-- (actions.py) — "Macro (tab − 1) × 3 + i" for a knob, "MacroBtn (tab − 1) × 2 + i − 3" for a
+-- button. The names a read is compared with where the preset database has none (read/macros.luau):
+-- Init Preset's, and a user's own preset's that kept them.
+function R.defaultMacroName(tab, i)
+  if i <= 3 then return string.format("Macro %d", (tab - 1) * 3 + i) end
+  return string.format("MacroBtn %d", (tab - 1) * 2 + i - 3)
 end
 
 -- How alike a name read has to be to the database's to be taken for it: the preset database's
@@ -187,7 +291,7 @@ R.SNAP_RATIO = 0.72
 -- WHAT IT MAY DO).
 function R.snap(read, expected)
   if not expected or expected == "" then return read, false, nil end
-  local a, b = string.lower(R.tidy(read)), string.lower(R.tidy(expected))
+  local a, b = string.lower(R.foldConfusables(R.tidy(read))), string.lower(R.foldConfusables(R.tidy(expected)))
   if a == b then return R.tidy(expected), false, 1 end
   local r = R.ratio(a, b)
   if r >= R.SNAP_RATIO then return R.tidy(expected), true, r end
@@ -198,7 +302,7 @@ end
 -- key of the most alike, when it is R.SNAP_RATIO alike or more — a menu's field ("1l8" is 1/8's), a
 -- speed. The key and the ratio; nil and the best ratio for the log otherwise.
 function R.oneOf(read, words)
-  local a = string.lower((string.gsub(R.tidy(read), " ", "")))
+  local a = string.lower((string.gsub(R.foldConfusables(R.tidy(read)), " ", "")))
   if a == "" then return nil, 0 end
   local best, ratio = nil, 0
   for key, w in pairs(words) do

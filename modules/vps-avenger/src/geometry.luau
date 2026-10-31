@@ -60,16 +60,17 @@ G.NAME_REGION = { 34, 7, 214, 22 }
 G.NAME = { 123, 14 }
 
 -- ── MENU's items ─────────────────────────────────────────────────────────────
--- From the project, all at x 257: Load at y 32, Save as at 55, Initialize at 68 (its MENU table).
--- Save is "at about 43" there, and the project never clicks it — it leaves Save out because
--- Avenger's overwrite warning was out of its reach — so Save is the least certain number in this
--- file. 43.5 rather than the 43 the project wrote: Load and Save as are 23 apart, two rows of the
--- 11.5 the project measured in the zoom list, and Save is the row between them — half a point,
--- which is two pixels at 200 % on a display scaled to 150 %. The menu item shot of the first Save
--- settles it. Load and Save as open the system's file dialog, Save and Initialize a warning box
--- inside Avenger (dialog.luau).
+-- From the project, all at x 257: Load at y 32, Save as at 55, Initialize at 68 (its MENU table,
+-- header_map.py's MENU_ITEMS). Its Save, "at about 43", it leaves out on purpose — Avenger's
+-- overwrite warning was out of VoiceOver's reach — and so does this module since 0.16 (main.luau,
+-- the maintainer's decision of 2026-10-31). Load and Save as open the DAW's file dialog and are
+-- clicked at these points as the project clicks them (main.luau, "Load preset and Save preset as");
+-- Initialize opens a warning box inside Avenger (dialog.luau), and is chosen in the popup seen. The
+-- developer's Mac test of 2026-10-31 photographed MENU's popup at 80 %: its rows 19 pixels apart,
+-- Load's from y 43 to 61 below Avenger's corner and Save as's from 81 to 99, Initialize's text from
+-- 107 to 116 under a separator at 100, the popup from x 382 to 474 — and these points land at
+-- (411, 51), (411, 88) and (411, 109), on each item.
 G.LOAD = { 257, 32 }
-G.SAVE = { 257, 43.5 }
 G.SAVE_AS = { 257, 55 }
 G.INITIALIZE = { 257, 68 }
 
@@ -86,9 +87,8 @@ G.ZOOM_LIST_PITCH = 11.5
 -- "Warning / This will initialize all settings / Are you sure?" with YES and NO, drawn INSIDE
 -- Avenger's own window (the project's words, and it clicks the buttons as ordinary points of the
 -- plug-in): YES at (386, 310), NO at (487, 310) — centred on Avenger, whose middle at 50 % is
--- x 436. Save's overwrite warning is the same kind of box by the project's account, with no
--- figures of its own there, so this module clicks the two words where it READS them
--- (dialog.luau), and the table's pair is only compared with that in the log and the picture.
+-- x 436. This module clicks the two words where it READS them (dialog.luau), and the table's pair
+-- is only compared with that in the log and the picture.
 G.YES = { 386, 310 }
 G.NO = { 487, 310 }
 -- Where the box is looked for: generous round the pair, and over the rows of text above them.

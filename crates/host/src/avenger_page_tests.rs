@@ -382,29 +382,31 @@ fn the_reads_of_one_picture_give_the_tools_state_keys() {
         local snaps, from, asked = S.snaps, #S.pageOrder, S.cellsAsked + S.profilesAsked
         T.pageKey()
         T.ok(S.snaps == snaps + 1, "one picture, in the key's handler")
-        -- The picture's 28 (read/open.luau, the asks: among them DRUM SQ's patterns' rows, one
-        -- profile each, FAV's two grids of the star column, and the browser's picture test's two),
-        -- every one with a callback, and the first text read beside them.
-        T.ok(#S.screenOut == 28 and S.cellsAsked + S.profilesAsked == asked + 28 and #S.pageReads == 1,
+        -- The picture's 31 (read/open.luau, the asks: among them DRUM SQ's patterns' rows, one
+        -- profile each, FAV's two grids of the star column, the browser's picture test's two and its
+        -- view's icon's three), every one with a callback, and the first text read beside them.
+        T.ok(#S.screenOut == 31 and S.cellsAsked + S.profilesAsked == asked + 31 and #S.pageReads == 1,
           "every question asked at once: " .. #S.screenOut .. ", " .. (S.cellsAsked + S.profilesAsked - asked))
         T.ok(T.pageSince(from) == "", "nothing posted or shown in the key's handler: " .. T.pageSince(from))
         local early = {}
         for _, e in ipairs(S.pageReads[1].what) do early[#early + 1] = e.name end
-        T.ok(table.concat(early, ",") == "preset,expansion view,expansion name,macro tabs,macro macro1,macro macro2,"
-          .. "macro macro3,macro btn1,macro btn2,central tabs", "the regions that need no answer: " .. table.concat(early, ","))
+        -- The view's caption is not among them: it is read only where its icon tells neither state
+        -- (read/expansion.luau, THE VIEW'S ICON), in the read after the answers.
+        T.ok(table.concat(early, ",") == "preset,expansion name,macro tabs,macro macro1,macro macro2,"
+          .. "macro macro3,macro btn1,macro btn2", "the regions that need no answer: " .. table.concat(early, ","))
         T.tick()
         -- Then a grid for the three macro knobs' rings and one for the oscillator's three
         -- (read/knob.luau), in the last answer's handler.
-        T.ok(S.cellsAsked + S.profilesAsked == asked + 30, "the knobs' grids after: " .. (S.cellsAsked + S.profilesAsked - asked))
+        T.ok(S.cellsAsked + S.profilesAsked == asked + 33, "the knobs' grids after: " .. (S.cellsAsked + S.profilesAsked - asked))
         T.ok(T.pageSince(from) == "post state,post error,post focus,show,sound sounds/Open.wav", T.pageSince(from))
         asked = S.cellsAsked + S.profilesAsked
         T.tick()
         T.ok(S.snaps == snaps + 1 and S.cellsAsked + S.profilesAsked == asked, "nothing asked again")
         local texts = 0
         for _, r in ipairs(S.recognized) do if r.snapshot then texts += 1 end end
-        -- The browser's header's name among them (read/expansion.luau, E.entries): ten in the first
-        -- read, the three OSC tabs' names in the second.
-        T.ok(texts == 13, "two text reads of the picture, a region per name: " .. texts)
+        -- The browser's header's name among them (read/expansion.luau, E.entries): eight in the first
+        -- read, the three OSC tabs' names and the view's caption — no icon painted — in the second.
+        T.ok(texts == 12, "two text reads of the picture, a region per name: " .. texts)
         local st = T.lastPost("state").state
         -- FAV is read only while an expansion reads open (read/expansion.luau, E.favorite).
         T.ok(st.preset == "LD Lead 1" and st.zoom == 80 and st.expansion_view == "8 per Row"
@@ -432,10 +434,10 @@ fn the_reads_of_one_picture_give_the_tools_state_keys() {
           string.format("its knobs: %s %s %s", tostring(m.amount_values[1]), tostring(m.amount_values[2]),
             tostring(m.amount_values[3])))
         for _, line in ipairs({ "[avenger] [read] strip: 3 dots", "[avenger] [read] strip: the tabs' names 1 'Bass'; 2 '0SC 2' -> 'OSC 2'",
-          "[avenger] [read] strip: the tabs' bottom strips, darkest selected:", "OSC 1 Mute 100.0 % red",
+          "[avenger] [read] strip: the tabs' bottom strips' floor (their means), darkest selected:", "OSC 1 Mute 100.0 % red",
           "[avenger] [read] macros: button 1 highlight ", "ON; button 2 highlight 0.0 %", "[avenger] [read] oscillator: Level ",
           "[avenger] [read] expansion: FAV not read — no expansion reads open", "[avenger] [read] words: preset 'LD Lead 1'",
-          "[avenger] [read] 28 questions of one picture; the picture ", "[avenger] [page] shown beside" }) do
+          "[avenger] [read] 31 questions of one picture; the picture ", "[avenger] [page] shown beside" }) do
           T.ok(T.count(line) == 1, "the log: " .. line)
         end
     "##.replace("@WORDS@", WORDS));
@@ -470,6 +472,27 @@ fn the_projects_text_helpers_clean_count_and_check_what_is_read() {
         local d, sd = R.snap("Bass", nil)
         T.ok(a == "Lead" and sa == true and b == "Lead" and sb == false and c == "Bass" and sc == false
           and d == "Bass" and sd == false, "the database's vocabulary")
+    "##);
+}
+
+/// The page key's first text read holds no central tabs' captions (mt-verified, finding 13): they
+/// were read for a log line alone — the central tab is its bottom strip's pixels — and read
+/// 'EDITOR ARP ORU SQ STEP SQ' on Windows. The central tab is decided all the same.
+#[test]
+fn the_page_keys_first_text_read_holds_no_central_captions() {
+    run_mac(r##"
+        local S = T.S
+        T.avengerAt80("Init Preset")
+        T.pageReady()
+        T.paintAvenger(98, 84, 1.6, { osc = 3, selected = "drums", central = "drum_sq" })
+        T.words({ preset = "LD Lead 1", ["central tabs"] = "EDITOR ARP DRUM SQ STEP SQ" })
+        T.pageKey()
+        for _, e in ipairs(S.pageReads[1].what) do T.ok(e.name ~= "central tabs", "no central captions asked") end
+        T.tick()
+        T.tick()
+        for _, r in ipairs(S.recognized) do T.ok(r.name ~= "central tabs", "none read") end
+        T.ok(T.count("centre: the captions read") == 0, T.dump())
+        T.ok(T.lastPost("state").state.osc_panel.central_panel_tab == "drum_sq", "the central tab by its pixels")
     "##);
 }
 
@@ -511,11 +534,12 @@ fn on_windows_at_150_percent_display_scaling_the_same_picture_reads_the_same() {
 /// With the Drums tab selected: its pattern switch, its lock and its mode (the project's rule —
 /// DRUMKIT's caption the brighter is SEQUENCE), the central tab, and DRUM SQ on it: PATTERN CHAIN
 /// by its brightness, the patterns that are on by their red, the selected one by its outline. One
-/// macro tab, counted from a caption with no number, is the one shown. And with the preset database
-/// installed: the preset placed in the catalog gives the expansion, and the names its tabs have
-/// there are the vocabulary the names read are checked against — "Laed" is the catalog's "Lead",
-/// "Tane" its "Tone" — posted in the catalog's spelling and unmarked, as everything the database
-/// gives since the maintainer's decision of 2026-10-26; the log says which the database replaced.
+/// macro tab, counted by the database, is the one shown. And with the preset database installed:
+/// the preset placed in the catalog gives the expansion, and since 0.16 the names its tabs and
+/// macros have there (the maintainer's decision of 2026-10-31, D3), which the names read check —
+/// "Laed" near the catalog's "Lead", "Tane" near its "Tone" — posted in the catalog's spelling and
+/// unmarked, as everything the database gives since the maintainer's decision of 2026-10-26; the
+/// log says what was read beside each.
 #[test]
 fn the_drums_tab_drum_sq_and_the_database_vocabulary_are_read() {
     run_mac(r##"
@@ -555,7 +579,8 @@ fn the_drums_tab_drum_sq_and_the_database_vocabulary_are_read() {
         T.ok(m.amount_values[1] == 0 and m.amount_values[2] == 50 and m.amount_values[3] == 100,
           string.format("the knobs: %s %s %s", tostring(m.amount_values[1]), tostring(m.amount_values[2]),
             tostring(m.amount_values[3])))
-        T.ok(T.count("3 'Laed' -> 'Lead', the database's (0.75 alike)") == 1, T.dump())
+        T.ok(T.count("3 'Laed', the database's 'Lead' (0.75 alike)") == 1, T.dump())
+        T.ok(T.count("macro1 'Tane', the database's 'Tone' (0.75 alike)") == 1, T.dump())
         T.ok(T.count("[avenger] [read] drum sq: PATTERN CHAIN mean ") == 1, T.dump())
     "##);
 }
@@ -587,7 +612,7 @@ fn the_pages_state_and_script_mark_nothing_as_the_databases() {
           and #st.expansion_categories > 0 and #st.expansions > 0, "the database's values, posted: " .. T.jsonEncode(st))
         local json = T.jsonEncode(st)
         T.ok(string.find(json, "from_database", 1, true) == nil, json)
-        T.ok(T.count("3 'Laed' -> 'Lead', the database's (0.75 alike)") == 1, "the log still says it: " .. T.dump())
+        T.ok(T.count("3 'Laed', the database's 'Lead' (0.75 alike)") == 1, "the log still says it: " .. T.dump())
     "##);
     let js = PANEL_JS.replace("\r\n", "\n");
     for gone in ["from the database", "from_database", "FromDatabase"] {
@@ -632,12 +657,15 @@ fn what_a_read_could_not_find_is_not_read() {
         local o, m = st.osc_panel, st.macro_panel
         T.ok(o.count == nil and o.names == nil and o.mute_states == nil and o.selected_type == nil
           and o.volume_values == nil, "the strip not read")
-        T.ok(o.drums_mute == false and o.trig_solo == false, "a switch on a picture shows off")
+        -- A strip with no dot at OSC 1's place is covered (read/strip.luau, A COVERED STRIP): not
+        -- even the switches drawn off are read off it, and the page is told.
+        T.ok(o.drums_mute == nil and o.trig_solo == nil and o.strip_covered == true, "a covered strip: no switch read")
         T.ok(m.count == nil and m.selected_index == nil and m.tabs == nil and m.amount_values[1] == nil,
           "the macros not read")
         T.ok(T.count("[avenger] [read] expansion: the header reads no name (blank); title band 0.0 % lit, list bar 0.0 % "
           .. "lit — the grid: no expansion open, the view 8 per Row stored") == 1, T.dump())
-        T.ok(T.count("[avenger] [read] strip: the tabs read whole — no count") == 1, T.dump())
+        T.ok(T.count("[avenger] [read] strip: covered — no dot at OSC 1's place; nothing of the strip is read") == 1
+          and T.count("the tabs read whole") == 0, T.dump())
     "##);
     run_mac(r##"
         local S = T.S
@@ -1229,11 +1257,12 @@ fn a_second_message_while_a_trip_is_out_is_dropped() {
     "##);
 }
 
-/// Load from the page: MENU clicked, Load chosen in Avenger's popup once it is seen (the ring's
-/// rows), then the file dialog that comes — a window of the DAW's, the user's for as long as they
-/// like — and Escape in it: Avenger in front again ends the wait, the name is watched, and the page
-/// comes back with it, unchanged and not called an error. Save as the same, its dialog saving under
-/// a new name, which the heading then shows.
+/// Load from the page: MENU clicked, and Load at the project's point 180 ms later, as the ring
+/// clicks it (the maintainer's decision of 2026-10-31, D1), then the file dialog that comes — a
+/// window of the DAW's, the user's for as long as they like — and Escape in it: Avenger in front
+/// again ends the wait, the name is watched, and the page comes back with it, the note "unchanged"
+/// (mt-verified, finding 8) and nothing called an error. Save as the same, its dialog saving under a
+/// new name, which the heading then shows.
 #[test]
 fn load_with_escape_in_its_dialog_and_save_as_read_the_name_after_the_dialog() {
     run_mac(r##"
@@ -1249,11 +1278,12 @@ fn load_with_escape_in_its_dialog_and_save_as_read_the_name_after_the_dialog() {
         end
         T.tripFrom({ action = "pick_load_preset", args = {}, focused = true }, W)
         T.ok(T.clickAt() == "517,106", "MENU: " .. T.clickAt())
-        T.popup(300, 490, 116, 192, 96)
         T.tick(1)
-        T.ok(T.clickAt() == "586,135", "Load's row: " .. T.clickAt())
-        T.closePopups()
-        T.tick(2)
+        T.ok(T.clickAt() == "517,106", "not before 180 ms: " .. T.clickAt())
+        T.tick(1)
+        -- The project's (257, 32): 98 + 411.2 -> 509, 84 + 51.2 -> 135.
+        T.ok(T.clickAt() == "509,135", "Load's point: " .. T.clickAt())
+        T.tick(1)
         local open = dialog("Open")
         S.listed = { W, open }
         T.show(open)
@@ -1267,14 +1297,14 @@ fn load_with_escape_in_its_dialog_and_save_as_read_the_name_after_the_dialog() {
         T.runDue()
         T.nameReads("LD Lead 1")
         T.ok(S.front == T.PAGE_WIN and T.lastPost("state").state.preset == "LD Lead 1"
-          and T.lastPost("error").text == "", "the name read, and the page back with nothing called wrong")
+          and T.lastPost("error").text == "Load Preset: unchanged, LD Lead 1",
+          "the name read, and the page back with it unchanged: " .. T.lastPost("error").text)
         T.event()
         T.tripFrom({ action = "pick_save_preset_as", args = {}, focused = true }, W)
-        T.popup(300, 490, 116, 192, 96)
-        T.tick(1)
-        T.ok(T.clickAt() == "586,172", "Save as's row: " .. T.clickAt())
-        T.closePopups()
         T.tick(2)
+        -- The project's (257, 55): 84 + 88 -> 172.
+        T.ok(T.clickAt() == "509,172", "Save as's point: " .. T.clickAt())
+        T.tick(1)
         local save = dialog("Save")
         S.listed = { W, save }
         T.show(save)
@@ -1287,10 +1317,11 @@ fn load_with_escape_in_its_dialog_and_save_as_read_the_name_after_the_dialog() {
     "##);
 }
 
-/// Load and Save as from the page click their item ONCE (actions.luau, menuChoice's `retries`), as
-/// the ring's do: Avenger's popup stays drawn, frozen, while its file dialog opens, which the menu's
-/// test takes for a click it missed — the second Mac test's Load was clicked four times, the clicks
-/// after the first landing in the dialog. The popup left up for eight turns: no click again.
+/// Load and Save as from the page click their item ONCE at the project's point (actions.luau,
+/// fileItem; main.luau, pickFileItem), as the ring's do: Avenger's popup stays drawn, frozen, while
+/// its file dialog opens — the second Mac test's Load was clicked four times, the clicks after the
+/// first landing in the dialog. The popup left up for eight turns: no click again, and no menu test
+/// to take it for a click it missed.
 #[test]
 fn the_pages_load_and_save_as_click_their_item_once_under_a_popup_left_up() {
     run_mac(r##"
@@ -1302,11 +1333,11 @@ fn the_pages_load_and_save_as_click_their_item_once_under_a_popup_left_up() {
         T.event()
         local open = { id = 950, title = "Open", class = "AXWindow/AXDialog/", app = T.MAC_REAPER,
           bounds = { x = 300, y = 200, w = 700, h = 450 }, client = { x = 300, y = 228, w = 700, h = 422 } }
-        for _, c in ipairs({ { "pick_load_preset", "586,135" }, { "pick_save_preset_as", "586,172" } }) do
+        for _, c in ipairs({ { "pick_load_preset", "509,135" }, { "pick_save_preset_as", "509,172" } }) do
           T.tripFrom({ action = c[1], args = {}, focused = true }, W)
           T.popup(300, 490, 116, 192, 96)
-          T.tick(1)
-          T.ok(T.clickAt() == c[2], c[1] .. "'s row: " .. T.clickAt())
+          T.tick(2)
+          T.ok(T.clickAt() == c[2], c[1] .. "'s point: " .. T.clickAt())
           local clicks = #S.clicks
           T.tick(8)
           T.ok(#S.clicks == clicks, c[1] .. ": " .. (#S.clicks - clicks) .. " click(s) more under the popup")
@@ -1418,7 +1449,7 @@ fn a_menu_choice_with_the_warning_box_up_is_not_asked_and_the_page_is_told() {
     run_mac(r##"
         local S = T.S
         local header, box = T.avengerAt80("Init Preset")
-        T.choose(header, 7, 490, 116, 192, 96)
+        T.choose(header, 6, 490, 116, 192, 96)
         T.poll(500)
         T.answer(T.lastRead("vps-avenger dialog"), T.boxReading("Are you sure?"))
         T.event()
@@ -1440,10 +1471,11 @@ fn a_menu_choice_with_the_warning_box_up_is_not_asked_and_the_page_is_told() {
           local said = onTheBox(function(o) A.HANDLERS[action](o, { percent = 100 }) end)
           T.ok(said == "the menu cannot be seen here; nothing was chosen", action .. ": " .. tostring(said))
         end
-        -- src/act.luau's menu, after its read before the click.
+        -- src/act.luau's menu, after its read before the click — of a part with no strip, which this
+        -- picture, with none painted, would read as covered (read/strip.luau, A COVERED STRIP).
         local said = onTheBox(function(_, trip)
           local got
-          T.handled(Ac.run, box, { label = "a menu", part = "strip",
+          T.handled(Ac.run, box, { label = "a menu", part = "macros",
             decide = function() return { at = { 300, 100 }, menu = { item = { 310, 120 } } } end,
             answer = function() return {} end }, function(r) got = r end, trip)
           trip.done(trip, got)
@@ -1824,7 +1856,7 @@ fn the_page_claims_nothing_of_drum_sq_at_a_click_and_reads_the_slot_lists_either
         assert!(reader_body.contains(part), "readSlots has no '{part}': {reader_body}");
     }
     for key in [
-        "drumkit_part_labels", "drumkit_mute_states", "drumkit_solo_states", "drumkit_lock_states",
+        "drumkit_mute_states", "drumkit_solo_states", "drumkit_lock_states",
         "drumkit_loop_states", "sample_editor_amp_states", "sample_editor_pitch_states", "sample_editor_eq_states",
     ] {
         assert!(
@@ -2107,4 +2139,75 @@ fn the_settings_section_is_the_windows_block_made_general() {
         assert_eq!(js.matches(&set).count(), 1, "{toggle}'s aria-pressed set once");
         assert!(body.contains(&set), "{toggle}'s aria-pressed set in applySettings");
     }
+}
+
+/// ◀ and ▶ from the page with an expansion open (the developer's Mac test of 2026-10-31, mt-verified
+/// finding 3): the step's result sets the preset, its expansion and the open expansion's SELECTED
+/// row together, from the database's place of the name read — the row moves with the step, as the
+/// tool's anchor moves it (its dispatcher.py), where until 0.16 the page kept marking the preset
+/// before. A step into ANOTHER expansion posts the loaded row and the open expansion as not read
+/// (the maintainer's decision B7): that test's Avenger had its browser follow the step. A step whose
+/// name is not read posts the preset as not read and says the name before it as that (B6): "Preset
+/// name not read after Next; before it: …", which the next name read takes away. Every state
+/// posted is in the log, numbered, and the page's echo of the one it applied with its heading.
+#[test]
+fn a_step_moves_the_selected_row_of_the_open_expansion() {
+    assert!(PANEL_JS.contains("text = `Preset name not read after ${String(before.after || 'the last action')}; before it: ` +"));
+    assert!(PANEL_JS.contains("kind: 'applied',") && PANEL_JS.contains("document.addEventListener('visibilitychange', () => {"));
+    run_mac(r##"
+        local S = T.S
+        T.presets()
+        local _, _, W = T.avengerAt80("Init Preset")
+        T.pageReady()
+        T.words({ preset = "LD Lead 2", ["expansion name"] = "Delta" })
+        T.openPage()
+        T.event()
+        local st = T.lastPost("state").state
+        T.ok(st.selected_expansion == "Delta" and st.loaded_expansion_preset_index == 1, "the key: LD Lead 2 in Delta")
+        local function step(action, before, after)
+          T.event()
+          T.nameIs(before)
+          T.tripFrom({ action = action, args = {}, focused = true }, W)
+          T.nameReads(after, after and 600 or nil)
+          return T.lastPost("state").state
+        end
+        st = step("next_preset", "LD Lead 2", "LD Lead 3")
+        T.ok(st.preset == "LD Lead 3" and st.expansion == "Delta" and st.selected_expansion == "Delta"
+          and st.loaded_expansion_preset_index == 2, "▶: the row moved: " .. tostring(st.loaded_expansion_preset_index))
+        local m = T.lastPost("state")
+        T.ok(T.count(string.format("[avenger] [page] state %d posted (trip 'Next preset'): the preset 'LD Lead 3', its "
+          .. "expansion Delta; open Delta, the preset loaded at 3", m.seq)) == 1, T.dump())
+        T.pageMsg({ kind = "applied", seq = m.seq, heading = "LD Lead 3, (XP: Delta)", visible = false })
+        T.ok(T.count(string.format("[avenger] [page] the page shows state %d: the heading 'LD Lead 3, (XP: Delta)', while "
+          .. "hidden", m.seq)) == 1, T.dump())
+        st = step("prev_preset", "LD Lead 3", "LD Lead 2")
+        T.ok(st.preset == "LD Lead 2" and st.loaded_expansion_preset_index == 1, "◀: back a row")
+        -- Into Alpha: the row and the open expansion not read.
+        st = step("next_preset", "LD Lead 2", "AR Deep Arp")
+        T.ok(st.preset == "AR Deep Arp" and st.expansion == "Alpha" and st.loaded_expansion_preset_index == nil
+          and st.expansion_open == nil and st.selected_expansion == nil and st.expansion_categories == nil,
+          "another expansion: " .. tostring(st.selected_expansion) .. " " .. tostring(st.loaded_expansion_preset_index))
+        T.ok(T.count("[avenger] [page] the step loaded AR Deep Arp, of Alpha, where the page had Delta open — the browser "
+          .. "posted as not read") == 1, T.dump())
+        -- Nothing read after it: the name before, said as that.
+        st = step("next_preset", "AR Deep Arp", nil)
+        T.ok(st.preset == nil and st.preset_before and st.preset_before.name == "AR Deep Arp"
+          and st.preset_before.expansion == "Alpha" and st.preset_before.after == "Next"
+          and T.lastPost("error").text == "Next preset: the preset name cannot be read now", T.jsonEncode(st.preset_before))
+        T.ok(T.count("[avenger] [page] 'Next preset': the preset posted as not read — the preset name cannot be read now; the "
+          .. "name before it, 'AR Deep Arp', said as that") == 1, T.dump())
+        T.ok(T.count("posted (trip 'Next preset'): the preset not read, the one before Next 'AR Deep Arp'") == 1, T.dump())
+        -- The next name read takes it away.
+        T.event()
+        S.focusAtOnce, S.focusLands = true, function() S.front, S.chain = W, { W } end
+        T.pageKey()
+        T.event()
+        T.words({ preset = "LD Lead 1", ["expansion name"] = "Delta" })
+        T.openPage()
+        T.event()
+        st = T.lastPost("state").state
+        T.ok(st.preset == "LD Lead 1" and st.preset_before == nil and st.loaded_expansion_preset_index == 0, "the key again")
+        T.ok(T.count("posted (the key): the preset 'LD Lead 1', its expansion Delta; open Delta, the preset loaded at 1") == 1,
+          T.dump())
+    "##);
 }

@@ -42,6 +42,21 @@ T.VIEW_OPTIONS = {
 }
 T.VIEW_TEXT = { 9, 43, 9 + 78, 43 + 16 }
 
+-- The control's ICON, which this Avenger draws in its place, told by its pixels
+-- (src/read/expansion.luau, E.look) — this module's own, where the project read the caption as
+-- text and took any icon there for "open": a light-blue back arrow while an expansion is open, a
+-- square of light grey dots over the grid. Both lie within VIEW_ICON at every zoom measured; a
+-- caption drawn as words would go on right of it, through VIEW_ICON_RIGHT, where neither icon
+-- reaches. Measured on the second Mac test's 22 pictures of the grid and 3 of an open expansion
+-- (`Expansions/Avenger 50 … 200 closed.png`, `VPS Avenger Closed Expansion.png`, `VPS Avenger Open
+-- Expansion.png`, the two `Avenger, 100, Open African House,…`) and the developer's three browser
+-- pictures of his Mac test of 2026-10-31 at 80 % (`browser-80pct`, `browser-grid-8-per-row-80pct`,
+-- `browser-open-80pct`), with Avenger's corner placed exactly and up to 1.5 units off either way:
+-- the arrow 19 to 26 % blue and none grey, the dots 12.5 to 89 % grey and at most 9 % blue, never
+-- more blue than grey, and nothing grey right of either (1.4 % at most).
+T.VIEW_ICON = { 10, 46, 18.5, 54.5 }
+T.VIEW_ICON_RIGHT = { 20, 47, 32, 52 }
+
 -- The open expansion's name, centred in the browser's header — this module's own, measured on the
 -- second Mac test's pictures: "African House" from 69 to 122 at 100 %
 -- (`Expansions/Avenger, 100, Open African House,Fav Stars Off.png`), "Factory" from 73 to 114 at

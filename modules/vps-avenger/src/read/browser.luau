@@ -24,7 +24,9 @@
 -- THE VIEW. Where Avenger draws the view's label it is read; the second Mac test's Avenger draws an
 -- icon (tables/expansion.luau), and the view is then the one set from the page or confirmed there —
 -- the `expansionView` setting, as the project kept its AVGExpansionView (Br.view) — and is said as
--- that, never as read.
+-- that, never as read. Since 0.16 the icon is told by its pixels first (read/expansion.luau, THE
+-- VIEW'S ICON) — the arrow an expansion open, the dots the grid — and the caption is read as text
+-- only where it tells neither: every text read of the icon was nothing or an invention.
 --
 -- THE STARS (Br.stars). Two grids of one column over the star column, four cells to a row of the
 -- fourteen (at most 64 cells), with the project's two tests — bright, and its blue — and for each row
@@ -81,11 +83,12 @@ local function within(r, snap)
 end
 
 -- The header's regions read off snapshot `snap` with placer `pl`, in ONE text read, waited for: the
--- readings by their entries' names, and how long it took. A region the picture holds nothing of is
--- not asked; a read that fails answers nothing, and the log says why.
-function Br.read(snap, pl)
+-- readings by their entries' names, and how long it took. The caption only with `caption` — where
+-- the view's icon tells neither state (read/expansion.luau, THE VIEW'S ICON). A region the picture
+-- holds nothing of is not asked; a read that fails answers nothing, and the log says why.
+function Br.read(snap, pl, caption)
   local entries = {}
-  for _, w in ipairs({ "caption", "name" }) do
+  for _, w in ipairs(caption and { "caption", "name" } or { "name" }) do
     local spec = Br.REGIONS[w]
     local r = pl:rect(spec[2])
     r = r and within(r, snap)
@@ -143,10 +146,19 @@ local function gridsOf(snap, pl, names)
   return got
 end
 
--- The picture test of snapshot `snap` (read/expansion.luau, E.look): its title band and its list
--- bar, waited for.
+-- The picture test of snapshot `snap` (read/expansion.luau, E.look): the view's icon, the title band
+-- and the list bar, waited for.
 function Br.look(snap, pl)
-  return E.look(pl, gridsOf(snap, pl, { ["title band"] = true, ["list bar"] = true }))
+  return E.look(pl, gridsOf(snap, pl, { ["view icon blue"] = true, ["view icon grey"] = true,
+    ["view icon right"] = true, ["title band"] = true, ["list bar"] = true }))
+end
+
+-- The header read and the picture test off snapshot `snap`, in that order — the test first, so that
+-- the caption is read as text only where the view's icon tells neither state: the readings
+-- (Br.read's) and the test (Br.look's).
+function Br.readAndLook(snap, pl)
+  local look = Br.look(snap, pl)
+  return Br.read(snap, pl, look.icon == nil), look
 end
 
 -- ── The names ────────────────────────────────────────────────────────────────
@@ -222,10 +234,14 @@ end
 -- What the browser shows, from the header's readings `byName` (Br.read's), the picture test `look`
 -- (E.look's, or nil) and `scope` = { window = the plug-in window's id, zoom = the zoom read,
 -- expected = the expansion known open there, or nil } — in this order:
---   1. the caption reads a view (an Avenger that draws its label): the grid — { view, open = false };
+--   1. the caption reads a view (an Avenger that draws its label, asked as text only where the
+--      view's icon tells neither state): the grid — { view, open = false };
 --   2. the header's name is one of the catalog's or the roster's (the same words, the same ignoring
 --      case, or the closest by similarity that stands out): that expansion open — { open = true,
 --      name };
+--   2a. the view's icon is the back arrow: an expansion open, its name not read (as in 3, `from`
+--      "icon"); it is the grid's dots and the title band is not lit: the grid in the view stored
+--      (as in 4, `from` "icon") — read/expansion.luau, THE VIEW'S ICON, since 0.16;
 --   3. the title band is lit: an expansion open, its name not read — { open = true }, or, where it
 --      is the one this session's own click opened in this window and nothing read since names
 --      another (state.luau, S.browserAt), that one, by its place in the database's list — { open =
@@ -243,10 +259,12 @@ end
 --   8. nil: not read. `none` alone — something drawn there and no text recognised, a name the
 --      recogniser missed — never says the grid, and Set Expansion View's click there would close
 --      an expansion.
--- Steps 2, 3 and 6 forget a confirmation of the grid in the window. Each answer carries `from`
--- ("caption", "header", "picture", "confirmed", "header and picture"). And the log's words.
+-- Steps 2, 2a's arrow, 3 and 6 forget a confirmation of the grid in the window. Each answer carries
+-- `from` ("caption", "header", "icon", "picture", "confirmed", "header and picture"). And the log's
+-- words.
 function Br.state(byName, look, scope)
   scope = scope or {}
+  local icon = look and look.icon or nil
   local caption = Br.text(byName["expansion view"])
   local view = E.parseView(caption)
   if view then
@@ -258,13 +276,11 @@ function Br.state(byName, look, scope)
   local name = Br.text(header)
   local verdict = look and look.verdict or nil
   local pic = look and look.words or "the picture not read"
-  if name then
-    local hit = lookUp(Br.names(), name, Br.NAME_MIN)
-    if hit then
-      S.forgetGrid(scope.window, "the header reads " .. hit.name)
-      return { open = true, name = hit.name, from = "header" }, string.format("the header reads '%s' — %s open (%s)",
-        R.forLog(name), hit.name, hit.how)
-    end
+  local hit = name and lookUp(Br.names(), name, Br.NAME_MIN) or nil
+  if hit then
+    S.forgetGrid(scope.window, "the header reads " .. hit.name)
+    return { open = true, name = hit.name, from = "header" }, string.format("the header reads '%s' — %s open (%s)",
+      R.forLog(name), hit.name, hit.how)
   end
   local read = name and ("'" .. R.forLog(name) .. "', no expansion's name") or ("no name (" .. tostring(status) .. ")")
   local function openUnnamed(from)
@@ -275,6 +291,19 @@ function Br.state(byName, look, scope)
         .. ", the one opened here by its place in the list chosen"
     end
     return { open = true, from = from }, why .. " — which one cannot be read"
+  end
+  -- The view's icon (read/expansion.luau, THE VIEW'S ICON), where it tells: the back arrow is an
+  -- expansion open, the header's name saying which where it reads one (above); the grid's dots are
+  -- the grid in the view stored, unless the title band is lit — then the steps below decide.
+  if icon == "open" then
+    S.forgetGrid(scope.window, "the view's icon is the back arrow")
+    local st, why = openUnnamed("icon")
+    return st, look.iconWords .. "; " .. why
+  end
+  if icon == "grid" and verdict ~= "open" then
+    local stored, how = Br.view()
+    return { view = stored, viewFrom = how, open = false, from = "icon" }, string.format("%s; the header reads %s; %s: "
+      .. "no expansion open, the view %s %s", look.iconWords, read, pic, tostring(stored), tostring(how))
   end
   if verdict == "open" then
     S.forgetGrid(scope.window, "the title band is lit")
@@ -458,7 +487,12 @@ function Br.shownRows(pl, window, expansion, lists)
   for i, c in ipairs(lists.presetCategories) do
     if c == at.category then members[#members + 1] = i end
   end
-  local rows, adjust = Pg.presetRows(at.presets.page, #members)
+  -- Where the list stands is not known after a category's click (Pg.presetsKnown, the
+  -- avenger_control developer's correction of 2026-10-31): no rows — but for a category of
+  -- fourteen or fewer, which shows them all.
+  local known = Pg.presetsKnown(at.presets)
+  if not known and #members > X.PRESET_VISIBLE_ROWS then return nil end
+  local rows, adjust = Pg.presetRows(known and at.presets.page or 0, #members)
   local out = {}
   for r = 0, X.PRESET_VISIBLE_ROWS - 1 do
     local place = rows[r]
@@ -523,8 +557,7 @@ function Br.part(snap, pl, opts)
   local fields = {}
   for _, f in ipairs(opts.fields or {}) do fields[f] = true end
   local v, keys = {}, { "expansionView", "expansionViewFrom" }
-  local byName = Br.read(snap, pl)
-  local look = Br.look(snap, pl)
+  local byName, look = Br.readAndLook(snap, pl)
   local st, why = Br.state(byName, look, { window = opts.window, zoom = pl.zoom, expected = opts.expected })
   log("%s", why)
   Br.lastPart = { window = opts.window, pl = pl, byName = byName, look = look, st = st, words = why }

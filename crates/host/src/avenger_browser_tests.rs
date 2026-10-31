@@ -201,11 +201,22 @@ function T.browserShapes(shapes, cx, cy, k)
   end
   if b.mode == "grid" then
     local g = b.grid
+    -- `icon`: the view's icon this Avenger draws over the grid, a square of light grey dots
+    -- (read/expansion.luau, THE VIEW'S ICON).
+    if g.icon then rect(10.5, 46.5, 18, 54, { 200, 200, 200 }) end
     for _, t in ipairs(T.shownTiles()) do rect(t.tx - 6, t.ty - 9, t.tx + 6, t.ty - 5, colour(t.index)) end
     if g.barLit then rect(9, 70, 15, 210, { 120, 120, 120 }) end
     if g.titleLit then rect(80, 47, 82, 49, { 230, 230, 230 }) end
   else
     local o = b.open
+    -- The first picture of an open (`tilesUnder`): the grid's tiles still drawn, their icons lit —
+    -- the eighth column's in the star column (23 + 7 × 27.5 = 215.5), as FAV read on after every Open
+    -- of the second Windows session (2026-10-31).
+    if o.tilesUnder then
+      for _, t in ipairs(T.shownTiles()) do rect(t.tx - 6, t.ty - 9, t.tx + 6, t.ty - 5, { 235, 235, 235 }) end
+    end
+    -- `icon`: the back arrow this Avenger draws with an expansion open, light blue.
+    if o.icon then rect(11, 47.5, 16.5, 52.5, { 183, 213, 255 }) end
     -- The title's glyphs in its band (luminance 208, strokes a unit wide every 2.5, from y 46 to 51,
     -- as the second Mac test's pictures draw "Factory" and "African House"), and the categories'
     -- scrollbar's track lit over a third of its place.
@@ -316,6 +327,17 @@ S.browserClick = function(x, y)
   if b.mode == "grid" then
     local g = b.grid
     if math.abs(tx - 228) <= 2 then
+      -- `doubleLost`: a press within 500 ms of the last at the same point is a double-click's second
+      -- to Windows, and the scrollbar takes none — what the second Windows session (2026-10-31) most
+      -- likely lost (avw2-verified, B-F2).
+      if g.doubleLost then
+        local prev = g.lastPress
+        g.lastPress = { x = x, y = y, at = S.now }
+        if prev and prev.x == x and prev.y == y and S.now - prev.at < 500 then
+          note(string.format("scrollbar %g, lost", ty))
+          return
+        end
+      end
       -- The tool's scrollbar points: its top a page up, its bottom a page down, and the middle of three
       -- pages the middle one.
       local p = g.page or 0
@@ -337,8 +359,19 @@ S.browserClick = function(x, y)
       if math.abs(tx - t.tx) <= 12 and ty >= t.ty - 10 and ty <= t.ty + 4 then
         note(t.name)
         if g.opens and g.opens[t.name] then
+          -- Avenger draws an expansion open in two pictures: its header first, the grid's tiles still
+          -- under its lists (the developer's `browser-open-80pct.png` of 2026-10-31), its lists on a
+          -- later turn (`tilesUnder`, T.browserShapes).
           b.mode, b.open = "open", g.opens[t.name]
+          b.open.tilesUnder = true
           T.repaint(S.painted.spec)
+          local o = b.open
+          S.browserLater[#S.browserLater + 1] = { at = S.now + 200, fn = function()
+            if o.tilesUnder then
+              o.tilesUnder = nil
+              if S.browser and S.browser.open == o and S.browser.mode == "open" then T.repaint(S.painted.spec) end
+            end
+          end }
         end
         return
       end
@@ -398,7 +431,11 @@ S.browserClick = function(x, y)
       if math.abs(ty - c.ty) <= 5 then
         note("category " .. c.name)
         if o.categoryDead then return end
-        o.category, o.presetPage = c.name, 0
+        -- Avenger keeps a category's list where it last had it (the avenger_control developer's
+        -- correction of 2026-10-31): a category's click does not take its presets to their top.
+        o.pageOf = o.pageOf or {}
+        o.pageOf[o.category] = o.presetPage
+        o.category, o.presetPage = c.name, o.pageOf[c.name] or 0
         T.repaint(S.painted.spec)
         return
       end
@@ -1131,6 +1168,10 @@ fn an_expansion_is_opened_by_its_place_confirmed_by_the_header() {
         T.ok(S.browser.mode == "grid" and T.err() == "Opening an expansion: VPS Avenger opened Synthwave where Dark Techno lies "
           .. "by its place in the list chosen; it was closed again", T.err())
         T.ok(T.count("clicked (" .. T.at80(133, 68) .. "), Synthwave in the header, closed again") == 1, T.dump())
+        -- What the page was told, in the log (avw2-verified, A7: the second Windows session's log said
+        -- nothing of what its trips told the tester).
+        T.ok(T.count("[avenger] [page] 'Opening an expansion': answered — error 'VPS Avenger opened Synthwave where Dark "
+          .. "Techno lies by its place in the list chosen; it was closed again'") == 1, T.dump())
         T.ok(T.st().expansion_open == false, "the grid posted")
         -- Its title lit, its name not read: the one at the place clicked, unmarked, and kept by the key.
         T.event()
@@ -1278,6 +1319,26 @@ fn the_tools_tables_place_an_expansion_a_category_and_a_preset_and_their_scrollb
         T.ok(ys(Pg.presetScroll({ page = 0, first = 0 }, Pg.presetPlace(3, 30), 30)) == "", "30: page 0 from the top, none")
         T.ok(ys(Pg.presetScroll({ page = 2, first = 26 }, Pg.presetPlace(5, 136), 136)) == "58 58", "136: back from the third")
         T.ok(ys(Pg.presetScroll({ page = 1, first = 14 }, Pg.presetPlace(60, 136), 136)) == "227 227 227", "136: on down")
+        -- The place not known (the avenger_control developer's correction of 2026-10-31: a category's
+        -- click leaves Avenger's list where Avenger had it): to the top from the end of the WHOLE
+        -- category, max(3, its last page + 2) clicks, none for fourteen or fewer, then on from page 0 —
+        -- the short list's reset not made again; a missing number is not known, never 0.
+        local U = Pg.presetsUnknown()
+        local function n(y, k) return string.rep(y .. " ", k):sub(1, -2) end
+        T.ok(ys(Pg.presetScroll(U, Pg.presetPlace(0, 96), 96)) == n(58, 9), "96 not known: nine up, max(3, 7 + 2)")
+        T.ok(ys(Pg.presetScroll({ page = 0, first = 0, final = false }, Pg.presetPlace(95, 96), 96)) == n(227, 7),
+          "96 from page 0 to the last: seven down")
+        T.ok(ys(Pg.presetScroll(U, Pg.presetPlace(95, 96), 96)) == n(58, 9) .. " " .. n(227, 7), "96 not known, the last")
+        T.ok(ys(Pg.presetScroll({}, Pg.presetPlace(0, 96), 96)) == n(58, 9), "no numbers: not known, never 0")
+        T.ok(ys(Pg.presetScroll({ page = 0 }, Pg.presetPlace(0, 96), 96)) == n(58, 9), "no `first`: not known")
+        T.ok(ys(Pg.presetScroll(U, Pg.presetPlace(20, 30), 30)) == n(58, 5) .. " 227",
+          "30 not known: max(3, 3 + 2) up, the short list's reset not made again, one down")
+        T.ok(ys(Pg.presetScroll(U, Pg.presetPlace(14, 15), 15)) == n(58, 3) .. " 227", "15: three up, one down")
+        T.ok(ys(Pg.presetScroll(U, Pg.presetPlace(0, 136), 136)) == n(58, 12), "136: twelve up")
+        T.ok(ys(Pg.presetScroll(U, Pg.presetPlace(13, 14), 14)) == "", "fourteen: all shown, nothing")
+        T.ok(not Pg.presetsKnown(U) and not Pg.presetsKnown({}) and not Pg.presetsKnown(nil)
+          and not Pg.presetsKnown({ page = 0, first = -1 }) and Pg.presetsKnown({ page = 0, first = 0 }),
+          "known only with both numbers at 0 or more")
         local point, star = Pg.presetPoint(13, -5)
         T.ok(point[1] == 142 and point[2] == 217.5 and star[1] == 220 and star[2] == 217.5, "a row's point and its star's")
     "##));
@@ -1425,6 +1486,7 @@ fn a_category_is_clicked_at_its_place_its_list_at_the_end_that_shows_it() {
           "Bass: " .. T.err())
         T.ok(T.count("'Choosing a category': the list of categories to its top first, for Bass, the 2 of 12") == 1
           and T.count("'Choosing a category': clicking Bass at (165,222), the tool's row 2 of the categories") == 1, T.dump())
+        T.ok(T.count("'Choosing a category': the lists changed after Bass's click") == 1, T.dump())
         local n = #S.clicks
         T.event()
         choose("Plucks")
@@ -1443,6 +1505,7 @@ fn a_category_is_clicked_at_its_place_its_list_at_the_end_that_shows_it() {
         choose("Bass")
         T.ok(T.clicksSince(n) == "165,222" and T.err() == "Choosing a category: Bass clicked; nothing VPS Avenger shows "
           .. "changed, and its presets cannot be read", T.clicksSince(n) .. " " .. T.err())
+        T.ok(T.count("'Choosing a category': the lists did not change after Bass's click") == 1, T.dump())
         T.nothingBelowTheHeader(reads)
         T.ok(#S.scrolls == 0, "the wheel never turned")
         T.ok(T.held() == 0, "every picture released: " .. T.held())
@@ -1455,8 +1518,8 @@ fn a_category_is_clicked_at_its_place_its_list_at_the_end_that_shows_it() {
 /// X17 Arp Line 01 loaded: X17 Arp Line 02 selected — its category Arp clicked first, (42, 66) —
 /// (165, 190), where this session's clicks did not leave it shown, then its row, (142, 72.5) — (325,
 /// 200), one click; the presets' change waited for (Avenger draws the row selected), then the strip
-/// and the macros read again with their text, as the tool's action_select_expansion_preset
-/// refreshes them. No name read before or after the click, no name watched, nothing said — no
+/// and the macros read again, as the tool's action_select_expansion_preset refreshes them — their
+/// names the database's, which has the preset (D3). No name read before or after the click, no name watched, nothing said — no
 /// "unchanged" — and nothing forgotten: the preset and its place stay the ones loaded, the
 /// database's position and where the lists stand with them, so the next row's Select clicks only
 /// its row. The row selected already: nothing changes in the list, the wait runs to its bound, and
@@ -1466,8 +1529,9 @@ fn a_category_is_clicked_at_its_place_its_list_at_the_end_that_shows_it() {
 #[test]
 fn a_preset_selected_is_a_preview_with_no_name_watched_and_nothing_forgotten() {
     run_mac(&scenario(r##"
+        -- One OSC tab with its dot: a strip with none is covered (read/strip.luau, A COVERED STRIP).
         local _, _, W = T.browserPage({ mode = "open", open = T.openOf("Synthwave", { selectLit = true }) },
-          { words = { preset = "X17 Arp Line 01" } })
+          { words = { preset = "X17 Arp Line 01" }, spec = { osc = 1 } })
         T.ok(T.st().preset == "X17 Arp Line 01" and T.st().loaded_expansion_preset_index == 0, "the key placed the preset")
         local function row(action, i)
           return { action = action, args = { preset_index = i, visible_index = i, category_preset_index = i, category_count = 2,
@@ -1493,7 +1557,12 @@ fn a_preset_selected_is_a_preview_with_no_name_watched_and_nothing_forgotten() {
         unchangedPage("the preset loaded stays")
         T.ok(watched() == w0 and T.readNames(reads)["the name"] == nil, "no name read: " .. (watched() - w0))
         local named = T.readNames(reads)
-        T.ok(named["osc 1"] == 1 and named["macro tabs"] == 1, "the strip and the macros read with their text")
+        -- The strip and the macros read again, their names the database's, which has the preset: no
+        -- name and no caption read (the maintainer's decision of 2026-10-31, D3).
+        T.ok(named["osc 1"] == nil and named["macro tabs"] == nil and named["macro macro1"] == nil
+          and T.count("strip: the tabs' names not read — the preset database's") == 1
+          and T.count("macros: tabs not read; 1 tab, the database's") == 1, "the strip and the macros read again: "
+          .. T.jsonEncode(named) .. " " .. T.dump())
         T.ok(T.count("is forgotten") == forgotten, "nothing forgotten: " .. T.dump())
         T.ok(T.count("[avenger] [browser] 'Selecting a preset': clicking X17 Arp Line 02 at (325,200), the tool's row 2 of "
           .. "page 1 of Arp") == 1 and T.count("'Selecting a preset': the presets' list changed after the click") == 1, T.dump())
@@ -1629,9 +1698,11 @@ fn a_preset_is_loaded_at_its_place_and_confirmed_by_its_name() {
 
 /// Cinematic Pads' Strings, thirty presets, the tool's measured pages for thirty: its 21st, page 1,
 /// drawn on the fourteenth row 5 points high. Strings clicked first — the list of categories to its
-/// bottom, (12, 218) — (117, 433) — then the ninth row, (42, 226) — (165, 446); its presets at their
-/// top after it, so the tool's three clicks at the presets' scrollbar's top, (228, 58) — (463, 177),
-/// the first moving nothing and the others not made, and one at its bottom, (228, 227) — (463, 447);
+/// bottom, (12, 218) — (117, 433) — then the ninth row, (42, 226) — (165, 446); its presets' place
+/// not known after it (the avenger_control developer's correction of 2026-10-31), so the tool's
+/// clicks at the presets' scrollbar's top from the end of the whole category, max(3, 3 + 2) = 5 —
+/// (228, 58) — (463, 177), the first moving nothing and the others not made — and one at its
+/// bottom, (228, 227) — (463, 447);
 /// the row at (142, 217.5) — (325, 432). Then its 30th, page 3: from page 1, the top three times —
 /// once moving, then not — and the bottom three times, the row at (142, 222.5) — (325, 440). A Select
 /// is a preview: the preset loaded stays, and nothing is said.
@@ -1658,8 +1729,8 @@ fn a_preset_far_down_its_category_is_reached_by_the_tools_scrollbar_clicks() {
         T.ok(T.clicksSince(0) == "117,433 117,433 165,446 463,177 463,447 325,432", "the clicks: " .. T.clicksSince(0))
         T.ok(S.browser.open.presetPage == 1 and S.browser.clicked[#S.browser.clicked] == "preset X4 Strings Line 21",
           "the 21st: " .. tostring(S.browser.clicked[#S.browser.clicked]))
-        T.ok(T.count("X4 Strings Line 21 is the 21 of 30 in Strings — page 2, row 14; 4 click(s) on the presets' scrollbar")
-          == 1, T.dump())
+        T.ok(T.count("X4 Strings Line 21 is the 21 of 30 in Strings — page 2, row 14; 6 click(s) on the presets' scrollbar "
+          .. "(where the list stands is not known: its top first, from the end of Strings)") == 1, T.dump())
         T.run(2400)
         T.ok(T.st().preset == preset and T.err() == "", T.err())
         local n = #S.clicks
@@ -2121,5 +2192,230 @@ fn a_calibrating_run_writes_the_browsers_pictures_once_per_view_and_zoom() {
         local after = pictures()
         T.ok(#after == 3 and after[3].name == "browser-80pct.png", "the same view and zoom again: none of the "
           .. "actions' — " .. T.jsonEncode(after))
+    "##));
+}
+
+// ---------------------------------------------------------------------------------------------
+// The second Windows session and the developer's Mac test (2026-10-31): the presets' place after a
+// category's click, repeated clicks at one point, FAV after an Open, the view's icon.
+// ---------------------------------------------------------------------------------------------
+
+/// The avenger_control developer's correction of 2026-10-31: a category's click leaves Avenger's
+/// preset list where Avenger last had it — the model keeps a page per category. Factory open on the
+/// shipped database, its Arp (96 presets) left on its last page: AR A State of Trance, Arp's first —
+/// the categories' top (standing still, its second click not made), Arp's row, then up from the end
+/// of the WHOLE category, max(3, 7 + 2) = 9 clicks (the eighth stands still, the ninth not made), then
+/// row 1. Each click at a point after the first logs how long after the one before it it was asked
+/// (avw2-verified, A4). Then Arp's last, XX Run Midiwars, from the place the series left: seven clicks
+/// down and its row 14. Without the correction row 1 of the last page was clicked — another preset.
+#[test]
+fn a_category_click_leaves_the_preset_list_not_known_and_it_goes_up_from_the_categorys_end() {
+    run_mac(&scenario(r##"
+        local _, _, W = T.browserPage({ mode = "open", open = T.openOf("Factory", { presetPage = 7 }, T.SHIPPED) },
+          { files = T.SHIPPED })
+        local all = T.st().expansion_presets
+        T.tripFrom({ action = "select_expansion_preset", args = { preset_index = table.find(all, "AR A State of Trance") - 1,
+          keep_preset_category = "Arp" }, focused = true }, W)
+        T.runUntil(function() return T.lastClicked("preset AR A State of Trance") end, 30000)
+        T.ok(T.clicksSince(0) == "117,190 165,190 " .. string.rep("463,177 ", 8) .. "325,180", T.clicksSince(0))
+        T.ok(T.count("9 click(s) on the presets' scrollbar (where the list stands is not known: its top first, from the end "
+          .. "of Arp)") == 1, T.dump())
+        T.ok(S.browser.open.presetPage == 0, "at the top")
+        T.ok(T.count("ms after the click before it at this point") == 7
+          and T.count("the presets' scrollbar clicked at 58.0 — the list stood still, ") == 1, T.dump())
+        T.run(2400)
+        local n = #S.clicks
+        T.event()
+        T.tripFrom({ action = "select_expansion_preset", args = { preset_index = table.find(all, "XX Run Midiwars") - 1,
+          keep_preset_category = "Arp" }, focused = true }, W)
+        T.runUntil(function() return T.lastClicked("preset XX Run Midiwars") end, 30000)
+        T.ok(T.clicksSince(n) == string.rep("463,447 ", 7) .. "325,440", T.clicksSince(n))
+        T.ok(S.browser.open.presetPage == 7, "the last page")
+        T.run(2400)
+        T.ok(T.held() == 0, "every picture released: " .. T.held())
+    "##));
+}
+
+/// A give-up partway through the reset — the page key after its third click — clicks nothing more and
+/// no preset, and leaves the place not known: the next Select resets again from the end of the whole
+/// category, never taking the list for its top.
+#[test]
+fn a_give_up_mid_reset_leaves_the_presets_place_not_known() {
+    run_mac(&scenario(r##"
+        local _, _, W = T.browserPage({ mode = "open", open = T.openOf("Factory", { presetPage = 7 }, T.SHIPPED) },
+          { files = T.SHIPPED })
+        local all = T.st().expansion_presets
+        local function select()
+          T.tripFrom({ action = "select_expansion_preset", args = { preset_index = table.find(all, "AR A State of Trance") - 1,
+            keep_preset_category = "Arp" }, focused = true }, W)
+        end
+        select()
+        T.runUntil(function() return #S.clicks >= 5 end)
+        T.ok(T.clicksSince(0) == "117,190 165,190 463,177 463,177 463,177", T.clicksSince(0))
+        S.focusAtOnce, S.focusLands = true, function() S.front, S.chain = T.PAGE_WIN, { T.PAGE_WIN } end
+        T.pageKey()
+        local clicks = #S.clicks
+        T.run(6000)
+        T.ok(#S.clicks == clicks and not T.lastClicked("preset AR A State of Trance"), "nothing more, no preset")
+        T.ok(S.browser.open.presetPage == 4, "the list left partway: " .. S.browser.open.presetPage)
+        T.event()
+        select()
+        T.runUntil(function() return T.lastClicked("preset AR A State of Trance") end, 30000)
+        T.ok(T.count("9 click(s) on the presets' scrollbar (where the list stands is not known") == 2, T.dump())
+        T.ok(S.browser.open.presetPage == 0, "at the top")
+        T.run(2400)
+        T.ok(T.held() == 0, "every picture released: " .. T.held())
+    "##));
+}
+
+/// FAV on, Arp clicked: where its list stands is not known after the click (the developer's
+/// correction), so with more than fourteen presets no row is placed and no star read — as the tool's
+/// action reads none — and the log says why; the next Select of an Arp preset, its place known after
+/// the reset, reads them.
+#[test]
+fn the_stars_are_not_read_where_the_presets_place_is_not_known() {
+    run_mac(&scenario(r##"
+        local open = T.openOf("Factory", { fav = true, presetPage = 2 }, T.SHIPPED)
+        local _, _, W = T.browserPage({ mode = "open", open = open }, { files = T.SHIPPED })
+        local cats = T.st().expansion_categories
+        T.tripFrom({ action = "select_expansion_category", args = { index = table.find(cats, "Arp") - 1, total = #cats },
+          focused = true }, W)
+        T.run(6000)
+        T.ok(T.st().selected_preset_category == "Arp" and T.st().favorite_preset_states == nil
+          and T.count("'Choosing a category': the stars not read — where Arp's list stands is not known after its click")
+          == 1, T.dump())
+        T.event()
+        local all = T.st().expansion_presets
+        T.tripFrom({ action = "select_expansion_preset", args = { preset_index = table.find(all, "AR A State of Trance") - 1,
+          keep_preset_category = "Arp" }, focused = true }, W)
+        T.runUntil(function() return T.lastClicked("preset AR A State of Trance") end, 30000)
+        T.run(2400)
+        T.ok(T.st().favorite_preset_states ~= nil, "the stars read once the place is known")
+        T.ok(T.held() == 0, "every picture released: " .. T.held())
+    "##));
+}
+
+/// Vocal Dreams 1, the 128th of Nyhdroe's 129 in 8 per Row, on a Windows that pairs two presses of
+/// the scrollbar's bottom 150 ms apart into a double-click and loses the second (the grid model's
+/// `doubleLost`), as the second Windows session most likely did (avw2-verified, B-F2): with every
+/// click made at once, the grid stands on page 2 and the tile there is Italo Disco 4, closed again.
+/// With the host holding a single click out of a double-click (D4, docs/api/input.md: a click at
+/// the point of the host's last press within the double-click time is made once that time has
+/// passed, the call answered at once), the same series reaches page 3 and the tile there is Vocal
+/// Dreams 1: the module needs nothing more — its change wait from the picture before the click
+/// sees the held click when it is made.
+#[test]
+fn a_held_single_click_reaches_the_grids_last_page_where_a_paired_one_does_not() {
+    for hold in [false, true] {
+        let s = r##"
+            local hold = @HOLD@
+            local opens = { ["Vocal Dreams 1"] = T.openOf("Vocal Dreams 1", nil, T.SHIPPED),
+              ["Italo Disco 4"] = T.openOf("Italo Disco 4", nil, T.SHIPPED) }
+            local model = T.grid("8 per Row", {}, { caption = false, pageRows = { 0, 4, 9 }, doubleLost = true, opens = opens })
+            local _, _, W = T.browserPage(model, { files = T.SHIPPED, roster = "Nyhdroe" })
+            S.browser.grid.names = T.st().expansions
+            T.repaint({})
+            -- The host's single click held out of a double-click: answered at once, made 516 ms after the
+            -- last press at that point.
+            local click = rawget(T.host.input, "click")
+            local last = nil
+            rawset(T.host.input, "click", function(x, y, opts, cb)
+              local single = not (opts and opts.clicks == 2)
+              if hold and single and last and last.x == x and last.y == y and S.now - last.at < 500 then
+                local at = last.at + 516
+                last = { x = x, y = y, at = at }
+                S.browserLater[#S.browserLater + 1] = { at = at, fn = function() click(x, y, opts, cb) end }
+                return true
+              end
+              last = { x = x, y = y, at = S.now }
+              return click(x, y, opts, cb)
+            end)
+            T.tripFrom({ action = "open_expansion", args = { index = T.indexIn("Vocal Dreams 1") }, focused = true }, W)
+            T.run(16000)
+            if hold then
+              T.ok(S.browser.mode == "open" and S.browser.open.name == "Vocal Dreams 1" and T.err() == "",
+                "Vocal Dreams 1 opened: " .. tostring(T.err()))
+              T.ok(T.count("the grid's scrollbar clicked at 222.0 — the list moved") == 2, T.dump())
+            else
+              T.ok(T.err() == "Opening an expansion: VPS Avenger opened Italo Disco 4 where Vocal Dreams 1 lies by its place "
+                .. "in the list chosen; it was closed again", T.err())
+              T.ok(T.count("the grid's scrollbar clicked at 222.0 — the list stood still, ") == 1, T.dump())
+            end
+            T.ok(T.held() == 0, "every picture released: " .. T.held())
+        "##
+        .replace("@HOLD@", if hold { "true" } else { "false" });
+        run_mac(&scenario(&s));
+    }
+}
+
+/// FAV after an Open is read off a SETTLED picture of the open expansion (avw2-verified, A5): the
+/// first picture whose header reads open still holds the grid's tiles under its lists — the
+/// developer's `browser-open-80pct.png` of 2026-10-31 — and the eighth column of them lies in the star
+/// column, which read FAV on after every Open of the second Windows session and off at every later
+/// read. With FAV off, off; with FAV on, on.
+#[test]
+fn fav_after_an_open_is_read_off_the_settled_picture() {
+    for fav in [false, true] {
+        let s = r##"
+            local opens = { ["Cinematic Pads"] = T.openOf("Cinematic Pads", { fav = @FAV@ }) }
+            local _, _, W = T.browserPage(T.grid("8 per Row", nil, { caption = false, opens = opens }))
+            T.tripFrom({ action = "open_expansion", args = { index = T.indexIn("Cinematic Pads") }, focused = true }, W)
+            T.run(1500)
+            local st = T.st()
+            T.ok(st.expansion_open == true and st.selected_expansion == "Cinematic Pads"
+              and st.expansion_favorite_view == @FAV@, "FAV: " .. tostring(st.expansion_favorite_view) .. " " .. T.dump())
+            T.ok(T.count("'Opening an expansion': FAV read off the settled picture after the open") == 1, T.dump())
+            T.ok(T.count("expansion: FAV — ") == 1 and T.count("expansion: FAV — ") == T.count(@WORD@), T.dump())
+            T.ok(T.held() == 0, "every picture released: " .. T.held())
+        "##
+        .replace("@FAV@", if fav { "true" } else { "false" })
+        .replace("@WORD@", if fav { "\" — ON\"" } else { "\" — OFF\"" });
+        run_mac(&scenario(&s));
+    }
+}
+
+/// The view's icon (read/expansion.luau, THE VIEW'S ICON): this Avenger draws a square of grey dots
+/// over the grid and a light-blue back arrow with an expansion open, where every text read of it on
+/// both platforms was nothing or an invention (mt-verified, finding 10). Told by its pixels, the
+/// caption is not read as text: the grid in the view stored; an expansion open, its name from the
+/// header — or, where the header reads none, open and not named. An Avenger that draws neither, as
+/// the model by default, has its caption read: "4 per Row" is the view.
+#[test]
+fn the_view_icon_tells_an_open_expansion_from_the_grid_without_a_text_read() {
+    run_mac(&scenario(r##"
+        local _, _, W = T.browserPage(T.grid("8 per Row", nil, { caption = false, icon = true }))
+        local st = T.st()
+        T.ok(st.expansion_open == false and st.expansion_view == "8 per Row" and st.expansion_view_from == "stored",
+          "the grid by its icon")
+        T.ok(T.readNames(0)["expansion view"] == nil, "no caption read: " .. T.jsonEncode(T.readNames(0)))
+        T.ok(T.count("the view's icon 0.0 % blue, ") >= 1 and T.count("[avenger] [read] expansion: the view's icon 0.0 % blue, ") == 1
+          and T.count("— the grid's; the header reads no name (blank)") >= 1,
+          T.dump())
+        T.back(W)
+        S.browser = { mode = "open", grid = S.browser.grid, open = T.openOf("Cinematic Pads", { icon = true, header = false,
+          titleDrawn = false }) }
+        T.repaint({})
+        local reads = #S.recognized
+        T.openPage()
+        T.event()
+        st = T.st()
+        T.ok(st.expansion_open == true and st.selected_expansion == "", "open, not named: " .. tostring(st.selected_expansion))
+        T.ok(T.readNames(reads)["expansion view"] == nil and T.count("— the back arrow; the header reads no name (none)") >= 1,
+          T.dump())
+        T.back(W)
+        S.browser.open.header = nil
+        T.repaint({})
+        T.openPage()
+        T.event()
+        T.ok(T.st().selected_expansion == "Cinematic Pads", "its name from the header")
+        -- Neither icon: the caption read — "4 per Row", over the model's 8 per Row.
+        T.back(W)
+        S.browser = T.grid("8 per Row", nil, { caption = "4 per Row" })
+        T.repaint({})
+        reads = #S.recognized
+        T.openPage()
+        T.event()
+        T.ok(T.readNames(reads)["expansion view"] == 1 and T.st().expansion_view == "4 per Row"
+          and T.st().expansion_view_from == nil, "the label read: " .. T.jsonEncode(T.readNames(reads)))
     "##));
 }

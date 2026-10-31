@@ -103,6 +103,16 @@ rawset(T.host.window, "windowsOf", function()
   S.windowLists += 1
   return S.windows
 end)
+-- The display's scaling at a window (host.screen.scaling): S.scaling, { scale, system }, where a
+-- scenario sets it; otherwise the build for other systems' answer, nil and `not_supported` — the
+-- display factor not known on Avenger's own window, as before 0.16. Every window asked about is
+-- noted in S.scalingAsked.
+S.scalingAsked = {}
+rawset(T.host.screen, "scaling", function(at, y)
+  S.scalingAsked[#S.scalingAsked + 1] = type(at) == "table" and at.id or { at, y }
+  if S.scaling then return { scale = S.scaling.scale, system = S.scaling.system } end
+  return nil, T.E("not_supported", "not supported on this platform yet")
+end)
 -- The recognition languages: English and German, or German alone with S.english = false (a German
 -- Windows without English OCR); every read records the language it asked for.
 rawset(T.host.ocr, "resolveLanguage", function(l)
@@ -447,7 +457,11 @@ end
 --   dots               { { x, w, colour }, … } at 50 %: the dots as listed, in place of the green ones
 --   selected, index    the tab whose bottom strip is dark: "osc" (and which), "drums" or "trig"
 --   strips             { [i] = shade, drums = shade, trig = shade }: those bottom strips in shades of
---                      their own, as a picture taken while Avenger redraws them
+--                      their own, every row of them
+--   meters             { [i] = width, drums = width, trig = width }: Avenger's level meter under those
+--                      tabs, a light bar (195) one row tall at 80 %, from 38.55 to 39.15, centred
+--                      under the tab, `width` at 50 % — lit while the oscillator sounds (the
+--                      developer's Mac test of 2026-10-31)
 --   mute, solo         { [i] = true } for the OSC tabs lit red
 --   drumsMute, drumsSolo, trigMute, trigSolo   lit red
 --   pattern, lock, mode   the Drums tab: its pattern switch red, its lock green, and "sq" or
@@ -516,6 +530,19 @@ function T.paintAvenger(cx, cy, k, spec)
       local t = ST.tabSpan(key, n, 0, 0)
       rect(t[1], 36, t[3], 40, c)
     end
+  end
+  for key, w in pairs(spec.meters or {}) do
+    local x1, x2
+    if key == "drums" then
+      x1, x2 = ST.DRUMS_SELECTION[1], ST.DRUMS_SELECTION[2]
+    elseif key == "trig" then
+      x1, x2 = ST.TRIG_SELECTION[1], ST.TRIG_SELECTION[2]
+    else
+      local t = ST.tabSpan(key, n, 0, 0)
+      x1, x2 = t[1], t[3]
+    end
+    local mid = (x1 + x2) / 2
+    rect(mid - w / 2, 38.55, mid + w / 2, 39.15, { 195, 195, 195 })
   end
   for i = 1, n or 0 do
     local t = ST.tabSpan(i, n, 0, 0)
@@ -1161,7 +1188,10 @@ function T.avenger()
     -- second, and its callback, 100 ms later, as long as the host's gesture takes — the entry it
     -- takes the callback's: an error value sends no second click and is what the callback hears.
     -- Each click is an entry of S.clicks, marked `double` with its number for a double-click's. A
-    -- callback is answered once, on a later tick, as the host answers it.
+    -- callback is answered once, on a later tick, as the host answers it. S.holdClick, when set:
+    -- the next single click is one Windows holds out of a double-click on the host's gesture thread
+    -- (host.input.click, Windows) for that many ms — `true` at the call, made then, and its callback
+    -- with it.
     click = function(x, y, opts, cb)
       local function later(fn, ms) S.after[#S.after + 1] = { at = S.now + (ms or 0), fn = fn } end
       local double = opts and opts.clicks == 2 or nil
@@ -1174,6 +1204,15 @@ function T.avenger()
       if answer ~= nil and answer ~= true then
         if cb then later(function() cb(false, answer) end) end
         return false, answer
+      end
+      if S.holdClick and not double then
+        local ms = S.holdClick
+        S.holdClick = nil
+        later(function()
+          made(1)
+          if cb then cb(true) end
+        end, ms)
+        return true
       end
       made(1)
       if double then
@@ -1941,8 +1980,9 @@ fn in_logic_the_ring_stays_up_after_its_own_click_with_the_keyboard_on_nothing()
 }
 
 /// The ring's Load and Initialize in Logic, Logic reporting the keyboard on nothing after MENU's
-/// click (l.2228-2233 and l.2667-2672 of the log): each item is chosen in Avenger's popup, and
-/// Initialize goes on to look for the warning box.
+/// click (l.2228-2233 and l.2667-2672 of the log): Load is clicked at the project's point 180 ms
+/// after MENU, the overlay still in front, and Initialize is chosen in Avenger's popup and goes on to
+/// look for the warning box.
 #[test]
 fn in_logic_load_and_initialize_from_the_ring_are_chosen_after_logic_reports_nothing() {
     run_mac(r##"
@@ -1955,23 +1995,23 @@ fn in_logic_load_and_initialize_from_the_ring_are_chosen_after_logic_reports_not
         T.event()
         T.run(400)
         T.ok(header.active, T.dump())
-        -- MENU: 262 x 1.6 = 419.2 -> 419, 120 + 14 x 1.6 = 142.4 -> 142. Its popup (245, 20) from the
-        -- corner in 50 % units: (392, 152), 192 x 96; Load's row 120 + 32 x 1.6 = 171.2 -> 171, across
-        -- its middle 392 + 96 = 488.
+        -- MENU: 262 x 1.6 = 419.2 -> 419, 120 + 14 x 1.6 = 142.4 -> 142. Load at the project's point
+        -- 180 ms later (D1): 257 x 1.6 = 411.2 -> 411, 120 + 32 x 1.6 = 171.2 -> 171 — where mt-verified
+        -- puts it in the developer's Mac test of 2026-10-31.
         T.pressAt(header, 4)
         T.ok(T.clickAt() == "419,142", T.clickAt())
         T.show(L, {})
         T.ok(header.active, T.dump())
         T.popup(300, 392, 152, 192, 96)
-        T.tick(1)
-        T.ok(T.clickAt() == "488,171", T.clickAt())
+        T.tick(3)
+        T.ok(T.clickAt() == "411,171", T.clickAt())
         T.closePopups()
         T.tick(2)
-        -- Clicked once and not followed: the item opens a file dialog (main.luau, ONE_CLICK).
-        T.ok(T.count("[menu item] 'VPS Avenger': 'Load preset' — test ") == 1
-          and T.count("choosing item (96,19) at (488,171)") == 1, T.dump())
+        -- Clicked once, with no menu test (main.luau, "Load preset and Save preset as").
+        T.ok(T.count("[menu item] 'VPS Avenger': 'Load preset'") == 0
+          and T.count("[avenger] 'Load preset': at its item (411,171) the plug-in's window is drawn") == 1, T.dump())
         -- Initialize's row: 120 + 68 x 1.6 = 228.8 -> 229.
-        T.pressAt(header, 7)
+        T.pressAt(header, 6)
         T.show(L, {})
         T.popup(301, 392, 152, 192, 96)
         T.tick(1)
@@ -2163,7 +2203,7 @@ fn on_windows_avenger_is_its_kalligui_child_and_a_display_factor_is_learned_from
         T.ok(T.count("from where the table puts them with Avenger's corner at the panel's +0,+0, "
           .. "(+2.0,-2.0) and (+2.0,-2.0) with it at -2,+2") == 1, "no DAW difference on the plug-in's own window")
         -- Undo: (305, 14) x 2.4 from (248, 60) = (980, 93.6), rounded once: (980, 94).
-        T.pressAt(header, 8)
+        T.pressAt(header, 7)
         T.ok(T.clickAt() == "980,94", T.clickAt())
         T.ok(S.ownsAsked[#S.ownsAsked][1] == 70, "asked of Avenger's window")
         T.ok(T.lastSaid() == "Undo, activated", T.said())
@@ -2201,7 +2241,7 @@ fn on_windows_a_zoom_step_keeps_the_control_avengers_and_an_unread_zoom_is_not_g
         T.answer(T.lastRead("vps-avenger header"), T.header(248, 60, 2.4, 80))
         T.event()
         T.run(400)
-        T.stepAt(header, 10, 1)
+        T.stepAt(header, 9, 1)
         -- The zoom field: 248 + 2.4 x 21 = 298.4 -> 298, 60 + 33.6 -> 94.
         T.ok(T.clickAt() == "298,94", T.clickAt())
         -- The list, rows of 27.6, 584 tall: a border of 2.2; entry 8 at 110 + 2.2 + 27.6 x 7.5 =
@@ -2229,7 +2269,7 @@ fn on_windows_a_zoom_step_keeps_the_control_avengers_and_an_unread_zoom_is_not_g
         T.tick(1)
         T.ok(T.lastSaid() == "Zoom, 85 percent, slider", T.said())
         -- Undo at the new factor: 248 + 2.55 x 305 = 1025.75 -> 1026, 60 + 35.7 -> 96.
-        T.pressAt(header, 8)
+        T.pressAt(header, 7)
         T.ok(T.clickAt() == "1026,96", T.clickAt())
     "##);
     run(r##"
@@ -2242,13 +2282,13 @@ fn on_windows_a_zoom_step_keeps_the_control_avengers_and_an_unread_zoom_is_not_g
         T.ok(header.active)
         T.ok(T.count("zoom not known (the display's scaling is not known, and the zoom field was not read), "
           .. "factor 2.0000 from the header's size") == 1, T.dump())
-        T.ok(header.controls[10].text(header) == "cannot be read now")
+        T.ok(header.controls[9].text(header) == "cannot be read now")
         local clicks = #S.clicks
-        T.stepAt(header, 10, 1)
+        T.stepAt(header, 9, 1)
         T.tick(1)
         T.ok(#S.clicks == clicks and T.lastSaid() == "Zoom, cannot be read now, slider", "nothing opened: " .. T.said())
         -- Undo at the size's factor: 248 + 610 = 858, 60 + 28 = 88.
-        T.pressAt(header, 8)
+        T.pressAt(header, 7)
         T.ok(T.clickAt() == "858,88", T.clickAt())
     "##);
 }
@@ -2453,7 +2493,7 @@ fn on_windows_undecided_reads_leave_a_held_state_its_rereads() {
         T.ok(header.active and T.readsOf("vps-avenger header") == 8, T.dump())
         T.event()
         T.run(400)
-        T.stepAt(header, 10, 1)
+        T.stepAt(header, 9, 1)
         T.popup(500, 270, 110, 150, 584)
         T.tick(1)
         T.closePopups()
@@ -2471,14 +2511,14 @@ fn on_windows_undecided_reads_leave_a_held_state_its_rereads() {
         T.onWindows(80, 1.5)
         T.event()
         local clicks = #S.clicks
-        T.pressAt(header, 8)
+        T.pressAt(header, 7)
         local r = T.lastRead("vps-avenger header")
         T.ok(r and not r.answered and T.region(r.region) == "248,60,1189,137", "read again: " .. T.dump())
         T.ok(#S.clicks == clicks and T.count("brought no zoom") == 0, T.dump())
         T.answer(r, T.header(248, 60, 2.4, 80))
         T.tick(1)
         -- Undo at 80 %'s factor again: (980, 94).
-        T.pressAt(header, 8)
+        T.pressAt(header, 7)
         T.ok(T.clickAt() == "980,94", T.clickAt())
     "##);
 }
@@ -2529,7 +2569,7 @@ fn the_width_factor_of_avengers_own_window_is_logged_and_nothing_else() {
           .. "zoom 80 % (read), factor 1.6000, display factor 1.00; by the window's width 1.5001 (1307 / 871.25), "
           .. "logged only. MENU read at") == 1, T.dump())
         -- Undo at 80 %'s factor: 248 + 1.6 x 305 = 736, 60 + 22.4 -> 82.
-        T.pressAt(header, 8)
+        T.pressAt(header, 7)
         T.ok(T.clickAt() == "736,82", T.clickAt())
     "##);
     run_mac(r##"
@@ -2660,12 +2700,12 @@ fn every_click_lands_where_the_table_puts_it_at_50_80_and_200_percent() {
           T.ok(T.clickAt() == e[2], zoom .. " % next: " .. T.clickAt())
           T.pressAt(header, 4)
           T.ok(T.clickAt() == e[3] and T.lastSaid() == "Load preset, activated", zoom .. " % MENU: " .. T.clickAt())
-          T.pressAt(header, 8)
+          T.pressAt(header, 7)
           T.ok(T.clickAt() == e[4] and S.clicks[#S.clicks].button == nil, zoom .. " % undo: " .. T.clickAt())
-          T.pressAt(header, 9)
+          T.pressAt(header, 8)
           T.ok(T.clickAt() == e[4] and S.clicks[#S.clicks].button == "right", zoom .. " % redo list: " .. T.clickAt())
           -- A step that has an entry beside it: up from 50 and 80, down from 200.
-          T.stepAt(header, 10, zoom == 200 and -1 or 1)
+          T.stepAt(header, 9, zoom == 200 and -1 or 1)
           T.ok(T.clickAt() == e[5], zoom .. " % zoom field: " .. T.clickAt())
           T.run(9000)
           T.closePopups()
@@ -2782,14 +2822,19 @@ fn a_name_before_the_click_that_cannot_be_read_is_not_taken_for_a_change() {
     "##);
 }
 
-/// MENU's items are chosen in Avenger's own popup once newWindow sees it — not after a wait —
-/// across the popup's middle, at the row the table puts the item from Avenger's corner, and on a
-/// Mac asked of the popup's own window by its number in the window list. A popup that opened above
-/// MENU, where JUCE puts one with no room below (JUCE-like behaviour, unmeasured on Avenger's
-/// Windows toolkit, KalliGui), is not chosen in, and is closed by clicking MENU again. On Windows
-/// the popup's own window is asked whether it is drawn at the item.
+/// MENU's Load preset and Save preset as like the original (the maintainer's decision of 2026-10-31,
+/// D1): MENU clicked, and 180 ms after that click was made (its callback, a tick after the call) —
+/// the project's _MENU_OPEN_DELAY_SEC, the documented exception to the rule against timers — the
+/// item ONCE at the project's fixed point (257, 32) or
+/// (257, 55), placed through the frame and the factor, with no menu test and no popup seen first.
+/// Something drawn over the item that came with no window of the plug-in's process is not clicked,
+/// and is said. Initialize is still chosen in the popup a menu test sees: one that opened above
+/// MENU, where JUCE puts one with no room below (JUCE-like behaviour, unmeasured on Avenger's Windows
+/// toolkit, KalliGui), is not chosen in, and is closed by clicking MENU again; a tooltip-sized window
+/// first is passed over. On Windows a popup that is a window of its own over the item — ownsPoint
+/// false for the plug-in's window there — is asked about itself, and the item clicked in it.
 #[test]
-fn menu_items_are_chosen_in_avengers_popup_once_it_is_seen() {
+fn menus_load_and_save_as_are_clicked_like_the_original_and_initialize_in_the_popup_seen() {
     run_mac(r##"
         local S = T.S
         local W = T.float(80)
@@ -2801,38 +2846,58 @@ fn menu_items_are_chosen_in_avengers_popup_once_it_is_seen() {
         T.pressAt(header, 4)
         T.ok(T.clickAt() == "517,106" and T.lastSaid() == "Load preset, activated", T.clickAt())
         local clicks = #S.clicks
-        T.tick(3)
-        T.ok(#S.clicks == clicks, "no popup, no item: nothing on a timer")
-        -- MENU's popup below MENU: (245, 20) from Avenger's corner in 50 % units, 120 x 60. Load's row
-        -- is y 32: 84 + 51.2 -> 135; the middle of the popup across, 490 + 96 = 586.
-        T.popup(300, 490, 116, 192, 96)
-        T.tick(1)
-        T.ok(T.clickAt() == "586,135", T.clickAt())
-        T.ok(T.count("[avenger] 'Load preset': MENU's popup at (245.0,20.0) 120.0x60.0 from Avenger's "
-          .. "corner in 50 % units; the item 11.9 below its top, across its middle") == 1)
-        T.ok(T.count("its window 300 of the window list is asked what is drawn there") == 1)
-        T.closePopups()
+        -- The tick MENU's click answers that it was made, and 150 ms after it.
         T.tick(2)
-        -- Save as, and a popup moved up above MENU, as JUCE moves one: (28 - 84) / 1.6 = -35. Said,
+        T.ok(#S.clicks == clicks, "not before the project's 180 ms")
+        T.tick(1)
+        -- Load at the project's (257, 32): 98 + 411.2 -> 509, 84 + 51.2 -> 135 — no popup seen.
+        T.ok(#S.clicks == clicks + 1 and T.clickAt() == "509,135", T.clickAt())
+        T.ok(T.count("[avenger] 'Load preset': clicking MENU (517,106), and 180 ms after that click is made its item "
+          .. "at (509,135), the project's (257,32) — the original's way, no menu test") == 1, T.dump())
+        T.ok(T.count("[avenger] 'Load preset': at its item (509,135) the plug-in's window is drawn (ownsPoint true) "
+          .. "— clicking it") == 1, T.dump())
+        T.ok(T.count("drawn: armed") == 0 and T.count("[menu item]") == 0, "no menu test, no choice: " .. T.dump())
+        T.run(9000)
+        T.ok(#S.clicks == clicks + 1, "the item once, MENU never again: " .. #S.clicks - clicks)
+        -- Save as at (257, 55): 84 + 88 -> 172.
+        T.pressAt(header, 5)
+        T.tick(3)
+        T.ok(T.clickAt() == "509,172", T.clickAt())
+        T.run(9000)
+        -- Something drawn over the item, and no window of the plug-in's process with MENU's click.
+        S.owns = function(_, x, y) return not (x == 509 and y == 135) end
+        clicks = #S.clicks
+        T.pressAt(header, 4)
+        T.tick(3)
+        T.ok(#S.clicks == clicks + 1 and T.clickAt() == "517,106", "MENU alone: " .. T.clickAt())
+        T.ok(T.lastSaid() == "something else is covering Load preset, or its window is gone", T.said())
+        T.ok(T.count("[avenger] 'Load preset': at its item (509,135) another window is drawn, and no window of the "
+          .. "plug-in's process came with MENU's click — not clicking") == 1, T.dump())
+        S.owns = true
+        T.run(400)
+        -- Initialize, in a popup moved up above MENU, as JUCE moves one: (28 - 84) / 1.6 = -35. Said,
         -- and closed with a second click on MENU.
         T.pressAt(header, 6)
         T.popup(301, 490, 28, 192, 96)
         T.tick(1)
-        T.ok(T.lastSaid() == "Save preset as is not available now", T.said())
-        T.ok(T.count("[avenger] 'Save preset as': MENU's popup opened at (245.0,-35.0) 120.0x60.0 from "
+        T.ok(T.lastSaid() == "Initialize preset is not available now", T.said())
+        T.ok(T.count("[avenger] 'Initialize preset': MENU's popup opened at (245.0,-35.0) 120.0x60.0 from "
           .. "Avenger's corner in 50 % units — not below MENU, where the table's rows are; nothing chosen") == 1)
         T.ok(T.clickAt() == "517,106", "MENU again, to close it: " .. T.clickAt())
-        T.ok(T.count("[avenger] 'Save preset as': its popup was left open (unplaced) — clicking its opener again to close it") == 1)
+        T.ok(T.count("[avenger] 'Initialize preset': its popup was left open (unplaced) — clicking its opener again "
+          .. "to close it") == 1)
         T.closePopups()
         T.tick(2)
-        -- A tooltip-sized window first is passed over; the popup after it is chosen in.
-        T.pressAt(header, 4)
+        -- A tooltip-sized window first is passed over; the popup after it is chosen in, its row 68
+        -- (84 + 108.8 -> 193) across its middle, 490 + 96 = 586, asked of its own window.
+        T.pressAt(header, 6)
         T.popup(302, 520, 120, 40, 14)
         T.tick(1)
         T.ok(T.count("which its menuItem function says is not its menu (under two rows tall)") == 1, T.dump())
         T.popup(303, 490, 116, 192, 96)
         T.tick(1)
-        T.ok(T.clickAt() == "586,135", T.clickAt())
+        T.ok(T.clickAt() == "586,193", T.clickAt())
+        T.ok(T.count("its window 303 of the window list is asked what is drawn there") == 1, T.dump())
     "##);
     run(r##"
         local S = T.S
@@ -2843,13 +2908,83 @@ fn menu_items_are_chosen_in_avengers_popup_once_it_is_seen() {
         T.pressAt(header, 4)
         -- MENU: 248 + 419.2 -> 667, 60 + 22.4 -> 82.
         T.ok(T.clickAt() == "667,82", T.clickAt())
+        -- MENU's popup a window of its own (unmeasured on KalliGui), over the item: the plug-in's
+        -- window is not what is drawn there, the popup is.
         T.popup(300, 640, 92, 192, 96)
-        T.tick(1)
-        -- Load's row: 60 + 51.2 -> 111; across, 640 + 96 = 736.
-        T.ok(T.clickAt() == "736,111", T.clickAt())
+        S.owns = function(id) return id == 300 end
+        T.tick(3)
+        -- Load at the project's point: 248 + 411.2 -> 659, 60 + 51.2 -> 111.
+        T.ok(T.clickAt() == "659,111", T.clickAt())
         local asked = S.ownsAsked[#S.ownsAsked]
-        T.ok(asked[1] == 300 and asked[2] == 736 and asked[3] == 111, "asked of the popup's own window")
+        T.ok(asked[1] == 300 and asked[2] == 659 and asked[3] == 111, "asked of the popup's own window")
+        T.ok(T.count("[avenger] 'Load preset': at its item (659,111) another window is drawn — window 300 of the "
+          .. "plug-in's process, 192x96 at 640,92, listed since MENU's click, is taken for MENU's popup as a window of "
+          .. "its own (ownsPoint true) — clicking it") == 1, T.dump())
     "##);
+}
+
+/// The review of 0.16 (its findings 1 and 5): the 180 ms run from MENU's click MADE, not asked for.
+/// On Windows a click within the double-click time and rectangle of the host's last press of its
+/// button is held on the host's gesture thread (D4; here 450 ms, after a click on MENU just before),
+/// and an item asked for 180 ms after the call would queue behind it and go out with it, before the
+/// popup is drawn: Load's item comes 180 ms after MENU's click went out. And an item left unclicked
+/// because VPS Avenger left the front meanwhile is said — queued, the user being in another window
+/// by then — as well as logged.
+#[test]
+fn menus_load_waits_from_menus_click_made_and_an_item_left_unclicked_is_said() {
+    run(r##"
+        local S = T.S
+        T.onWindows(80, 1)
+        local header = T.avenger()
+        T.answer(T.lastRead("vps-avenger header"), T.header(248, 60, 1.6, 80))
+        T.event()
+        T.run(400)
+        local clicks = #S.clicks
+        S.holdClick = 450
+        T.pressAt(header, 4)
+        T.ok(#S.clicks == clicks and T.lastSaid() == "Load preset, activated", "MENU's click held: " .. T.said())
+        T.tick(2)
+        T.ok(#S.clicks == clicks, "nothing before MENU's click is made: " .. T.clickAt())
+        T.tick(1)
+        -- MENU: 248 + 419.2 -> 667, 60 + 22.4 -> 82, made 450 ms after the press.
+        T.ok(#S.clicks == clicks + 1 and T.clickAt() == "667,82", "MENU first: " .. T.clickAt())
+        T.tick(1)
+        T.ok(#S.clicks == clicks + 1, "not 150 ms after it: " .. T.clickAt())
+        T.tick(1)
+        -- Load at the project's point: 248 + 411.2 -> 659, 60 + 51.2 -> 111.
+        T.ok(#S.clicks == clicks + 2 and T.clickAt() == "659,111", "Load 180 ms after MENU's click: " .. T.clickAt())
+        T.run(9000)
+        -- VPS Avenger leaves the front before the item: not clicked, and said.
+        clicks = #S.clicks
+        T.pressAt(header, 5)
+        T.show(T.OTHER)
+        T.ok(not header.active, T.dump())
+        T.tick(3)
+        T.ok(#S.clicks == clicks + 1 and T.clickAt() == "667,82", "MENU alone: " .. T.clickAt())
+        T.ok(T.lastSaid() == "Save preset as: not clicked — VPS Avenger is no longer in front"
+          and S.speech[#S.speech].interrupt == false, T.said())
+        T.ok(T.count("[avenger] 'Save preset as': its item is not clicked — the overlay is no longer in front on the "
+          .. "window MENU was clicked in") == 1, T.dump())
+    "##);
+}
+
+/// MENU's items in the ring are Load preset, Save preset as and Initialize preset — Save preset left
+/// out as the project leaves it out (mt-verified, finding 2) — with and without the preset database.
+#[test]
+fn menus_items_in_the_ring_are_load_save_as_and_initialize() {
+    for db in [false, true] {
+        let scenario = r##"
+            if @DB@ then T.presets() end
+            local header = T.avengerAt80("AR Band Pass Slide")
+            local labels = {}
+            for i, c in ipairs(header.controls) do labels[i] = c.label end
+            local menu = @DB@ and 5 or 4
+            T.ok(labels[menu] == "Load preset" and labels[menu + 1] == "Save preset as"
+              and labels[menu + 2] == "Initialize preset" and labels[menu + 3] == "Undo", table.concat(labels, "|"))
+            for _, l in ipairs(labels) do T.ok(l ~= "Save preset", "no Save preset: " .. table.concat(labels, "|")) end
+        "##;
+        run_mac(&scenario.replace("@DB@", if db { "true" } else { "false" }));
+    }
 }
 
 /// The zoom stepper opens Avenger's zoom list and chooses the entry beside the zoom READ — placed by
@@ -2869,11 +3004,11 @@ fn the_zoom_stepper_chooses_the_entry_beside_the_zoom_read_and_says_the_new_one(
         T.answer(T.lastRead("vps-avenger header"), T.header(98, 84, 1.6, 80))
         T.event()
         T.run(400)
-        T.stepAt(header, 10, 1)
+        T.stepAt(header, 9, 1)
         T.ok(T.clickAt() == "132,106", "the zoom field: " .. T.clickAt())
         -- Right again before the list is seen: not sent.
         local clicks = #S.clicks
-        T.stepAt(header, 10, 1)
+        T.stepAt(header, 9, 1)
         T.ok(#S.clicks == clicks, "the field is not clicked a second time")
         -- The list below the field, 96 x 390 at (114, 114): rows of 18.4, a border of
         -- (390 - 386.4) / 2 = 1.8. Entry 8, 85 %: 114 + 1.8 + 18.4 x 7.5 = 253.8 -> 254; across, the
@@ -2888,7 +3023,7 @@ fn the_zoom_stepper_chooses_the_entry_beside_the_zoom_read_and_says_the_new_one(
         T.ok(T.count("[avenger] zoom step from 80 % chosen") == 1)
         -- Right again while the field has not been read again: not sent either.
         clicks = #S.clicks
-        T.stepAt(header, 10, 1)
+        T.stepAt(header, 9, 1)
         T.ok(#S.clicks == clicks and T.count("the last step still waits for the zoom field — this press is not sent") == 1, T.dump())
         local r1 = T.lastRead("vps-avenger header")
         T.ok(r1 and not r1.answered, "the header is read again")
@@ -2904,11 +3039,11 @@ fn the_zoom_stepper_chooses_the_entry_beside_the_zoom_read_and_says_the_new_one(
         for _, s in ipairs(S.speech) do if s.text == "Zoom, 85 percent, slider" then says += 1 end end
         T.ok(says == 1, "said once, not once per press: " .. T.said())
         -- Undo at the new factor: 98 + 1.7 x 305 = 616.5 -> 617, 84 + 23.8 -> 108.
-        T.pressAt(header, 8)
+        T.pressAt(header, 7)
         T.ok(T.clickAt() == "617,108", T.clickAt())
         -- A list that scrolls: 200 tall where 21 rows of 19.55 are 410.6. Said, and closed with the
         -- field: 98 + 1.7 x 21 = 133.7 -> 134, 84 + 23.8 -> 108.
-        T.stepAt(header, 10, 1)
+        T.stepAt(header, 9, 1)
         T.popup(311, 114, 114, 96, 200)
         T.tick(1)
         T.ok(T.lastSaid() == "Zoom is not available now", T.said())
@@ -2927,7 +3062,7 @@ fn the_zoom_stepper_chooses_the_entry_beside_the_zoom_read_and_says_the_new_one(
         T.event()
         T.run(400)
         local clicks = #S.clicks
-        T.stepAt(header, 10, 1)
+        T.stepAt(header, 9, 1)
         T.tick(1)
         T.ok(#S.clicks == clicks and T.lastSaid() == "Zoom, 200 percent, slider", "at once, nothing opened: " .. T.said())
         T.ok(T.count("[avenger] 'Zoom': no step up from 200 % — nothing opened") == 1)
@@ -2949,7 +3084,7 @@ fn the_overlay_stays_up_through_its_own_zoom_step_when_the_window_resizes() {
         T.answer(T.lastRead("vps-avenger header"), T.header(98, 84, 1.6, 80))
         T.event()
         T.run(400)
-        T.stepAt(header, 10, 1)
+        T.stepAt(header, 9, 1)
         T.popup(310, 114, 114, 96, 390)
         T.tick(1)
         T.closePopups()
@@ -2993,7 +3128,7 @@ fn a_stay_is_carried_over_once_after_our_own_popup_and_checked_by_its_read() {
         T.run(400)
         local POP = { id = 77, title = "", class = "AXWindow/AXUnknown/", app = T.MAC_REAPER,
           bounds = { x = 560, y = 116, w = 200, h = 150 }, client = { x = 560, y = 116, w = 200, h = 150 } }
-        T.pressAt(header, 9)
+        T.pressAt(header, 8)
         T.popup(77, 560, 116, 200, 150)
         T.show(POP)
         T.closePopups()
@@ -3019,7 +3154,7 @@ fn a_stay_is_carried_over_once_after_our_own_popup_and_checked_by_its_read() {
         T.run(400)
         local POP = { id = 77, title = "", class = "AXWindow/AXUnknown/", app = T.MAC_REAPER,
           bounds = { x = 560, y = 116, w = 200, h = 150 }, client = { x = 560, y = 116, w = 200, h = 150 } }
-        T.pressAt(header, 9)
+        T.pressAt(header, 8)
         T.popup(77, 560, 116, 200, 150)
         T.show(POP)
         T.closePopups()
@@ -3028,12 +3163,12 @@ fn a_stay_is_carried_over_once_after_our_own_popup_and_checked_by_its_read() {
         local eq = T.reading({ { text = "Channel", x = 110, y = 90, w = 50, h = 12 }, { text = "EQ", x = 170, y = 90, w = 16, h = 12 } })
         T.answer(T.lastRead("vps-avenger header"), eq)
         T.ok(T.count("not VPS Avenger after all") == 0, "one read without the header is not enough")
-        header.controls[10].text(header)
+        header.controls[9].text(header)
         T.answer(T.lastRead("vps-avenger header"), eq)
         T.ok(T.count("not VPS Avenger after all — neither MENU nor UNDO was read in 2 reads in a row since "
           .. "the stay was carried over") == 1, T.dump())
         local clicks = #S.clicks
-        T.pressAt(header, 8)
+        T.pressAt(header, 7)
         T.ok(#S.clicks == clicks and T.lastSaid() == "Undo is not available now", T.said())
     "##);
 }
@@ -3056,8 +3191,8 @@ fn an_unread_zoom_field_takes_the_step_the_header_lands_on_and_the_offset_is_log
         T.event()
         T.ok(header.active)
         T.ok(T.count("the zoom field was not read — zoom 80 % (seen from the header's size, not read), factor 1.6000") == 1)
-        header.focus = 10
-        T.ok(header.controls[10].text(header) == "80 percent")
+        header.focus = 9
+        T.ok(header.controls[9].text(header) == "80 percent")
     "##);
     run_mac(r##"
         local S = T.S
@@ -3110,7 +3245,7 @@ fn the_warning_box_is_an_overlay_of_its_own_while_it_is_up() {
         T.run(400)
         T.poll(500)
         T.ok(T.lastRead("vps-avenger dialog") == nil, "not looked for before it is expected")
-        T.pressAt(header, 7)
+        T.pressAt(header, 6)
         T.popup(300, 490, 116, 192, 96)
         T.tick(1)
         -- Initialize's row: 84 + 1.6 x 68 = 192.8 -> 193.
@@ -3160,10 +3295,11 @@ fn the_warning_box_is_an_overlay_of_its_own_while_it_is_up() {
     "##);
 }
 
-/// A second box on the same window — Save's after Initialize's — starts on its own text again, not
-/// on the button the first was answered with: a user who counts stops from the text lands where
-/// they expect. While it is up, a reading of nothing, a reading with one of the buttons misread
-/// ("N0") and one text reading without them do not give it up.
+/// A second box on the same window — a second Initialize's after the first's — starts on its own
+/// text again, not on the button the first was answered with: a user who counts stops from the
+/// text lands where they expect. While it is up, a reading of nothing, a reading with one of the
+/// buttons misread ("N0") and one text reading without them do not give it up. (Save's overwrite
+/// box was this test's second box until 0.16, which leaves Save out as the project does.)
 #[test]
 fn a_second_warning_box_starts_on_its_text_and_is_not_given_up_on_one_miss() {
     run_mac(r##"
@@ -3175,7 +3311,7 @@ fn a_second_warning_box_starts_on_its_text_and_is_not_given_up_on_one_miss() {
         T.answer(T.lastRead("vps-avenger header"), T.header(98, 84, 1.6, 80))
         T.event()
         T.run(400)
-        T.choose(header, 7, 490, 116, 192, 96)
+        T.choose(header, 6, 490, 116, 192, 96)
         T.poll(500)
         T.answer(T.lastRead("vps-avenger dialog"), T.boxReading("Are you sure?"))
         T.event()
@@ -3191,26 +3327,26 @@ fn a_second_warning_box_starts_on_its_text_and_is_not_given_up_on_one_miss() {
         T.event()
         T.run(400)
         T.ok(header.active and T.lastSaid() == "Initialize preset, button", T.said())
-        -- Save's box: row 43.5, 84 + 69.6 -> 154.
-        T.pressAt(header, 5)
+        -- The second Initialize: its row 68, 84 + 108.8 -> 193.
+        T.pressAt(header, 6)
         T.popup(300, 490, 116, 192, 96)
         T.tick(1)
-        T.ok(T.clickAt() == "586,154", T.clickAt())
+        T.ok(T.clickAt() == "586,193", T.clickAt())
         T.closePopups()
         T.tick(2)
         T.poll(500)
-        T.answer(T.lastRead("vps-avenger dialog"), T.boxReading("Overwrite preset?", "YES", "N0"))
+        T.answer(T.lastRead("vps-avenger dialog"), T.boxReading("Initialize again?", "YES", "N0"))
         T.event()
         T.run(400)
         T.ok(box.active and box.focus == 1, "on its first stop: " .. tostring(box.focus))
-        T.ok(T.lastSaid() == "Avenger asks, Overwrite preset?", T.said())
+        T.ok(T.lastSaid() == "Avenger asks, Initialize again?", T.said())
         -- Nothing read, then text without the buttons once: still up.
         T.poll(500)
         T.answer(T.lastRead("vps-avenger dialog"), { status = "none", text = "", words = {} })
         T.poll(500)
         T.answer(T.lastRead("vps-avenger dialog"), T.noBox())
         T.poll(500)
-        T.answer(T.lastRead("vps-avenger dialog"), T.boxReading("Overwrite preset?"))
+        T.answer(T.lastRead("vps-avenger dialog"), T.boxReading("Initialize again?"))
         T.event()
         T.ok(box.active, "not given up on one miss: " .. T.dump())
         T.ok(T.count("the warning box has gone") == 1, "only the first box's")
@@ -3228,12 +3364,11 @@ fn a_warning_box_that_does_not_come_is_looked_for_eight_reads() {
         local header = T.avenger()
         T.answer(T.lastRead("vps-avenger header"), T.header(98, 84, 1.6, 80))
         T.event()
-        T.pressAt(header, 5)
+        T.pressAt(header, 6)
         T.popup(300, 490, 116, 192, 96)
         T.tick(1)
-        -- Save's row, 43.5 (the project's "about 43", between Load's 32 and Save as's 55): 84 + 69.6
-        -- -> 154.
-        T.ok(T.clickAt() == "586,154", T.clickAt())
+        -- Initialize's row, 68: 84 + 108.8 -> 193.
+        T.ok(T.clickAt() == "586,193", T.clickAt())
         T.closePopups()
         T.tick(2)
         local reads = 0
@@ -3246,15 +3381,15 @@ fn a_warning_box_that_does_not_come_is_looked_for_eight_reads() {
           end
         end
         T.ok(reads == 8, reads)
-        T.ok(T.count("[avenger] 'Save preset': no warning box in 8 reads after it was chosen — not looked for any more") == 1)
+        T.ok(T.count("[avenger] 'Initialize preset': no warning box in 8 reads after it was chosen — not looked for any more") == 1)
     "##);
 }
 
 /// Avenger at 200 % in Logic reaches past the bottom of the screen, and its warning box is drawn in
-/// its middle: Initialize and Save would open a modal box no read and no key of ours reaches. They
-/// are refused, said with the reason; Load, which opens no box, is not.
+/// its middle: Initialize would open a modal box no read and no key of ours reaches. It is refused,
+/// said with the reason; Load, which opens no box, is not.
 #[test]
-fn initialize_and_save_are_refused_where_their_box_would_lie_off_the_screen() {
+fn initialize_is_refused_where_its_box_would_lie_off_the_screen() {
     run_mac(r##"
         local S = T.S
         local L = T.logic(200)
@@ -3267,12 +3402,10 @@ fn initialize_and_save_are_refused_where_their_box_would_lie_off_the_screen() {
         local clicks = #S.clicks
         -- The box's band, (280, 200)-(600, 336) x 4 from (0, 120): down to 1464, past the 1440 of
         -- the screen.
-        T.pressAt(header, 7)
+        T.pressAt(header, 6)
         T.ok(#S.clicks == clicks, "nothing clicked")
         T.ok(T.lastSaid() == "Initialize preset: Avenger's warning box would open off the screen at 200 percent — zoom out first", T.said())
         T.ok(T.count("[avenger] 'Initialize preset' not chosen: Avenger's warning box would lie at (1120,920)-(2400,1464), past the screen's 2560x1440") == 1, T.dump())
-        T.pressAt(header, 5)
-        T.ok(#S.clicks == clicks)
         T.pressAt(header, 4)
         T.ok(#S.clicks == clicks + 1 and T.lastSaid() == "Load preset, activated", T.said())
     "##);
@@ -3315,7 +3448,7 @@ fn a_calibrating_run_draws_where_the_overlay_clicks_and_reads() {
         T.ok(T.count(string.format("  -- %-24s no position", "Undo")) == 1, T.dump())
         T.ok(T.count("-> C:/modules/overlay-runtime/calibration/VPS-Avenger.png") == 1, "the runtime's shot in the runtime's folder")
         -- The warning box, after Initialize.
-        T.choose(header, 7, 490, 116, 192, 96)
+        T.choose(header, 6, 490, 116, 192, 96)
         T.poll(500)
         local function w(text, x, y, ww, hh) return { text = text, x = x, y = y, w = ww, h = hh } end
         T.answer(T.lastRead("vps-avenger dialog"), { status = "text", text = "Are you sure?\nYES NO",
@@ -3345,7 +3478,7 @@ fn a_popup_of_ours_in_front_does_not_take_the_overlay_down_with_it() {
         T.event()
         T.run(400)
         local reads = #S.reads
-        T.pressAt(header, 9)
+        T.pressAt(header, 8)
         T.ok(S.clicks[#S.clicks].button == "right" and T.clickAt() == "586,106", T.clickAt())
         T.ok(T.lastSaid() == "Redo list, activated", T.said())
         local POP = { id = 77, title = "", class = "AXWindow/AXUnknown/", app = T.MAC_REAPER,
@@ -3388,7 +3521,7 @@ fn avenger_in_a_reaper_fx_chain_on_a_mac() {
         T.event()
         T.ok(header.active)
         -- Undo: 237 + 488 = 725, 114 + 22.4 -> 136.
-        T.pressAt(header, 8)
+        T.pressAt(header, 7)
         T.ok(T.clickAt() == "725,136", T.clickAt())
     "##);
 }
@@ -3402,7 +3535,7 @@ fn avenger_in_a_reaper_fx_chain_on_a_mac() {
 // catalog of four small expansions, never the real data.
 // ---------------------------------------------------------------------------------------------
 
-/// Not installed: the module is stage 1's — ten stops and no Preset info, and a step says the name
+/// Not installed: the module is stage 1's — nine stops and no Preset info, and a step says the name
 /// it read, as it was read.
 #[test]
 fn without_the_preset_database_the_module_is_stage_1s() {
@@ -3411,7 +3544,7 @@ fn without_the_preset_database_the_module_is_stage_1s() {
         local header = T.avengerAt80("AR Band Pass Slide")
         local labels = {}
         for i, c in ipairs(header.controls) do labels[i] = c.label end
-        T.ok(table.concat(labels, "|") == "Preset|Previous preset|Next preset|Load preset|Save preset|"
+        T.ok(table.concat(labels, "|") == "Preset|Previous preset|Next preset|Load preset|"
           .. "Save preset as|Initialize preset|Undo|Redo list|Zoom|" .. T.RING_LABELS, table.concat(labels, "|"))
         T.ok(T.step(header, 3, "AR Band Pass Slide", "AR Bond Pess Slide") == "AR Bond Pess Slide", T.said())
         T.ok(T.step(header, 2, nil, nil) == "the preset name cannot be read now", T.said())
@@ -3429,7 +3562,7 @@ fn a_preset_database_that_cannot_be_read_leaves_the_steps_as_they_were() {
         local S = T.S
         T.presets({})
         local header = T.avengerAt80("AR Band Pass Slide")
-        T.ok(#header.controls == 11 + T.RING_CONTROLS and header.controls[4].label == "Preset info", tostring(#header.controls))
+        T.ok(#header.controls == 10 + T.RING_CONTROLS and header.controls[4].label == "Preset info", tostring(#header.controls))
         T.ok(#S.presetReads == 0, "nothing read at load")
         T.ok(T.info(header, "AR Band Pass Slide") == "the preset database cannot be read", T.said())
         T.ok(T.count("[avenger] the preset database cannot be read: data/index.json cannot be read: The "
@@ -3717,7 +3850,7 @@ fn the_databases_position_is_forgotten_when_the_preset_may_have_changed() {
         T.ok(T.count("[avenger] the database's position (Alpha 2 of 6) is forgotten: Load preset chosen") == 1, T.dump())
         T.ok(T.info(header, nil) == "the preset name cannot be read now", T.said())
         T.info(header, "AR Deep Arp")
-        T.pressAt(header, 10)
+        T.pressAt(header, 9)
         T.ok(T.lastSaid() == "Redo list, activated", T.said())
         T.ok(T.count("is forgotten: the redo list opened") == 1, T.dump())
         T.run(3000)
@@ -3781,7 +3914,7 @@ fn the_databases_position_is_forgotten_when_the_preset_may_have_changed() {
         local header = T.avengerAt80("AR Band Pass Slide")
         -- After Save preset as, Avenger shows the name the user typed: a catalog name like it is a
         -- coincidence, so it is looked up as the same words only — until a step shows another name.
-        T.choose(header, 7, 490, 116, 192, 96)
+        T.choose(header, 6, 490, 116, 192, 96)
         T.ok(T.info(header, "AR Bond Pess Slide") == "AR Bond Pess Slide, not in the database", T.said())
         T.ok(T.count("read 'AR Bond Pess Slide' — not in the catalog as it stands — after Load or Save as, not "
           .. "looked for by similarity") == 1, T.dump())
@@ -3887,8 +4020,9 @@ fn previous_and_next_are_unavailable_on_init_preset_and_a_press_clicks_nothing()
         T.pressAt(header, 3)
         T.ok(T.lastSaid() == refused("Next preset"), T.said())
         T.choose(header, 4, 490, 116, 192, 96)
-        -- Chosen at its click, not followed (main.luau, ONE_CLICK).
-        T.ok(T.count("[menu item] 'VPS Avenger': 'Load preset' — test ") == 1, T.dump())
+        -- Clicked at its point 180 ms after MENU, with no menu test (main.luau, "Load preset and Save
+        -- preset as").
+        T.ok(T.count("[avenger] 'Load preset': at its item (509,135) the plug-in's window is drawn") == 1, T.dump())
         T.ok(tabFrom("Previous preset") == "Next preset" and T.lastSaid() == "Next preset, button", T.said())
         clicks = #S.clicks
         T.pressAt(header, 3)
@@ -3931,7 +4065,7 @@ fn undo_the_redo_list_and_a_late_read_out_answer_leave_no_claim_of_init_preset()
         end
         T.ok(previous() == "Previous preset, unavailable on Init Preset, button", T.said())
         local clicks = #S.clicks
-        T.pressAt(header, 8)
+        T.pressAt(header, 7)
         T.ok(#S.clicks == clicks + 1 and T.clickAt() == "586,106" and S.clicks[#S.clicks].button == nil,
           "UNDO: " .. T.clickAt())
         T.ok(T.lastSaid() == "Undo, activated" and T.count("[avenger] 'Undo': clicking (586,106)") == 1, T.said())
@@ -3939,7 +4073,7 @@ fn undo_the_redo_list_and_a_late_read_out_answer_leave_no_claim_of_init_preset()
         -- Init Preset read again by a press, then the redo list opened and closed.
         T.pressAt(header, 3)
         T.ok(previous() == "Previous preset, unavailable on Init Preset, button", T.said())
-        T.pressAt(header, 9)
+        T.pressAt(header, 8)
         T.ok(T.clickAt() == "586,106" and S.clicks[#S.clicks].button == "right", "UNDO, right: " .. T.clickAt())
         T.ok(T.lastSaid() == "Redo list, activated", T.said())
         T.popup(320, 586, 110, 150, 200)
@@ -4064,7 +4198,185 @@ fn avenger_in_an_ableton_live_window_on_a_mac() {
         T.ok(T.count("panel of 'VPS Avenger/1-MIDI' id=51 at 0,16 1394x898 from its content origin, identify=true") == 1, T.dump())
         T.ok(T.count("(+0.0,+0.0) and (+0.0,+0.0) from where the table puts them with Avenger's corner at the panel's -2,+2") == 1, T.dump())
         -- Undo: 298 + 488 = 786, 218 + 22.4 -> 240.
-        T.pressAt(header, 8)
+        T.pressAt(header, 7)
         T.ok(T.clickAt() == "786,240", T.clickAt())
+    "##);
+}
+
+// ---------------------------------------------------------------------------------------------
+// VPS Avenger 0.16 (the second Windows session and the developer's Mac test of 2026-10-31, and the
+// maintainer's decisions of that day).
+// ---------------------------------------------------------------------------------------------
+
+/// D5: on Avenger's own window the display factor is 1 where nothing on the desktop is scaled — the
+/// window's monitor at 100 % and the system's DPI 96 (host.screen.scaling, both 1) — and then the
+/// existing panel rule takes the zoom from the header's size: the second Windows session's MENU and
+/// UNDO 3 px left (a header of about 1.5895, 0.67 % from 80 %), its zoom field never read, is
+/// "80 % (seen)", factor 1.6000; Undo clicks at the table's point, Zoom says 80 percent and Left opens
+/// the list from the zoom field. With the zoom field unread, the band's words left of the preset's
+/// name are said once (avw2-verified, A3's 1a). A desktop scaled to 125 % leaves the display factor
+/// unknown, as before, and says what the scaling was; so does a monitor at 100 % on a system whose
+/// DPI is 144.
+#[test]
+fn on_windows_a_display_scaled_nowhere_gives_the_zoom_from_the_headers_size() {
+    run(r##"
+        local S = T.S
+        T.onWindows(80, 1)
+        S.scaling = { scale = 1, system = 1 }
+        local header = T.avenger()
+        T.answer(T.lastRead("vps-avenger header"), T.header(248, 60, 1.6, false, { -3, -1 }))
+        T.event()
+        T.ok(header.active, T.dump())
+        T.ok(T.count("zoom 80 % (seen from the header's size, not read), factor 1.6000, display factor 1.00 (the "
+          .. "display's scaling 1.00, the system's 1.00)") == 1, T.dump())
+        T.ok(S.scalingAsked[#S.scalingAsked] == 70, "asked of Avenger's own window: " .. tostring(S.scalingAsked[#S.scalingAsked]))
+        T.ok(T.count("the zoom field was not read — left of the preset's name the band reads nothing") == 1, T.dump())
+        T.run(400)
+        T.ok(header.controls[9].text(header) == "80 percent", tostring(header.controls[9].text(header)))
+        -- Undo at 1.6: 248 + 488 = 736, 60 + 22.4 -> 82.
+        T.pressAt(header, 7)
+        T.ok(T.clickAt() == "736,82", T.clickAt())
+        -- Left: 75 %, the list opened from the zoom field, 248 + 33.6 -> 282, 82.
+        T.stepAt(header, 9, -1)
+        T.ok(T.clickAt() == "282,82", T.clickAt())
+    "##);
+    run(r##"
+        local S = T.S
+        T.onWindows(80, 1)
+        S.scaling = { scale = 1, system = 1 }
+        local header = T.avenger()
+        -- The zoom field read as "8096": no zoom; the line says what the band read there.
+        local reading = T.header(248, 60, 1.6, false)
+        table.insert(reading.words, 1, { text = "8096", x = 267.2, y = 75.2, w = 28.8, h = 14.4 })
+        T.answer(T.lastRead("vps-avenger header"), reading)
+        T.event()
+        T.ok(header.active, T.dump())
+        T.ok(T.count("the zoom field was not read — left of the preset's name the band reads \"8096\" at 282,82 (29x14)")
+          == 1, T.dump())
+    "##);
+    run(r##"
+        local S = T.S
+        T.onWindows(80, 1.25)
+        S.scaling = { scale = 1.25, system = 1 }
+        local header = T.avenger()
+        T.answer(T.lastRead("vps-avenger header"), T.header(248, 60, 2, false))
+        T.event()
+        T.ok(header.active)
+        T.ok(T.count("zoom not known (the display factor is not known — the display's scaling 1.25, the system's 1.00, "
+          .. "not both 1 — and the zoom field was not read), factor 2.0000 from the header's size") == 1, T.dump())
+        T.ok(header.controls[9].text(header) == "cannot be read now")
+    "##);
+    // The window's monitor at 100 % and the system's DPI 144 (the review of 0.16, its finding 4): not
+    // both 1, so no display factor — a window drawn at the system's DPI would be drawn at 1.5 there —
+    // and the zoom not guessed from the header's size.
+    run(r##"
+        local S = T.S
+        T.onWindows(80, 1)
+        S.scaling = { scale = 1, system = 1.5 }
+        local header = T.avenger()
+        T.answer(T.lastRead("vps-avenger header"), T.header(248, 60, 1.6, false))
+        T.event()
+        T.ok(header.active)
+        T.ok(T.count("zoom not known (the display factor is not known — the display's scaling 1.00, the system's 1.50, "
+          .. "not both 1 — and the zoom field was not read), factor 1.6000 from the header's size") == 1, T.dump())
+        T.ok(T.count("zoom 80 % (seen") == 0, T.dump())
+        T.ok(header.controls[9].text(header) == "cannot be read now")
+    "##);
+}
+
+/// F7: Avenger's loading bar in the name's field — a fill of (183, 213, 255) from the left, pure black
+/// right of it — is no name, however a recogniser reads it: the picture the name is read off shows
+/// the bar, no text is read off it, and the reading counts as one that is never a name. A step says
+/// the name read once the bar has gone. A reading only in boxes PaddleOCR guessed ("PY", read twice
+/// alike in the developer's Mac test of 2026-10-31 and said as the preset) is no name either, unless
+/// the database has it as it stands.
+#[test]
+fn a_step_does_not_take_avengers_loading_bar_even_read_twice_alike() {
+    for variant in ["bar", "approx"] {
+        let s = r##"
+            local S = T.S
+            local header = T.avengerAt80("AR Catch Me")
+            -- The name's field at 80 %: 152,95 to 440,119.
+            local function bar(to)
+              S.picture = { bg = { 21, 23, 30 }, shapes = {
+                { kind = "rect", x1 = 152, y1 = 95, x2 = to, y2 = 119, c = { 183, 213, 255 } },
+                { kind = "rect", x1 = to, y1 = 95, x2 = 440, y2 = 119, c = { 0, 0, 0 } } } }
+            end
+            local said = #S.speech
+            if "@V@" == "bar" then bar(300) end
+            T.pressAt(header, 3)
+            local asked = 0
+            for i = 1, 25 do
+              T.run(150)
+              if "@V@" == "bar" and i == 6 then S.picture = { bg = { 21, 23, 30 }, shapes = {} } end
+              local r = T.lastRead("vps-avenger name")
+              if r and not r.answered then
+                asked += 1
+                if "@V@" == "approx" and asked <= 2 then
+                  T.answer(r, { status = "text", text = "PY", words = { { text = "PY", x = 152, y = 95, w = 288, h = 24,
+                    approx = true } } })
+                else
+                  T.answer(r, T.nameRead("MU Turn"))
+                end
+              end
+            end
+            T.ok(#S.speech == said + 1 and T.lastSaid() == "MU Turn", T.said(said + 1))
+            T.ok(T.count("-> PY") == 0 and T.count("'PY'") <= 1, T.dump())
+            if "@V@" == "bar" then
+              T.ok(T.count("the name's field shows VPS Avenger's loading bar (its left end 100 % the bar's blue, its right "
+                .. "end 100 % black) — a reading, and no name") == 1, T.dump())
+            else
+              T.ok(T.count("'PY' was read only in boxes the recogniser guessed, and is no catalog name as it stands — not "
+                .. "taken for the name") == 1, T.dump())
+            end
+        "##;
+        run_mac(&s.replace("@V@", variant));
+    }
+}
+
+/// A bar nearly full has a blue right end — the right end's black alone would miss it — and is the
+/// bar by its left end; still shown at the watch's bound, nothing is taken for the name.
+#[test]
+fn a_bar_near_full_is_still_loading() {
+    run_mac(r##"
+        local S = T.S
+        local header = T.avengerAt80("AR Catch Me")
+        S.picture = { bg = { 21, 23, 30 }, shapes = {
+          { kind = "rect", x1 = 152, y1 = 95, x2 = 436, y2 = 119, c = { 183, 213, 255 } },
+          { kind = "rect", x1 = 436, y1 = 95, x2 = 440, y2 = 119, c = { 0, 0, 0 } } } }
+        local said = #S.speech
+        T.pressAt(header, 3)
+        T.nameReads("MU Turn")
+        T.ok(T.lastRead("vps-avenger name") == nil, "no name read off the bar")
+        T.ok(T.count("its left end 100 % the bar's blue, its right end 50 % black") == 1, T.dump())
+        T.ok(T.count("'Next preset': VPS Avenger still shows its loading bar at the bound — no name taken") == 1, T.dump())
+        T.ok(T.lastSaid() == "the preset name cannot be read now", T.said(said + 1))
+    "##);
+}
+
+/// The Preset read-out says no name a recogniser only guessed (the reading the runtime hands an OCR
+/// button's `value` since 0.16.2): "cannot be read now", and the name is not noted; a catalog name
+/// as it stands is a name however it was read. A lone bullet word before a name is no part of it
+/// (avw2-verified, A6), said once in the log: "o VO Hey Mr Robo" is "VO Hey Mr Robo"; "0 dB Lead"
+/// keeps its zero, "oVO" its o.
+#[test]
+fn the_preset_read_out_says_no_guessed_name_and_drops_a_lone_bullet() {
+    run_mac(r##"
+        local S = T.S
+        T.presets()
+        local header = T.avengerAt80("LD Lead 1")
+        local value = header.controls[1].value
+        local function guessed(text) return { status = "text", text = text, words = { { text = text, approx = true } } } end
+        T.ok(value(header, "PY", guessed("PY")) == "cannot be read now", "a guessed name")
+        T.ok(T.count("[avenger] 'Preset': 'PY' was read only in boxes the recogniser guessed") == 1, T.dump())
+        T.ok(value(header, "LD Lead 2", guessed("LD Lead 2")) == "LD Lead 2", "a catalog name, however read")
+        T.ok(value(header, "o LD Lead 3", T.nameRead("o LD Lead 3")) == "LD Lead 3", "a bullet dropped")
+        T.ok(value(header, "o LD Lead 3", T.nameRead("o LD Lead 3")) == "LD Lead 3", "again")
+        T.ok(T.count("[avenger] the name read 'o LD Lead 3' begins with a lone 'o' — taken as 'LD Lead 3'") == 1, T.dump())
+        local R = S.included["modules/vps-avenger/src/read/ocr.luau"][1]
+        for _, c in ipairs({ { "o VO Hey Mr Robo", "VO Hey Mr Robo" }, { "• Soft Pad", "Soft Pad" }, { "Init Preset", "Init Preset" },
+          { "0 dB Lead", "0 dB Lead" }, { "oVO", "oVO" }, { "° Bass", "Bass" }, { "* Arp", "Arp" } }) do
+          T.ok(R.presetName(c[1]) == c[2], c[1] .. " -> " .. tostring(R.presetName(c[1])))
+        end
     "##);
 }

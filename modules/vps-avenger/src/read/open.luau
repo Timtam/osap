@@ -8,20 +8,22 @@
 --      drums, sample, macros, expansion) asked of that picture. For the page's key (Open.read with
 --      `done`, the runtime's page answered later: O:addPage's `openLater`, overlay runtime 0.14) all
 --      at once with callbacks, and beside them the text read of what needs none of their answers —
---      the preset's name, the browser's view and header, the macro tabs' captions and names, the
---      central tabs' captions — so that neither waits for the other (the second Mac test's 26
---      questions one after another took about 390 ms before the text read began: A19). Without
+--      the preset's name, the browser's header's name, the macro tabs' captions and names (the
+--      database's checked: THE DATABASE FIRST, below) — so that neither waits for the other (the
+--      second Mac test's 26 questions one after another took about 390 ms before the text read
+--      began: A19). Without
 --      `done` — Initialize's read in a trip's continuation — each waited for in turn, and that text
 --      read with the rest. Each question is the image worker's work on the picture already taken.
 --   3. Then the text read of what the answers place, of the same picture, with a named region for
---      each thing to read — the OSC tabs' names (one region per tab, the count from the dots), and
---      with the Drums tab selected the twelve drum slots' names, DRUM SQ's LENGTH where it is the
---      central tab and the sample browser's rows where EDITOR shows no tab of the editor's (the
---      strip, the central tab and the editor's pixels decided before it when the dots gave the
---      count) — waited for in the handler of the last answer, and the knob reader over a few hundred
---      points of the picture (read/knob.luau). Nothing of the expansion browser below its header is
---      read as text (read/browser.luau): its state is the header's, the picture test's and the
---      user's word (Br.state).
+--      each thing to read — the OSC tabs' names (one region per tab, the count from the dots; none
+--      of a covered strip: read/strip.luau, A COVERED STRIP), the browser's view's caption where its
+--      icon tells neither state, and with the Drums tab selected the sample browser's rows where
+--      EDITOR shows no tab of the editor's (the strip, the central tab and the editor's pixels
+--      decided before it when the dots gave the count) — waited for in the handler of the last
+--      answer, and the knob reader over a few hundred points of the picture (read/knob.luau). The
+--      drum slots' names are not read: they are Avenger's fixed roles (read/drums.luau, THE NAMES).
+--      Nothing of the expansion browser below its header is read as text (read/browser.luau): its
+--      state is the header's, the picture test's and the user's word (Br.state).
 --   4. The values (state.luau's), each nil where it was not read; the log with every share, count,
 --      angle and word, and the times; in a calibrating run, marked pictures of the parts read.
 --
@@ -73,6 +75,13 @@ function Open.window()
   return ok and type(w) == "table" and w.id or nil
 end
 
+-- Whether a menu counts open over overlay `o` (O:menuOpen: a table lookup), false where it cannot
+-- be asked: a read of the strip made then is covered (read/strip.luau, A COVERED STRIP).
+function Open.menuOpen(o)
+  local ok, open = pcall(function() return o and o.menuOpen and o:menuOpen() end)
+  return ok and open == true
+end
+
 -- Where the dots give no count (read/strip.luau, by their spacing): the count the user confirmed
 -- for this preset in window `id` (the page's Confirm OSC Count, the project's
 -- action_confirm_osc_count: state.luau, S.oscConfirmed), else the preset database's for a preset
@@ -98,6 +107,52 @@ function Open.countElsewhere(id, preset, place)
   return nil
 end
 
+-- ── The names from the database ──────────────────────────────────────────────
+-- THE DATABASE FIRST (the maintainer's decision of 2026-10-31): the OSC tabs' names and the macros'
+-- names — and the macro tabs' count — are the preset database's wherever it places the preset Avenger
+-- shows as `trusted` takes a place (by its words as they stand, not after Load or Save as), as the
+-- project's tool names them (its _current_macro_info, _osc_state). The screen is read for them ONCE
+-- PER PAGE KEY, as a check: a read that is not near the database's name leaves that name marked,
+-- ", from the database" (src/presets.luau, WHAT IT MAY DO), and the marked name is what the page and
+-- the ring say until the preset may have changed (Open.keptNames, Open.keptLabels); an action of the
+-- page's or the ring's reads no name. The evidence: the developer's Mac test of 2026-10-31 misread
+-- the tabs' names under the level meter ("Penc" four times, "diy" for "Arp") and the macros' dot as
+-- a word, and the second Windows session of the same day put an "o" before every macro name
+-- ('o Flanger', 'Clearw') and read no macro count at all ('UACRO 1') — where the database had every
+-- one of them. This reverses 0.14's order for the ring's Oscillator stepper, Mute and Solo and the
+-- knobs' sentences, which named a tab by the name a read took off the screen first (wordsFor). Where
+-- the database does not place the preset — Init Preset, a user's own preset, no database installed,
+-- a count of tabs the database does not have, tabs or macros this session edited (S.tabsEdited,
+-- S.macrosEdited) — the names are read as before.
+
+-- The database's OSC tabs' names for `place`, a strip of `count` tabs in window `window` under the
+-- preset's name `preset`, or nil where they are not taken (above).
+function Open.dbOsc(place, count, window, preset)
+  if not (count and trusted(place) and math.min(8, #place.osc) == count) then return nil end
+  if S.tabsEdited(window, preset) then return nil end
+  return place.osc
+end
+
+-- The database's macro tabs for `place` in window `window` under `preset` — a list of five names
+-- each — or nil where they are not taken (above).
+function Open.dbMacros(place, window, preset)
+  if not (place and place.macros and #place.macros >= 1 and place.how ~= "fuzzy" and not place.own) then
+    return nil
+  end
+  if S.macrosEdited(window, preset) then return nil end
+  return place.macros
+end
+
+-- The macros' names `known` keeps from the page key's check, where they were taken for the preset
+-- `preset` on macro tab `tab` and the preset has not changed since (`macroLabelsOf`, kept with
+-- them, as the OSC tabs' names are: Open.keptNames) — the names, marks and all — else nil.
+function Open.keptLabels(known, preset, tab)
+  local of = known and known.macroLabelsOf
+  if not (of and preset ~= nil and of.preset == preset and of.tab == tab and of.at == S.changes()
+    and known.macroLabels) then return nil end
+  return known.macroLabels
+end
+
 -- The tabs' names `known` (state.luau's values) keeps from an earlier read, where they were read
 -- under the preset's name `preset` — a name, never nil — over `count` tabs, and since the preset
 -- last may have changed (`oscNamesOf`, kept with them; S.changes): the names, else nil. The values
@@ -111,26 +166,39 @@ function Open.keptNames(known, preset, count)
   return known.oscNames
 end
 
+-- The same, where they were read off the screen — not the database's (THE DATABASE FIRST, above:
+-- `oscNamesOf.db`): what a rename of one tab keeps of the others, after which the database's names
+-- name none of the preset's tabs (state.luau, S.tabsEdited).
+function Open.keptReadNames(known, preset, count)
+  local names = Open.keptNames(known, preset, count)
+  if names and known.oscNamesOf.db then return nil end
+  return names
+end
+
 -- The words for the `count` OSC tabs of read `v` (`v.oscWords`), which the module's own sentences
 -- name a tab by (src/actions/osc.luau, Osc.oscName: the ring's Oscillator stepper, Mute and Solo,
--- a knob's sentence, an action's answer), as the page names its tabs: the name this read took off
--- the screen, else the one window `window`'s values keep from an earlier read under the same
--- preset's name `preset` and over the same count (Open.keptNames), else the preset database's for
--- the preset `place` places — where it is trusted as for the count, the strip shows as many tabs
--- as the database has (a tab added or deleted since makes every name after it another tab's), and
--- this session edited none of the preset's tabs (S.tabsEdited) — else a hole, said as Avenger's
--- "OSC i". Said as they are, unmarked: the maintainer's decision of 2026-10-26 (src/presets.luau).
--- The ring reads no text of the strip (ring.luau), so these are its names; nothing more is read or
--- looked up for them: the place is the one the read places anyway, and the rest is kept already.
+-- a knob's sentence, an action's answer), as the page names its tabs. Where the preset database's
+-- names are taken (Open.dbOsc: THE DATABASE FIRST, above) the database's — as the page key's check
+-- left them, marked where it disagreed, while window `window`'s values keep them under the same
+-- preset's name `preset` and count (Open.keptNames) — whatever a read took off the screen: the
+-- order of 0.14, the screen's name first, reversed by the maintainer's decision of 2026-10-31.
+-- Elsewhere the name this read took off the screen, else the one the window's values keep from an
+-- earlier read; else a hole, said as Avenger's "OSC i". Said as they are; a name of the database's
+-- is marked only where the page key's read disagreed with it (src/presets.luau). The ring reads no
+-- text of the strip (ring.luau), so these are its names; nothing more is read or looked up for
+-- them: the place is the one the read places anyway, and the rest is kept already.
 local function wordsFor(v, count, preset, place, window)
   if not count then return nil end
   local kept = Open.keptNames(S.values(window), preset, count)
-  local db = place and trusted(place) and math.min(8, #place.osc) == count
-    and not S.tabsEdited(window, preset) and place.osc or nil
+  local db = Open.dbOsc(place, count, window, preset)
   local out = {}
   for i = 1, count do
     local read = v.oscNames and v.oscNames[i]
-    out[i] = read or (kept and kept[i]) or (db and db[i]) or nil
+    if db then
+      out[i] = (kept and kept[i]) or db[i]
+    else
+      out[i] = read or (kept and kept[i]) or nil
+    end
   end
   return out
 end
@@ -220,21 +288,43 @@ local function pictures(pl, snap, marks, zoom)
 end
 
 -- The OSC tabs' names into `v.oscNames`, from `texts` (tab -> text read, nil for none), each
--- cleaned the project's way and checked against the database's names of the preset's tabs
--- (`vocab`, or nil) — in the database's spelling where the read was near it, said in the log and
--- nowhere else (src/presets.luau, WHAT IT MAY DO); and in `v.oscNamesOf` what they were read under:
--- the preset's name `preset` (nil: not known), the count and S.changes() (Open.keptNames).
-local function oscNames(texts, count, vocab, v, preset)
+-- cleaned the project's way; and in `v.oscNamesOf` what they were taken under: the preset's name
+-- `preset` (nil: not known), the count and S.changes() (Open.keptNames). Where the database's names
+-- are taken (`db`, Open.dbOsc's: THE DATABASE FIRST, above) they are the names, and the text read —
+-- the page key's check — only marks one it is not near (R.snap), ", from the database". Elsewhere
+-- the names read, checked against the database's names of the preset's tabs (`vocab`, or nil) — in
+-- the database's spelling where the read was near it, said in the log and nowhere else
+-- (src/presets.luau, WHAT IT MAY DO).
+local function oscNames(texts, count, vocab, v, preset, db)
   v.oscNames = {}
-  v.oscNamesOf = { preset = preset, count = count, at = S.changes() }
+  -- `db`: the names are the database's (Open.keptReadNames).
+  v.oscNamesOf = { preset = preset, count = count, at = S.changes(), db = db ~= nil or nil }
   local words = {}
   for i = 1, count do
     local raw = texts[i]
-    if raw and R.tidy(raw) ~= "" then
-      local clean = R.cleanOscName(raw, i)
+    local clean = raw and R.tidy(raw) ~= "" and R.cleanOscName(raw, i) or nil
+    local cleaned = clean and clean ~= R.tidy(raw) and (" -> '" .. clean .. "'") or ""
+    if db then
+      local name = db[i]
+      if clean then
+        local _, snapped, ratio = R.snap(clean, name)
+        if snapped or ratio == 1 then
+          v.oscNames[i] = name
+          words[#words + 1] = string.format("%d '%s'%s, the database's '%s' (%.2f alike)", i, R.forLog(raw), cleaned,
+            name, ratio)
+        else
+          v.oscNames[i] = name .. ", " .. DB.MARK
+          words[#words + 1] = string.format("%d '%s'%s, not the database's '%s' (%.2f alike) — the database's, marked",
+            i, R.forLog(raw), cleaned, name, ratio or 0)
+        end
+      else
+        v.oscNames[i] = name
+        words[#words + 1] = string.format("%d '%s', the database's (not read)", i, name)
+      end
+    elseif clean then
       local name, snapped, ratio = R.snap(clean, vocab and vocab[i])
       v.oscNames[i] = name
-      words[#words + 1] = string.format("%d '%s'%s%s", i, R.forLog(raw), clean ~= R.tidy(raw) and (" -> '" .. clean .. "'") or "",
+      words[#words + 1] = string.format("%d '%s'%s%s", i, R.forLog(raw), cleaned,
         snapped and string.format(" -> '%s', the database's (%.2f alike)", name, ratio) or "")
     else
       words[#words + 1] = string.format("%d not read", i)
@@ -243,16 +333,30 @@ local function oscNames(texts, count, vocab, v, preset)
   log("strip: the tabs' names " .. table.concat(words, "; "))
 end
 
+-- The same names from the database alone, where an action reads none (THE DATABASE FIRST): the page
+-- key's checked names that window `window` keeps for the same preset and count (Open.keptNames),
+-- marks and all, else the database's `db`. Logged in one line.
+local function oscNamesKept(count, db, v, preset, window)
+  local kept = Open.keptNames(S.values(window), preset, count)
+  v.oscNames = {}
+  v.oscNamesOf = { preset = preset, count = count, at = S.changes(), db = true }
+  for i = 1, count do v.oscNames[i] = (kept and kept[i]) or db[i] end
+  log(string.format("strip: the tabs' names not read — the preset database's%s: %s",
+    kept and ", as the page key's read checked them" or "", table.concat(v.oscNames, ", ")))
+end
+
 -- The text regions that need no question's answer — the preset's name, the browser's view and its
--- header's name, the macro tabs' captions and the five names of the tab shown, the central tabs'
--- captions — appended to `entries`.
+-- header's name, the macro tabs' captions and the five names of the tab shown (THE DATABASE FIRST:
+-- read at the page key as the check) — appended to `entries`. Not the central tabs' captions, read
+-- until 0.16 for a log line alone: the central tab is its bottom strip's pixels (read/centre.luau),
+-- and the captions read 'EDITOR ARP ORU SQ STEP SQ' on Windows (mt-verified, finding 13).
 local function firstEntries(pl, entries)
   local nameRect = pl:rect(G.NAME_REGION)
   if nameRect then entries[#entries + 1] = { name = "preset", region = nameRect } end
-  Expansion.entries(pl, entries)
+  -- The browser's header's name; its view's caption only in the text read after the questions,
+  -- where the view's icon told neither state (read/expansion.luau, THE VIEW'S ICON).
+  Expansion.entries(pl, entries, false)
   Macros.entries(pl, entries)
-  local centralRect = pl:rect(Centre.ROW)
-  if centralRect then entries[#entries + 1] = { name = "central tabs", region = centralRect } end
   return entries
 end
 
@@ -266,9 +370,14 @@ local function decide(ctx)
     sample = {}, ["sq-controls"] = {} }
 
   -- How many oscillators the dots say, which places the tabs' names. With a count from the dots the
-  -- strip is decided before the text read, which then asks the drum slots' names when it reads the
-  -- Drums tab selected; a count from elsewhere keeps the strip's decision after it.
-  local count = Strip.count(pl, got, log, snap)
+  -- strip is decided before the text read, which then asks the sample browser's rows where the
+  -- central tab reads EDITOR on the Drums tab; a count from elsewhere keeps the strip's decision
+  -- after it. A covered strip (read/strip.luau, A COVERED STRIP) — no dot at OSC 1's place, a menu
+  -- counting open over the overlay, MENU's items' words in its text — decides nothing: only a count
+  -- that does not come from the screen, and no text of the strip is asked.
+  local count, dots, dotsRead = Strip.count(pl, got, log, snap)
+  local cover = Strip.coverOf(pl, dots, dotsRead, ctx.menuOpen)
+  if cover then count = nil end
   local early = count ~= nil
   if early then Strip.decide(pl, snap, got, count, v, log, marks.strip) end
   -- The central tab, DRUM SQ and the sample editor's pixels, on the Drums tab; decided before the
@@ -282,9 +391,15 @@ local function decide(ctx)
   local centreEarly = early and v.selectedType == "drums"
   if centreEarly then centre() end
 
-  -- The text read of the picture: what the early read (ctx.early) did not read already.
+  -- The text read of the picture: what the early read (ctx.early) did not read already — and the
+  -- browser's view's caption where its icon tells neither state. The drum slots' names are not read
+  -- (read/drums.luau, THE NAMES: Avenger's twelve fixed roles).
   local entries = firstEntries(pl, {})
-  if count then
+  local look = Expansion.look(pl, got)
+  if look.icon == nil then Expansion.captionEntry(pl, entries) end
+  if cover then
+    -- Nothing of a covered strip is read as text.
+  elseif count then
     for i = 1, count do
       local r = pl:rect(T.tabSpan(i, count, T.NAME_TOP, T.NAME_BOTTOM))
       if r then entries[#entries + 1] = { name = "osc " .. i, region = r } end
@@ -293,8 +408,6 @@ local function decide(ctx)
     local r = pl:rect(T.AREA)
     if r then entries[#entries + 1] = { name = "strip", region = r } end
   end
-  local slotNames = early and v.selectedType == "drums"
-  if slotNames then Dr.entries(pl, entries) end
   if centreEarly and Sm.applies("browser", v) then
     local r = pl:rect(Sm.fieldRect("browser"))
     if r then entries[#entries + 1] = { name = "browser", region = r } end
@@ -325,12 +438,19 @@ local function decide(ctx)
   end
   log("words: " .. table.concat(said, "; "))
 
-  -- The preset's name, the project's way with its blank preset, and where the database has it.
+  -- The preset's name, the project's way with its blank preset and a bullet word before it, and
+  -- where the database has it. A name read only in boxes the recogniser guessed is none, unless the
+  -- database has it as it stands (main.luau, nameOf: PaddleOCR alone invented every one).
   local name = textOf("preset")
   if name then
     local taken, init = R.presetName(name)
     if init and taken ~= name then log(string.format("the name read '%s' is taken as Avenger's blank preset, %s", name, taken)) end
-    v.preset = taken
+    if R.guessedOnly(byName["preset"]) and not DB.catalogName(taken) then
+      log(string.format("the name read '%s' was read only in boxes the recogniser guessed, and is no catalog name "
+        .. "as it stands — not taken", name))
+    else
+      v.preset = taken
+    end
   end
   local place = nil
   if v.preset and DB.present then
@@ -340,10 +460,25 @@ local function decide(ctx)
   if place then v.expansion = place.expansion end
 
   -- The strip: the dots' count checked by the names read in its tabs, a count from elsewhere where
-  -- the dots gave none, the names, then the rest.
+  -- the dots gave none, the names, then the rest. MENU's items' words in the strip's text are a
+  -- cover found late: what was decided off the picture is dropped again.
   local texts = {}
   if count then
     for i = 1, count do texts[i] = textOf("osc " .. i) end
+  end
+  if not cover then
+    local word = Strip.menuWords(textOf("strip"))
+    for i = 1, count or 0 do word = word or Strip.menuWords(texts[i]) end
+    if word then
+      cover = "its text holds MENU's item '" .. word .. "'"
+      count, texts, early = nil, {}, false
+      for _, k in ipairs({ "central", "drumSq" }) do v[k] = nil end
+      for _, k in ipairs(Sm.KEYS) do v[k] = nil end
+      centreEarly = false
+    end
+  end
+  if cover then Strip.covered(v, cover, log) end
+  if count then
     local past = Strip.namesPast(texts, count)
     if past then
       log(string.format("strip: a tab's name reads OSC %d — the dots' count of %d is short, and not taken", past, count))
@@ -357,7 +492,7 @@ local function decide(ctx)
     count, v.oscCountFrom = Open.countElsewhere(ctx.window, v.preset, place)
     if count then log(string.format("strip: %d oscillators, %s", count, Open.FROM[v.oscCountFrom])) end
   end
-  if not count then
+  if not count and not cover then
     local strip = byName["strip"]
     local found
     count, found = Strip.countFromText(strip and strip.status == "text" and strip.text or "")
@@ -366,30 +501,29 @@ local function decide(ctx)
     if count then texts = Strip.namesFromWords(pl, strip and strip.words, count) end
   end
   v.oscCount = count
-  if count then oscNames(texts, count, place and place.osc, v, v.preset or opts.preset) end
-  if not early then
-    Strip.decide(pl, snap, got, count, v, log, marks.strip)
-    if v.selectedType == "drums" and not slotNames then
-      log("drums: the slots' names are not read — the strip's count was not the dots'")
-    end
+  if count and not cover then
+    local preset = v.preset or opts.preset
+    oscNames(texts, count, place and place.osc, v, preset, Open.dbOsc(place, count, ctx.window, preset))
   end
-  local central = textOf("central tabs")
-  if central then log("centre: the captions read '" .. central .. "'") end
+  if not early and not cover then Strip.decide(pl, snap, got, count, v, log, marks.strip) end
   if v.selectedType == "drums" then
     if not centreEarly then
       centre()
       log("centre: the sample browser's rows are not read — the strip's count was not the dots'")
     end
-    Dr.decide(pl, got, slotNames and byName or nil, v, log, marks.drums)
+    Dr.decide(pl, got, v, log, marks.drums)
     if Sm.shown(v) then Sm.decideText(byName, v, log, nil) end
   end
   middles(pl, marks)
 
-  -- The macros: the count, the tab shown, its names, its buttons, its knobs.
-  local counted = Macros.count(byName, v)
+  -- The macros: the count, the tab shown, its names, its buttons, its knobs — the count and the
+  -- names the database's where it has the preset, the captions and names read as their check (THE
+  -- DATABASE FIRST); and what the names were taken under (`macroLabelsOf`, Open.keptLabels).
+  local dbTabs = Open.dbMacros(place, ctx.window, v.preset)
+  local counted = Macros.count(byName, v, dbTabs)
   Macros.selected(pl, got, v.macroCount, v, log, marks.macros)
-  local vocab = place and place.macros and v.macroSelected and place.macros[v.macroSelected] or nil
-  Macros.labels(byName, v, vocab, counted, log)
+  Macros.labels(pl, byName, v, dbTabs and v.macroSelected and dbTabs[v.macroSelected] or nil, counted, log)
+  v.macroLabelsOf = { preset = v.preset, tab = v.macroSelected, at = S.changes() }
   Macros.buttons(pl, got, v, log, marks.macros)
   local amounts
   v.macroAmounts, amounts = Knob.macros(pl, snap, marks.macros)
@@ -407,7 +541,6 @@ local function decide(ctx)
   -- the rest; and the user's word, the grid confirmed in this window. FAV by its star column where an
   -- expansion reads open; and with FAV on, the stars of the rows this session's own clicks placed.
   local reads = { ["expansion view"] = byName["expansion view"], ["expansion name"] = byName["expansion name"] }
-  local look = Expansion.look(pl, got)
   local seen, why = Br.state(reads, look, { window = ctx.window, zoom = opts.zoom, expected = ctx.opts.expected })
   log("expansion: " .. tostring(why))
   Br.gateLine("the page key", { window = ctx.window, pl = pl, byName = reads, look = look, st = seen, words = why,
@@ -532,7 +665,7 @@ function Open.read(o, opts, done)
       math.ceil(origin.client.y + origin.client.h)))
   end
   local ctx = { pl = P.placer(origin, k, opts.zoom), snap = snap, opts = opts, got = { why = {} }, t0 = t0,
-    tSnap = host.now(), cut = cut, window = opts.window or Open.window() }
+    tSnap = host.now(), cut = cut, window = opts.window or Open.window(), menuOpen = Open.menuOpen(o) }
   local all = {}
   Strip.ask(ctx.pl, all)
   Centre.ask(ctx.pl, all)
@@ -648,14 +781,13 @@ end
 --            Drums tab's switches and mode (read/strip.luau)
 --   knobs    the strip, and the selected oscillator's knobs (read/knob.luau)
 --   tab      the strip, the knobs, and with the Drums tab the central tab, DRUM SQ and the drumkit
---            table, its names read with `text` (`kitNames`): the page's Drums tab reads them after
---            its click
+--            table: what a choice of tab reads after its click
 --   drums    the strip, and with the Drums tab the drumkit table (read/drums.luau): every slot's
---            Mute, Solo, Lock and Loop and the slot selected; the twelve names read with `text`
---            (`kitNames`)
---   editor   the strip, the central tab, the drumkit table (its names with `text`), and with the
---            Drums tab and EDITOR the sample editor (read/sample.luau): its tab shown, the editor
---            or the sample browser in its place, the tab's switch
+--            Mute, Solo, Lock and Loop and the slot selected — no slot's name, which is a fixed role
+--            (read/drums.luau, THE NAMES, since 0.16)
+--   editor   the strip, the central tab, the drumkit table, and with the Drums tab and EDITOR the
+--            sample editor (read/sample.luau): its tab shown, the editor or the sample browser in its
+--            place, the tab's switch
 --   central  the strip, and the central tab and DRUM SQ with any tab selected (`anyTab`), the
 --            sample editor where it reads the Drums tab and EDITOR: what a choice of central tab
 --            reads after its click (src/actions/drums.luau)
@@ -673,9 +805,9 @@ end
 Open.PARTS = {
   strip = { rect = { 230, 18, 640, 145 }, strip = true },
   knobs = { rect = { 230, 18, 640, 182 }, strip = true, knobs = true },
-  tab = { rect = { 230, 18, 640, 268 }, strip = true, knobs = true, centre = true, drums = true, kitNames = true },
-  drums = { rect = { 230, 18, 640, 232 }, strip = true, drums = true, kitNames = true },
-  editor = { rect = { 230, 18, 640, 425 }, strip = true, centre = true, drums = true, kitNames = true, editor = true },
+  tab = { rect = { 230, 18, 640, 268 }, strip = true, knobs = true, centre = true, drums = true },
+  drums = { rect = { 230, 18, 640, 232 }, strip = true, drums = true },
+  editor = { rect = { 230, 18, 640, 425 }, strip = true, centre = true, drums = true, editor = true },
   central = { rect = { 230, 18, 640, 425 }, strip = true, centre = true, anyTab = true, editor = true },
   drumsq = { rect = { 236, 236, 640, 430 }, centre = true, anyTab = true },
   macros = { rect = { 700, 425, 871, 535 }, macros = true },
@@ -685,9 +817,14 @@ Open.PARTS = {
 -- The keys of state.luau's values each part reads, whether it finds them or not: what it does not
 -- find is not kept from an earlier read (S.part). The OSC names and the macro tabs' count and names
 -- only where the part's text is read; the words for the tabs (wordsFor) and the preset's name they
--- were taken for with every read of the strip, since they need no text.
+-- were taken for with every read of the strip, since they need no text; and how the selection's read
+-- went (`selectionState`: read/strip.luau, S.decide) and whether the strip was covered
+-- (`stripCovered`), which the ring and the page keep the Drums tab's controls by (ring.luau,
+-- state.luau's S.drumsKept).
 local STRIP_KEYS = { "oscCount", "oscCountFrom", "oscMute", "oscSolo", "selectedType", "selectedIndex", "drumsMute",
-  "drumsSolo", "trigMute", "trigSolo", "drumPattern", "drumLock", "drumMode", "oscWords", "oscWordsOf" }
+  "drumsSolo", "trigMute", "trigSolo", "drumPattern", "drumLock", "drumMode", "oscWords", "oscWordsOf",
+  "selectionState", "stripCovered" }
+Open.STRIP_KEYS = STRIP_KEYS
 
 -- ── A part past the screen's edge ────────────────────────────────────────────
 -- The second Mac test's window reached below its 1080-point screen, and what lay there read "not
@@ -777,12 +914,17 @@ end
 -- preset's name last read, whose tabs' names in the database are the names' vocabulary and, text
 -- read or not, the words for the tabs (wordsFor), fields = a list of the fields to read as text
 -- where they are shown (above), window = the id of the window the values are kept by
--- (Open.window() where not given), whose names kept are words too }. Answers the values read
+-- (Open.window() where not given), whose names kept are words too, readCount = the macro tabs'
+-- captions read for the count even where the database has it, screenNames = the OSC tabs' names
+-- read even where the database has them (src/act.luau) }. Where the preset database has the preset,
+-- the names are its own and are not read (THE DATABASE FIRST, above). Answers the values read
 -- (state.luau's), and the keys the part read — a key of the list missing from the values was not
 -- found. Nothing clicks; nothing but the snapshot is read. The strip, the central tab, DRUM SQ and
 -- the sample editor's pixels are decided before the part's text is read, so that the text read asks
--- the slots' names only where the strip reads the Drums tab selected, and a field only where it is
--- shown.
+-- a field only where it is shown. `menuOpen` (opts): a menu counts open over the overlay the read is
+-- made for (Open.menuOpen) — the strip read then is covered, as one with no dot at OSC 1's place or
+-- with MENU's items' words in its names (read/strip.luau, A COVERED STRIP): nothing of it decided,
+-- no name of it read, only a count from elsewhere.
 function Open.part(snap, name, opts)
   local part = Open.PARTS[name]
   local pl = opts.pl
@@ -829,9 +971,13 @@ function Open.part(snap, name, opts)
   local marks = { strip = {}, macros = {}, knob = {}, centre = {}, drumsq = {}, drums = {}, editor = {} }
   local count, from = nil, nil
   local window = opts.window or Open.window()
+  local cover = nil
   if part.strip then
     read(STRIP_KEYS)
-    count = Strip.count(pl, got, log, snap)
+    local dots, dotsRead
+    count, dots, dotsRead = Strip.count(pl, got, log, snap)
+    cover = Strip.coverOf(pl, dots, dotsRead, opts.menuOpen)
+    if cover then count = nil end
     if count then
       Open.compareCount(count, window, opts.preset, place)
     else
@@ -839,7 +985,11 @@ function Open.part(snap, name, opts)
       if count then log(string.format("strip: %d oscillators, %s", count, Open.FROM[from])) end
     end
     v.oscCount, v.oscCountFrom = count, from
-    Strip.decide(pl, snap, got, count, v, log, marks.strip)
+    if cover then
+      Strip.covered(v, cover, log)
+    else
+      Strip.decide(pl, snap, got, count, v, log, marks.strip)
+    end
   end
   if part.centre then
     read({ "central", "drumSq" })
@@ -853,7 +1003,6 @@ function Open.part(snap, name, opts)
     if Sm.shown(v) then Sm.decidePixels(pl, snap, got, v, log, marks.editor) end
   end
   local kit = part.drums and v.selectedType == "drums"
-  local names = opts.text and part.kitNames
 
   -- The fields asked, each only where what was just read shows it: the editor's on their tab,
   -- DRUM SQ's where it is the central tab. Those not asked, in one log line.
@@ -882,18 +1031,26 @@ function Open.part(snap, name, opts)
   if askedEditor then read(Sm.FIELD_KEYS) end
   if #skipped > 0 then log("fields: " .. table.concat(skipped, "; ")) end
 
-  -- The one text read of the part's picture, where anything of it is asked.
+  -- The database's names where they are taken (THE DATABASE FIRST): the OSC tabs' — unless the
+  -- action compares what an edit of the tabs did to them (`screenNames`, an OSC tab's menu) — and the
+  -- macros'; then none of those is read.
+  local dbNames = part.strip and count and not cover and not opts.screenNames
+    and Open.dbOsc(place, count, window, opts.preset) or nil
+  local dbTabs = part.macros and Open.dbMacros(place, window, opts.preset) or nil
+
+  -- The one text read of the part's picture, where anything of it is asked: the macro tabs'
+  -- captions where the count is not the database's, or the action counts them (`readCount`, Add and
+  -- Delete macro tab), and the names where they are not.
   local byName = {}
   local entries = {}
   if opts.text then
-    if part.strip and count then
+    if part.strip and count and not dbNames and not cover then
       for i = 1, count do
         local r = pl:rect(T.tabSpan(i, count, T.NAME_TOP, T.NAME_BOTTOM))
         if r then entries[#entries + 1] = { name = "osc " .. i, region = r } end
       end
     end
-    if part.macros then Macros.entries(pl, entries) end
-    if kit and names then Dr.entries(pl, entries) end
+    if part.macros then Macros.entries(pl, entries, dbTabs == nil or opts.readCount == true, dbTabs == nil) end
   end
   for _, key in ipairs(editorFields) do
     local r = pl:rect(Sm.fieldRect(key))
@@ -908,17 +1065,31 @@ function Open.part(snap, name, opts)
     byName = answers or {}
   end
   if part.strip then
-    if opts.text and count then
+    if opts.text and count and dbNames then
+      read({ "oscNames", "oscNamesOf" })
+      oscNamesKept(count, dbNames, v, opts.preset, window)
+    elseif opts.text and count and not cover then
       read({ "oscNames", "oscNamesOf" })
       local texts = {}
+      local word = nil
       for i = 1, count do
         local r = byName["osc " .. i]
         texts[i] = r and r.status == "text" and R.tidy(r.text) or nil
+        word = word or Strip.menuWords(texts[i])
       end
       -- The dots' count checked by the names, as at the page key: a short one is not taken, and
-      -- the strip is decided again by the count from elsewhere, or none.
+      -- the strip is decided again by the count from elsewhere, or none. MENU's items' words in them
+      -- are a cover found late: nothing of the strip decided stands.
       local past = from == nil and Strip.namesPast(texts, count)
-      if past then
+      if word then
+        cover = "its names hold MENU's item '" .. word .. "'"
+        count, from = Open.countElsewhere(window, opts.preset, place)
+        v.oscCount, v.oscCountFrom = count, from
+        Strip.covered(v, cover, log)
+        v.central, v.drumSq = nil, nil
+        for _, k in ipairs(Sm.KEYS) do v[k] = nil end
+        kit = false
+      elseif past then
         log(string.format("strip: a tab's name reads OSC %d — the dots' count of %d is short, and not taken", past, count))
         Strip.unread(v)
         count, from = Open.countElsewhere(window, opts.preset, place)
@@ -939,8 +1110,7 @@ function Open.part(snap, name, opts)
   end
   if part.drums then
     read(Dr.KEYS)
-    if names then read(Dr.NAME_KEYS) end
-    if kit then Dr.decide(pl, got, names and byName or nil, v, log, marks.drums) end
+    if kit then Dr.decide(pl, got, v, log, marks.drums) end
   end
   if part.editor and Sm.shown(v) then
     local fields = {}
@@ -952,20 +1122,38 @@ function Open.part(snap, name, opts)
   if #sqFields > 0 then DrumSq.fields(byName, v, log, sqFields) end
   if part.macros then
     read({ "macroSelected", "macroButtons", "macroAmounts" })
+    -- The preset's name the read was taken for, for an action's fact (src/actions/macros.luau).
+    v.macrosOf = opts.preset
     local counted = nil
     if opts.text then
-      read({ "macroCount", "macroLabels" })
-      counted = Macros.count(byName, v)
+      read({ "macroCount", "macroLabels", "macroLabelsOf" })
+      -- An action that counts the tabs (`readCount`) takes the captions read first, the database's
+      -- where they read none; every other the database's first (Macros.count).
+      if opts.readCount and dbTabs then
+        counted = Macros.count(byName, v, nil)
+        if v.macroCount == nil then counted = Macros.count(byName, v, dbTabs) end
+      else
+        counted = Macros.count(byName, v, dbTabs)
+      end
     else
-      v.macroCount = opts.macroCount
+      v.macroCount = opts.macroCount or (dbTabs and math.min(4, #dbTabs)) or nil
     end
     Macros.selected(pl, got, v.macroCount, v, log, marks.macros)
+    local tab = v.macroSelected
+    local db5 = dbTabs and tab and dbTabs[tab] or nil
+    local kept = db5 and Open.keptLabels(S.values(window), opts.preset, tab) or nil
     if opts.text then
-      local vocab = place and place.macros and v.macroSelected and place.macros[v.macroSelected] or nil
-      Macros.labels(byName, v, vocab, counted, log)
+      Macros.labels(pl, byName, v, db5, counted, log, kept)
+      v.macroLabelsOf = { preset = opts.preset, tab = tab, at = S.changes() }
     else
-      -- Counted before, not read here: not part of what this read says.
+      -- Counted before, not read here: not part of what this read says. The database's names, where
+      -- it has them, are words for the action's answer (a button's name), cost nothing, and are not
+      -- part of it either: no key of theirs.
       v.macroCount = nil
+      if db5 then
+        v.macroLabels = {}
+        for i = 1, 5 do v.macroLabels[i] = (kept and kept[i]) or db5[i] end
+      end
     end
     Macros.buttons(pl, got, v, log, marks.macros)
     local amounts

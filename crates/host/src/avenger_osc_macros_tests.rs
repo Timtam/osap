@@ -78,15 +78,16 @@ fn a_size_from_the_page_is_chosen_in_a_zoom_list_painted_inside_avenger() {
     "##));
 }
 
-/// MENU's Load preset from the ring, in a popup painted from (242, 20) — left of 245, the old edge
-/// of the area it is looked for in, where the second Mac test found it cut — and left drawn after
-/// the click, as Avenger's popup stays while its file dialog opens: found whole, and its row clicked
-/// ONCE (`retries = 0`), never again into the dialog, frozen or drawn again; that test clicked it
-/// four times. Save preset as alike. Initialize preset, which opens no dialog, is followed: a popup
-/// frozen as at its click is the click pending (overlay runtime 0.13), not clicked again; drawn
-/// again — the pointer over its row — and still open, it is clicked again.
+/// MENU's Load preset and Save preset as from the ring, like the original (the maintainer's decision
+/// of 2026-10-31, D1): each item clicked ONCE at the project's point, 180 ms after MENU — whatever
+/// the popup does after it, frozen while the file dialog opens or drawn again with the pointer over
+/// its row, it is never clicked again (the second Mac test clicked Load preset four times), and no
+/// menu test follows it. Initialize preset, which opens no dialog, is still chosen in the popup seen
+/// — found whole from (242, 20), left of 245, the old edge of the area it is looked for in — and
+/// followed: a popup frozen as at its click is the click pending (overlay runtime 0.13), not clicked
+/// again; drawn again — the pointer over its row — and still open, it is clicked again.
 #[test]
-fn menus_file_items_are_clicked_once_in_a_popup_found_from_240() {
+fn menus_file_items_are_clicked_once_at_the_projects_points_and_initialize_is_followed() {
     run_mac(&scenario(r##"
         local header = T.avengerAt80("LD Lead 1")
         local base = { osc = 1, selected = "osc", index = 1 }
@@ -96,9 +97,6 @@ fn menus_file_items_are_clicked_once_in_a_popup_found_from_240() {
           T.pressAt(header, T.indexOf(header, label))
           T.paintAvenger(98, 84, 1.6, { osc = 1, selected = "osc", index = 1, popup = { 242, 20, 322, 70 } })
           T.tick(3)
-          -- 242 is 485.2 on screen, 485: 241.9 from Avenger's corner.
-          T.ok(T.count("[avenger] '" .. label .. "': MENU's popup at (241.9,20.0) 80.0x50.0 from Avenger's corner") == 1,
-            T.dump())
           local clicks = #S.clicks
           T.tick(6)
           local frozen = #S.clicks - clicks
@@ -111,13 +109,17 @@ fn menus_file_items_are_clicked_once_in_a_popup_found_from_240() {
           T.tick(4)
           return frozen, again
         end
+        -- Load at (257, 32): 98 + 411.2 -> 509, 84 + 51.2 -> 135.
         local frozen, again = choose("Load preset")
-        T.ok(frozen == 0 and again == 0 and T.clickAt() == "549,135", "Load once, at its row: " .. T.clickAt())
-        T.ok(T.count("'Load preset' — test 'drawn' sees the menu at 485,116 128x80") == 1
-          and T.count("choosing item (64,19) at (549,135)") == 1, T.dump())
+        T.ok(frozen == 0 and again == 0 and T.clickAt() == "509,135", "Load once, at its point: " .. T.clickAt())
+        T.ok(T.count("drawn: armed on 'Load preset'") == 0, "no menu test: " .. T.dump())
+        -- Save as at (257, 55): 84 + 88 -> 172.
         frozen, again = choose("Save preset as")
-        T.ok(frozen == 0 and again == 0, "Save as once: " .. frozen .. " " .. again)
+        T.ok(frozen == 0 and again == 0 and T.clickAt() == "509,172", "Save as once: " .. T.clickAt())
         frozen, again = choose("Initialize preset")
+        -- 242 is 485.2 on screen, 485: 241.9 from Avenger's corner.
+        T.ok(T.count("[avenger] 'Initialize preset': MENU's popup at (241.9,20.0) 80.0x50.0 from Avenger's corner") == 1,
+          T.dump())
         T.ok(frozen == 0 and again == 1, "Initialize pending while frozen, clicked again once drawn again: " .. frozen
           .. " " .. again .. " " .. T.dump())
     "##));
@@ -137,11 +139,12 @@ fn the_rings_load_preset_says_the_preset_loaded_after_its_dialog() {
         T.paintAvenger(98, 84, 1.6, base)
         local dialog = { id = 951, title = "Open", class = "AXWindow/AXDialog/", app = T.MAC_REAPER,
           bounds = { x = 300, y = 200, w = 700, h = 450 }, client = { x = 300, y = 228, w = 700, h = 422 } }
+        -- Load at the project's point, 180 ms after MENU (D1): 98 + 411.2 -> 509, 84 + 51.2 -> 135.
         local function load()
           T.pressAt(header, T.indexOf(header, "Load preset"))
           T.paintAvenger(98, 84, 1.6, { osc = 1, selected = "osc", index = 1, popup = { 242, 20, 322, 70 } })
           T.tick(3)
-          T.ok(T.clickAt() == "549,135", "Load's row: " .. T.clickAt())
+          T.ok(T.clickAt() == "509,135", "Load's point: " .. T.clickAt())
           T.repaint(base)
         end
         -- Back in Avenger, its header read again.
@@ -193,9 +196,62 @@ fn the_rings_load_preset_says_the_preset_loaded_after_its_dialog() {
     "##));
 }
 
-/// MENU's Load from the ring, its popup painted below MENU: chosen at Load's row in the middle of
-/// the area seen; and the redo list from the page, which holds the trip for as long as it is seen
-/// and lets it go on once it has gone — then the name.
+/// A Load the user cancelled in its file dialog is said as that (mt-verified, finding 8: "Load
+/// preset: VC Vowel Choir 7" was said for a dialog left with Escape): the name read after the dialog
+/// is the one read before the press, and has not changed by the watch's bound — "Load preset: <name>,
+/// unchanged"; Save as alike. From the page, the note "unchanged, <name>".
+#[test]
+fn load_preset_cancelled_says_the_name_unchanged() {
+    run_mac(&scenario(r##"
+        local header, _, W = T.avengerAt80("Resurrection")
+        local base = { osc = 1, selected = "osc", index = 1 }
+        T.paintAvenger(98, 84, 1.6, base)
+        local dialog = { id = 951, title = "Open", class = "AXWindow/AXDialog/", app = T.MAC_REAPER,
+          bounds = { x = 300, y = 200, w = 700, h = 450 }, client = { x = 300, y = 228, w = 700, h = 422 } }
+        for _, label in ipairs({ "Load preset", "Save preset as" }) do
+          T.pressAt(header, T.indexOf(header, label))
+          T.tick(3)
+          S.listed = { W, dialog }
+          T.show(dialog)
+          T.tick(2)
+          -- Escape in the dialog: Avenger shows the preset it had.
+          S.listed = { W }
+          T.show(W)
+          local r = T.lastRead("vps-avenger header")
+          if r and not r.answered then T.answer(r, T.header(98, 84, 1.6, 80)) end
+          T.event()
+          T.run(400)
+          local said = #S.speech
+          T.nameReads("Resurrection")
+          T.ok(T.lastSaid() == label .. ": Resurrection, unchanged", T.said(said + 1))
+          T.ok(T.count("[avenger] '" .. label .. "': the name after the dialog — " .. label .. ": Resurrection, unchanged")
+            == 1, T.dump())
+        end
+        -- From the page: the note.
+        T.pageReady()
+        T.nameIs("Resurrection")
+        T.openPage()
+        T.event()
+        T.tripFrom({ action = "pick_load_preset", args = {}, focused = true }, W)
+        T.tick(3)
+        S.listed = { W, dialog }
+        T.show(dialog)
+        T.runDue()
+        S.listed = { W }
+        T.show(W)
+        T.runDue()
+        T.nameReads("Resurrection")
+        local err = T.lastPost("error").text
+        T.ok(T.lastPost("state").state.preset == "Resurrection" and err == "Load Preset: unchanged, Resurrection",
+          err .. " " .. T.dump())
+        T.ok(T.count("[avenger] [page] 'Load Preset': answered — note 'unchanged, Resurrection'") == 1, T.dump())
+    "##));
+}
+
+/// MENU's Load from the ring, its popup painted below MENU: clicked at the project's point 180 ms
+/// after MENU, whatever is painted (the maintainer's decision of 2026-10-31, D1), and never again;
+/// and the redo list from the page, which holds the trip for as long as it is seen and lets it go on
+/// once it has gone — then the name.
 #[test]
 fn menu_from_the_ring_and_the_redo_list_from_the_page_in_popups_painted_inside_avenger() {
     run_mac(&scenario(r##"
@@ -204,13 +260,13 @@ fn menu_from_the_ring_and_the_redo_list_from_the_page_in_popups_painted_inside_a
         T.pressAt(header, 4)
         T.ok(T.clickAt() == "517,106" and T.lastSaid() == "Load preset, activated", T.clickAt())
         T.paintAvenger(98, 84, 1.6, { osc = 1, selected = "osc", index = 1, popup = { 250, 20, 330, 70 } })
+        local clicks = #S.clicks
         T.tick(3)
-        T.ok(T.count("[avenger] 'Load preset': MENU's popup at (250.0,20.0) 80.0x50.0 from Avenger's corner") == 1, T.dump())
-        T.ok(T.clickAt() == "562,135", "Load's row: " .. T.clickAt())
+        -- The project's (257, 32): 98 + 411.2 -> 509, 84 + 51.2 -> 135; once, no menu test.
+        T.ok(#S.clicks == clicks + 1 and T.clickAt() == "509,135", "Load's point: " .. T.clickAt())
         T.repaint({ osc = 1, selected = "osc", index = 1 })
         T.tick(3)
-        -- Chosen at its click, not followed: the item opens a file dialog (main.luau, ONE_CLICK).
-        T.ok(T.count("choosing item (64,19) at (562,135)") == 1, T.dump())
+        T.ok(#S.clicks == clicks + 1 and T.count("drawn: armed on 'Load preset'") == 0, T.dump())
         -- The redo list from the page.
         T.pageReady()
         T.nameIs("LD Lead 1")
@@ -275,10 +331,18 @@ fn an_oscillator_tab_is_clicked_where_the_count_puts_it_and_read_back() {
         T.tick(6)
         T.ok(T.lastPost("error").text == "Choosing an oscillator tab: unchanged, OSC 2 is selected"
           and T.lastPost("error").focus == true, T.lastPost("error").text)
-        -- No dots: no count, nothing clicked.
+        -- No dots, OSC 1's among them: the strip covered — by a menu of Avenger's, as no dot at OSC
+        -- 1's place says (read/strip.luau, A COVERED STRIP) — nothing clicked.
         T.event()
         T.paintAvenger(98, 84, 1.6, {})
         clicks = #S.clicks
+        T.tripFrom({ action = "select_osc_tab", args = { index = 1 }, focused = true }, W)
+        T.settle(2)
+        T.ok(#S.clicks == clicks and T.lastPost("error").text == "Choosing an oscillator tab: the oscillator strip is "
+          .. "covered now, perhaps by a menu of VPS Avenger's; nothing was clicked", T.lastPost("error").text)
+        -- OSC 1's dot and one that fits no count's step: not counted, and nothing clicked.
+        T.event()
+        T.paintAvenger(98, 84, 1.6, { osc = 3, dots = { { 246, 3, { 100, 220, 180 } }, { 266, 3, { 100, 220, 180 } } } })
         T.tripFrom({ action = "select_osc_tab", args = { index = 1 }, focused = true }, W)
         T.settle(2)
         T.ok(#S.clicks == clicks and T.lastPost("error").text
@@ -1034,9 +1098,9 @@ fn the_rings_knobs_turn_with_page_up_and_page_down_and_return_confirms() {
 
 /// The selected tab is the darkest bottom strip only where it stands out — by 5 and by at least the
 /// spread of the others (read/strip.luau): with no tab drawn selected, every strip alike, none is
-/// taken, where the darkest of equals was the first; with one drawn selected, that one. A picture
-/// taken while Avenger redraws, as the second Mac test's: Trig the darkest by 7, over the others
-/// 21 apart — none.
+/// taken, where the darkest of equals was the first; with one drawn selected, that one. A band whose
+/// every row differs from tab to tab, as the second Mac test's (2026-10-24): Trig the darkest by 7,
+/// over the others 21 apart — none.
 #[test]
 fn the_selected_tab_is_one_that_stands_out_or_none() {
     run_mac(&scenario(r##"
@@ -1235,12 +1299,14 @@ fn the_rings_oscillator_stepper_says_osc_i_where_the_database_names_no_tab() {
     }
 }
 
-/// The page's own answers say a tab as the page shows it (the review of 2026-10-26): the key reads
-/// AR Band Pass Slide's first tab as Pluck, so choosing it, selected already, is "unchanged, Pluck
-/// is selected", and its Mute "Pluck Mute ON" — never the database's Arp, which the page does not
-/// show. After ▶ to a preset the database does not have, the names the key read are the preset
-/// before's, and the tab is OSC 1 again; ◀ back to AR Band Pass Slide loads it from its file again,
-/// and the tab is the database's Arp, not Pluck. A Copy of a tab whose name was not read is the
+/// The page's own answers say a tab as the page shows it (the review of 2026-10-26), and since 0.16
+/// the database's name first where it has the preset (the maintainer's decision of 2026-10-31, D3):
+/// the key's read of AR Band Pass Slide's first tab as Pluck is the check of the database's Arp, and
+/// disagrees — so the page shows "Arp, from the database", choosing it, selected already, is
+/// "unchanged, Arp, from the database is selected", and its Mute "Arp, from the database Mute ON".
+/// After ▶ to a preset the database does not have, the names the key took are the preset before's,
+/// and the tab is OSC 1 again; ◀ back to AR Band Pass Slide loads it from its file again, and the
+/// tab is the database's Arp, unmarked: no read of the key's is about this load. A Copy of a tab whose name was not read is the
 /// database's name, as the stepper says it; and a Paste over it is an edit of the preset's tabs,
 /// after which the ring takes none of the database's names for them: back in Avenger the stepper
 /// says OSC 1.
@@ -1254,15 +1320,18 @@ fn the_pages_answers_say_a_tab_as_shown_and_an_edit_takes_the_databases_names_aw
         T.words({ preset = "AR Band Pass Slide", ["osc 1"] = "Pluck", ["osc 2"] = "OSC 2", ["osc 3"] = "Lead" })
         T.openPage()
         T.event()
-        T.ok(T.lastPost("state").state.osc_panel.names[1] == "Pluck", "read at the key")
+        T.ok(T.lastPost("state").state.osc_panel.names[1] == "Arp, from the database", "checked at the key: "
+          .. tostring(T.lastPost("state").state.osc_panel.names[1]))
+        T.ok(T.count("1 'Pluck', not the database's 'Arp' (0.25 alike) — the database's, marked") == 1, T.dump())
         T.tripFrom({ action = "select_osc_tab", args = { index = 1 }, focused = true }, W)
         T.tick(16)
-        T.ok(T.lastPost("error").text == "Choosing an oscillator tab: unchanged, Pluck is selected", T.lastPost("error").text)
+        T.ok(T.lastPost("error").text == "Choosing an oscillator tab: unchanged, Arp, from the database is selected",
+          T.lastPost("error").text)
         T.event()
         T.tripFrom({ action = "toggle_osc_mute", args = { index = 1 }, focused = true }, W)
         T.repaint({ osc = 3, selected = "osc", index = 1, mute = { [1] = true } })
         T.settle()
-        T.ok(T.count("[avenger] [act] 'An oscillator's Mute': changed — Pluck Mute ON") == 1, T.dump())
+        T.ok(T.count("[avenger] [act] 'An oscillator's Mute': changed — Arp, from the database Mute ON") == 1, T.dump())
         -- ▶ to My Own Lead: the page's state keeps the names, which are the preset before's.
         T.event()
         T.tripFrom({ action = "next_preset", args = {}, focused = true }, W)
@@ -1359,7 +1428,7 @@ fn the_rings_tab_names_wait_for_the_name_a_step_settles_on_and_take_none_after_l
         T.pressAt(header, T.indexOf(header, "Load preset"))
         T.paintAvenger(98, 84, 1.6, { osc = 3, selected = "osc", index = 1, popup = { 242, 20, 322, 70 } })
         T.tick(3)
-        T.ok(T.clickAt() == "549,135", "Load's row: " .. T.clickAt())
+        T.ok(T.clickAt() == "509,135", "Load's point: " .. T.clickAt())
         T.repaint(base)
         T.nameIs("AR Band Pass Slide")
         T.run(8200)
@@ -1494,9 +1563,11 @@ fn the_drums_and_trig_tabs_are_selected_and_their_menus_and_switches_used() {
         local o = T.lastPost("state").state.osc_panel
         T.ok(o.selected_type == "drums" and o.drum_pattern == true and o.central_panel_tab == "editor",
           tostring(o.selected_type) .. " " .. tostring(o.central_panel_tab))
-        -- The slots' names read with it, which the page shows.
-        local labels = o.drumkit_part_labels
-        T.ok(labels and (labels[1] or labels["1"]) == "CR Wide", "the names read: " .. T.jsonEncode(labels or {}))
+        -- No slot's name read with it: the page shows the twelve fixed roles (read/drums.luau, THE
+        -- NAMES; the maintainer's decision of 2026-10-31).
+        local slotRead = false
+        for _, r in ipairs(S.recognized) do if r.name == "slot 1" then slotRead = true end end
+        T.ok(o.drumkit_part_labels == nil and not slotRead, "no slot's name read")
         T.words({})
         T.event()
         T.tripFrom({ action = "select_trig_tab", args = {}, focused = true }, W)
@@ -1836,7 +1907,10 @@ fn on_windows_a_confirmed_count_is_found_by_the_window_the_page_keeps() {
         T.ok(header.active, "identified")
         T.run(400)
         T.pageReady()
-        local NO_DOTS = { osc = 4, selected = "osc", index = 1, dots = {} }
+        -- OSC 1's dot, and one that fits no count's step: the dots give no count, and the strip is not
+        -- covered (read/strip.luau, A COVERED STRIP: a strip with no dot at OSC 1's place is).
+        local GREEN = { 100, 220, 180 }
+        local NO_DOTS = { osc = 4, selected = "osc", index = 1, dots = { { 246, 3, GREEN }, { 266, 3, GREEN } } }
         T.paintAvenger(248, 60, 2.4, NO_DOTS)
         T.words({ preset = "My Own Lead" })
         T.openPage()
@@ -1856,7 +1930,7 @@ fn on_windows_a_confirmed_count_is_found_by_the_window_the_page_keeps() {
         T.runDue()
         T.ok(T.clickAt() == x .. "," .. y, "OSC 3's Mute at the four tabs' place: " .. T.clickAt() .. " " .. T.dump())
         T.ok(T.count("strip: 4 oscillators, as confirmed for this preset") >= 1, T.dump())
-        T.repaint({ osc = 4, selected = "osc", index = 1, dots = {}, mute = { [3] = true } })
+        T.repaint({ osc = 4, selected = "osc", index = 1, dots = NO_DOTS.dots, mute = { [3] = true } })
         T.tick(3)
         T.ok(T.lastPost("state").state.osc_panel.mute_states[3] == true, "read ON")
         -- The next key: the count kept.
@@ -1868,6 +1942,480 @@ fn on_windows_a_confirmed_count_is_found_by_the_window_the_page_keeps() {
         T.event()
         local o = T.lastPost("state").state.osc_panel
         T.ok(o.count == 4 and o.count_from == "confirmed", "kept for its preset: " .. tostring(o.count))
+        T.ok(T.held() == 0, "every picture released: " .. T.held())
+    "##));
+}
+
+// ---------------------------------------------------------------------------------------------
+// VPS Avenger 0.16: the macros' names and count, the database first (the maintainer's decision of
+// 2026-10-31, D3), and the reads nobody needs dropped (mt-verified, findings 12 and 13).
+// ---------------------------------------------------------------------------------------------
+
+/// A macro button's toggle reads no text (mt-verified, finding 13: six regions and 350 ms a toggle
+/// in the developer's Mac test, for a name the action had): the button's highlight read off the
+/// picture, and its name the one last read in this window.
+#[test]
+fn a_macro_button_toggle_reads_no_text() {
+    run_mac(&scenario(r##"
+        local words = { ["macro tabs"] = "MACRO 1", ["macro btn1"] = "Hold" }
+        local _, _, W = T.pageOn({ osc = 1, selected = "osc", index = 1, macroShown = 1, buttons = { false, false } }, words)
+        local reads = #S.recognized
+        T.tripFrom({ action = "toggle_macro_button", args = { index = 1 }, focused = true }, W)
+        T.repaint({ osc = 1, selected = "osc", index = 1, macroShown = 1, buttons = { true, false } })
+        T.settle()
+        for i = reads + 1, #S.recognized do
+          T.ok(string.sub(S.recognized[i].name or "", 1, 5) ~= "macro", "no macro region read: " .. tostring(S.recognized[i].name))
+        end
+        T.ok(T.lastPost("error").text == "" and T.count("[avenger] [act] 'A macro button': changed — Hold ON") == 1, T.dump())
+    "##));
+}
+
+/// A macro field's dot is no part of its name (mt-verified, finding 12): a first word "•", "·", "o",
+/// "O", "0" or "°" whose box ends left of 7 units from the field's left — the pink dot, at 3.75 to
+/// 6.25 units in the developer's Mac test's macros picture at 80 % — is dropped by its place, the
+/// region uncut; Windows' 'o Macr02' is Avenger's default "Macro 2". A zero further in is a name's
+/// ("0 dB"), and a reading whose boxes PaddleOCR only guessed loses only a lone bullet word.
+#[test]
+fn a_macro_fields_dot_is_no_part_of_its_name() {
+    run_mac(&scenario(r##"
+        local function reading(list)
+          local words, text = {}, {}
+          for _, w in ipairs(list) do
+            words[#words + 1] = { text = w[1], x = w[2], y = w[3], w = w[4], h = 16, approx = w[5] }
+            text[#text + 1] = w[1]
+          end
+          return { status = "text", text = table.concat(text, " "), words = words, lines = {} }
+        end
+        -- The fields at 80 % from Avenger's corner (98, 84): macro1 from x 1236, macro2 1317, macro3
+        -- 1399, btn1 1276, btn2 1358; the dot's box ending by x1 + 11.2.
+        local words = {
+          ["macro tabs"] = "MACRO 1",
+          ["macro macro1"] = reading({ { "•", 1242, 795, 4 }, { "Add", 1260, 795, 20 }, { "Lead", 1284, 795, 24 } }),
+          ["macro macro2"] = reading({ { "o", 1323, 795, 5 }, { "Macr02", 1340, 795, 36 } }),
+          ["macro macro3"] = reading({ { "0", 1429, 795, 6 }, { "dB", 1440, 795, 12 } }),
+          ["macro btn1"] = reading({ { "•", 1282, 894, 4 }, { "Soften", 1286, 894, 30 }, { "To", 1320, 894, 10 },
+            { "Pad", 1333, 894, 16 } }),
+          ["macro btn2"] = reading({ { "o", 1358, 894, 20, true }, { "Gate", 1378, 894, 40, true } }),
+        }
+        T.pageOn({ osc = 1, selected = "osc", index = 1, macroShown = 1 }, words)
+        local m = T.lastPost("state").state.macro_panel
+        T.ok(table.concat(m.tabs[1], "|") == "Add Lead|Macro 2|0 dB|Soften To Pad|Gate", table.concat(m.tabs[1], "|"))
+        T.ok(T.count("macro1 '• Add Lead' ('•' before it dropped)") == 1
+          and T.count("macro2 'o Macr02' ('o' before it dropped) -> 'Macro 2', Avenger's default") == 1, T.dump())
+    "##));
+}
+
+/// Avenger's own default macro names are the vocabulary where the database has none — Init Preset
+/// here — as the project names them (its _current_macro_label: "Macro 1" … "MacroBtn 2" on tab 1),
+/// compared with what was read with Cyrillic and Greek look-alike letters folded (mt-verified,
+/// finding 12): Vision's "Масrо 3" (Cyrillic М, а and о) is "Macro 3", said in Latin letters.
+#[test]
+fn avengers_default_macro_names_are_taken_through_look_alike_letters() {
+    run_mac(&scenario(r##"
+        local words = { ["macro tabs"] = "MACRO 1", ["macro macro1"] = "Macro 1", ["macro macro2"] = "Macтo 2",
+          ["macro macro3"] = "Масrо 3", ["macro btn1"] = "MacroBtn 1", ["macro btn2"] = "MаcrоBtn 2" }
+        T.pageOn({ osc = 1, selected = "osc", index = 1, macroShown = 1 }, words)
+        local m = T.lastPost("state").state.macro_panel
+        T.ok(table.concat(m.tabs[1], "|") == "Macro 1|Macro 2|Macro 3|MacroBtn 1|MacroBtn 2", table.concat(m.tabs[1], "|"))
+        local R = S.included["modules/vps-avenger/src/read/ocr.luau"][1]
+        T.ok(R.foldConfusables("Масrо 3") == "Macro 3" and R.foldConfusables("Bass") == "Bass"
+          and R.foldConfusables("ΑΒΓ") == "ABΓ", R.foldConfusables("Масrо 3"))
+        T.ok(R.defaultMacroName(2, 1) == "Macro 4" and R.defaultMacroName(2, 5) == "MacroBtn 4", "tab 2's defaults")
+    "##));
+}
+
+/// The macro tabs' count is the preset database's where it has the preset (mt-verified, finding 12;
+/// avw2-verified, R5): the second Windows session read the caption "UACRO 1" all through, and with
+/// AR Deep Arp's two tabs in the database the page shows two, tab 2 shown, its names the database's
+/// — the read of 'o Macro 4' its check, its dot dropped, agreeing. Without the database the caption
+/// counts with one letter off (A2): "UACRO 1" is one tab.
+#[test]
+fn the_macro_tab_count_comes_from_the_database_when_the_caption_reads_uacro() {
+    run_mac(&scenario(r##"
+        T.presets()
+        local function reading(list)
+          local words, text = {}, {}
+          for _, w in ipairs(list) do
+            words[#words + 1] = { text = w[1], x = w[2], y = 795, w = w[3], h = 16 }
+            text[#text + 1] = w[1]
+          end
+          return { status = "text", text = table.concat(text, " "), words = words, lines = {} }
+        end
+        T.pageOn({ osc = 1, selected = "osc", index = 1, macroShown = 2 }, { preset = "AR Deep Arp",
+          ["macro tabs"] = "UACRO 1", ["macro macro1"] = reading({ { "o", 1242, 5 }, { "Macro", 1260, 30 }, { "4", 1294, 6 } }),
+          ["macro macro2"] = "Wobble" })
+        local m = T.lastPost("state").state.macro_panel
+        T.ok(m.count == 2 and m.selected_index == 2, "two tabs, the database's: " .. tostring(m.count))
+        T.ok(table.concat(m.tabs[2], "|") == "Macro 4|Wobble|Macro 6|MacroBtn 3|MacroBtn 4", table.concat(m.tabs[2], "|"))
+        T.ok(T.count("tabs 'UACRO 1' — 1 tab; 2 tabs, the database's, where the caption reads 1 — the database's taken")
+          == 1, T.dump())
+        local R = S.included["modules/vps-avenger/src/read/ocr.luau"][1]
+        for _, c in ipairs({ { "UACRO 1", 1 }, { "MACRO 1 +", 1 }, { "UACRO 1 MACRO 2", 2 }, { "MACR0 1", 1 }, { "MACRO", 1 },
+          { "Partial", nil }, { "", nil }, { "MACRO 1  MACRO 2 Macro 3", 3 }, { "macro i", 1 } }) do
+          T.ok(R.macroTabCount(c[1]) == c[2], c[1] .. " -> " .. tostring(R.macroTabCount(c[1])))
+        end
+    "##));
+    run_mac(&scenario(r##"
+        T.pageOn({ osc = 1, selected = "osc", index = 1, macroShown = 1 }, { ["macro tabs"] = "UACRO 1" })
+        local m = T.lastPost("state").state.macro_panel
+        T.ok(m.count == 1 and m.selected_index == 1, "one tab, read: " .. tostring(m.count))
+    "##));
+}
+
+/// THE DATABASE FIRST (the maintainer's decision of 2026-10-31, D3): where the database has the
+/// preset, the OSC tabs' and the macros' names are its own, the screen read for them at the page key
+/// only, as a check — a read not near the database's name marks that name, "from the database" —
+/// and the ring's and the actions' reads read no name: the ring's Macro 1 says the page key's
+/// checked name, the Oscillator stepper the database's tab. An Add Macro Tab counts the tabs off
+/// their captions, and once it has changed the count the database's names are not taken: the next
+/// page key reads them.
+#[test]
+fn the_databases_names_come_first_and_the_page_key_checks_them() {
+    run_mac(&scenario(r##"
+        T.presets()
+        local header, _, W = T.pageOn({ osc = 1, selected = "osc", index = 1, macroShown = 1, amounts = { 0, 0, 0 } },
+          { preset = "AR Deep Arp", ["osc 1"] = "One Osc", ["macro tabs"] = "MACRO 1 MACRO 2", ["macro macro1"] = "Cutoff",
+            ["macro macro2"] = "Res" })
+        local st = T.lastPost("state").state
+        T.ok(st.osc_panel.names[1] == "One Osc" and st.macro_panel.tabs[1][1] == "Cut, from the database"
+          and st.macro_panel.tabs[1][2] == "Res" and st.macro_panel.tabs[1][3] == "Env", T.jsonEncode(st.macro_panel))
+        T.ok(T.count("macro1 'Cutoff', not the database's 'Cut' (0.67 alike) — the database's, marked") == 1, T.dump())
+        -- Back in Avenger: the ring reads no field, and says the checked names.
+        T.event()
+        S.focusAtOnce, S.focusLands = true, function() S.front, S.chain = W, { W } end
+        T.pageKey()
+        T.event()
+        T.run(400)
+        T.ok(header.active, "the header again")
+        local reads = #S.recognized
+        header.focus = T.indexOf(header, "Macro 1") - 1
+        T.tab()
+        T.ok(T.lastSaid() == "Macro 1, Cut, from the database, 0 percent, button", T.said())
+        header.focus = T.indexOf(header, "Oscillator") - 1
+        T.tab()
+        T.ok(T.lastSaid() == "Oscillator, One Osc, slider", T.said())
+        for i = reads + 1, #S.recognized do
+          local n = S.recognized[i].name or ""
+          T.ok(string.sub(n, 1, 5) ~= "macro" and string.sub(n, 1, 3) ~= "osc", "no name read: " .. n)
+        end
+        -- Add Macro Tab from the page: the captions read before and after, the count changed, and
+        -- the database's names not taken from then on.
+        T.pageReady()
+        T.openPage()
+        T.event()
+        T.tripFrom({ action = "add_macro_tab", args = {}, focused = true }, W)
+        T.words({ preset = "AR Deep Arp", ["macro tabs"] = "MACRO 1 MACRO 2 MACRO 3", ["macro macro1"] = "Cutoff" })
+        T.repaint({ osc = 1, selected = "osc", index = 1, macroShown = 3, amounts = { 0, 0, 0 } })
+        T.settle()
+        T.ok(T.lastPost("state").state.macro_panel.count == 3, tostring(T.lastPost("state").state.macro_panel.count))
+        -- Back in Avenger, and the page key again: the names read off the screen.
+        T.event()
+        S.focusAtOnce, S.focusLands = true, function() S.front, S.chain = W, { W } end
+        T.pageKey()
+        T.event()
+        T.run(400)
+        T.ok(header.active and S.front == W, "the header again")
+        T.repaint({ osc = 1, selected = "osc", index = 1, macroShown = 1, amounts = { 0, 0, 0 } })
+        T.openPage()
+        T.tick()
+        st = T.lastPost("state").state
+        T.ok(st.macro_panel.count == 3 and st.macro_panel.tabs[1][1] == "Cutoff", T.jsonEncode(st.macro_panel))
+    "##));
+}
+
+// ---------------------------------------------------------------------------------------------
+// The strip under the level meter and under a menu (the developer's Mac test of 2026-10-31,
+// mt-verified findings 4 and 11; the second Windows session of that day, avw2-verified A8).
+// ---------------------------------------------------------------------------------------------
+
+/// The strip's log line of the selection: the floor and the mean of every tab, by its label, and
+/// whether the means — the rule the floor replaced — would have decided one.
+const FLOORS: &str = r##"
+function T.floors()
+  local line = nil
+  for _, l in ipairs(S.logs) do
+    if string.find(l, "the tabs' bottom strips' floor (their means)", 1, true) then line = l end
+  end
+  assert(line, "no selection line")
+  local list = string.match(line, "darkest selected: (.-) — ")
+  local out, means = {}, {}
+  for part in string.gmatch(list, "[^,]+") do
+    local label, f, m = string.match(part, "^%s*(.-) ([%d%.]+) %(([%d%.]+)%)$")
+    out[label] = { floor = tonumber(f), mean = tonumber(m) }
+    means[#means + 1] = tonumber(m)
+  end
+  table.sort(means)
+  local lead, spread = means[2] - means[1], means[#means] - means[2]
+  return out, lead >= 5 and lead >= spread, line
+end
+"##;
+
+/// The level meter: a light bar one row tall under a sounding tab, in the band the selection is
+/// read in (read/strip.luau, THE SELECTED TAB), lifted a tab's mean by up to 28 in the developer's Mac
+/// test of 2026-10-31 and left the selection undecided — or, by the project's darkest-wins, wrong.
+/// The selection is read by the band's FLOOR, each column's darkest pixel, which the meter does not
+/// move. With the shades measured there (the selected tab 34, the others 52): (a) Drums selected and
+/// lit, its mean 62; (b) OSC 1 and Drums lit, that log's 17228; (c) the second Windows session's 579 —
+/// one oscillator, selected (44) and lit, Drums and Trig at 58; (d) no tab dark, two lit: none. In (a)
+/// to (c) the means, logged beside the floors, would have refused.
+#[test]
+fn the_level_meter_under_a_tab_moves_no_selection() {
+    run_mac(&format!("{OPEN}\n{FLOORS}\n{}", r##"
+        local _, _, W = T.pageOn({ osc = 2, strips = { 52, 52, drums = 34, trig = 52 }, meters = { drums = 26 } })
+        local function again(spec)
+          S.focusAtOnce, S.focusLands = true, function() S.front, S.chain = W, { W } end
+          T.pageKey()
+          T.event()
+          T.paintAvenger(98, 84, 1.6, spec)
+          T.openPage()
+          T.event()
+          return T.lastPost("state").state.osc_panel
+        end
+        -- (a)
+        local o = T.lastPost("state").state.osc_panel
+        local f, byMean, line = T.floors()
+        T.ok(o.selected_type == "drums" and f.Drums.floor == 34 and f.Drums.mean > 55 and not byMean, line)
+        T.ok(T.count("— Drums, by 18.0, the others within 0.0") == 1, T.dump())
+        -- (b)
+        o = again({ osc = 2, strips = { 52, 52, drums = 34, trig = 52 }, meters = { [1] = 26, drums = 26 } })
+        f, byMean, line = T.floors()
+        T.ok(o.selected_type == "drums" and f["OSC 1"].mean > 58 and f["OSC 1"].floor == 52 and not byMean, line)
+        -- (c)
+        o = again({ osc = 1, strips = { 44, drums = 58, trig = 58 }, meters = { [1] = 60 } })
+        f, byMean, line = T.floors()
+        T.ok(o.selected_type == "osc" and o.selected_index == 1 and f["OSC 1"].floor == 44 and not byMean, line)
+        -- (d): the last read that decided one had OSC 1, so no Drums section is kept.
+        o = again({ osc = 2, strips = { 52, 52, drums = 52, trig = 52 }, meters = { [1] = 26, drums = 26 } })
+        f, byMean, line = T.floors()
+        T.ok(o.selected_type == nil and o.drums_kept == nil and T.count("— none: ") == 1, line)
+    "##));
+}
+
+/// A strip under Avenger's MENU popup, as the developer's Mac test of 2026-10-31 had it at every page
+/// key with the popup left open (mt-verified, finding 4A): OSC 1's dot under the popup, the strip's
+/// text holding the menu's items. Covered — read/strip.luau, A COVERED STRIP: no selection, no Mute
+/// or Solo, no Drums switch, no name; the strip's text not read at all, the tab never named
+/// "Load preset.. OSC 1 Save"; the page told (`strip_covered`) and its Drums section kept from the
+/// last read that decided Drums (`drums_kept`), every value of it not read.
+#[test]
+fn a_strip_under_avengers_menu_is_not_read_and_not_kept() {
+    run_mac(&scenario(r##"
+        local _, _, W = T.pageOn({ osc = 2, selected = "drums", pattern = true },
+          { strip = "Load preset.. OSC 1 + DRUMS TRIG Save" })
+        T.ok(T.lastPost("state").state.osc_panel.selected_type == "drums", "Drums read first")
+        S.focusAtOnce, S.focusLands = true, function() S.front, S.chain = W, { W } end
+        T.pageKey()
+        T.event()
+        T.paintAvenger(98, 84, 1.6, { osc = 2, selected = "drums", pattern = true, popup = { 240, 26, 297.5, 75 } })
+        local reads = #S.recognized
+        T.openPage()
+        T.event()
+        local o = T.lastPost("state").state.osc_panel
+        T.ok(o.strip_covered == true and o.selected_type == nil and o.drum_pattern == nil and o.mute_states == nil
+          and o.names == nil and o.drums_kept == true, T.jsonEncode(o))
+        T.ok(T.count("[avenger] [read] strip: covered — no dot at OSC 1's place; nothing of the strip is read") == 1, T.dump())
+        for i = reads + 1, #S.recognized do
+          local n = S.recognized[i].name or ""
+          T.ok(n ~= "strip" and string.sub(n, 1, 4) ~= "osc ", "nothing of the strip read as text: " .. n)
+        end
+        T.ok(T.count("the tabs read whole") == 0, T.dump())
+        -- What the page shows of it.
+        local js = T.repoText("modules/vps-avenger/ui/panel.js")
+        T.ok(string.find(js, "strip_covered: s.osc_panel.strip_covered === true", 1, true) ~= nil
+          and string.find(js, "if (oscPanel.selected_type === 'drums' || drumsKept) {", 1, true) ~= nil, "panel.js")
+        -- The menu's items' words in the text of a strip whose dots were read: covered all the same.
+        local G = { 100, 220, 180 }
+        S.focusAtOnce, S.focusLands = true, function() S.front, S.chain = W, { W } end
+        T.pageKey()
+        T.event()
+        T.paintAvenger(98, 84, 1.6, { osc = 2, selected = "drums", dots = { { 246, 3, G }, { 266, 3, G } } })
+        T.openPage()
+        T.event()
+        o = T.lastPost("state").state.osc_panel
+        T.ok(o.strip_covered == true and o.selected_type == nil and o.names == nil
+          and T.count("strip: covered — its text holds MENU's item 'load preset'") == 1, T.dump())
+        T.ok(T.held() == 0, "every picture released: " .. T.held())
+    "##));
+}
+
+/// The ring on a covered strip: its Oscillator stepper says the strip covered, and every PRESS reads
+/// it again — a new picture each — where until 0.16 one covered read answered four presses with "the
+/// oscillator tabs cannot be counted now" and no picture (mt-verified, findings 4A and 4C). The
+/// announcement says what that read found. Uncovered, the next press steps; a click whose read before
+/// it is covered clicks nothing.
+#[test]
+fn the_rings_strip_under_a_menu_is_read_again_at_each_press() {
+    run_mac(&scenario(r##"
+        local header = T.avengerAt80("LD Lead 1")
+        T.words({})
+        local COVERED = { osc = 2, selected = "osc", index = 1, popup = { 240, 26, 297.5, 75 } }
+        T.paintAvenger(98, 84, 1.6, COVERED)
+        local osc = T.indexOf(header, "Oscillator")
+        header.focus = osc - 1
+        T.tab()
+        T.ok(T.lastSaid() == "Oscillator, the oscillator strip is covered now, perhaps by a menu of VPS Avenger's, slider",
+          T.said())
+        local snaps, clicks = S.snaps, #S.clicks
+        T.stepAt(header, osc, 1)
+        T.ok(T.lastSaid() == "Oscillator: the oscillator strip is covered now, perhaps by a menu of VPS Avenger's"
+          and S.snaps == snaps + 1, "a new picture at the press: " .. (S.snaps - snaps) .. " " .. T.said())
+        T.stepAt(header, osc, 1)
+        T.ok(S.snaps == snaps + 2 and #S.clicks == clicks, "and at the next")
+        -- Mute pressed on it: nothing clicked.
+        T.pressAt(header, T.indexOf(header, "Mute"))
+        T.ok(#S.clicks == clicks and string.find(T.lastSaid() or "", "covered now", 1, true) ~= nil, T.said())
+        -- The menu gone: the next press reads it and steps.
+        T.paintAvenger(98, 84, 1.6, { osc = 2, selected = "osc", index = 1 })
+        T.stepAt(header, osc, 1)
+        T.ok(#S.clicks == clicks + 1, "OSC 2 clicked: " .. T.clickAt())
+        T.repaint({ osc = 2, selected = "osc", index = 2 })
+        T.tick(3)
+        T.ok(T.held() == 0, "every picture released: " .. T.held())
+    "##));
+}
+
+/// OSC 2's and OSC 3's dots seen and OSC 1's missing: the spacing alone would count three, and the
+/// strip is covered all the same — OSC 1 is always there, its dot drawn in one of three colours in
+/// every read of both logs that found dots (read/strip.luau, A COVERED STRIP). No tab selected, and a
+/// click on it refused. A menu that counts open over the overlay covers it too (O:menuOpen).
+#[test]
+fn a_missing_first_dot_with_the_others_seen_is_covered() {
+    run_mac(&scenario(r##"
+        local G = { 100, 220, 180 }
+        local w = (536 - 244) / 3
+        local SPEC = { osc = 3, selected = "osc", index = 2, dots = { { 244 + w + 2, 3, G }, { 244 + 2 * w + 2, 3, G } } }
+        local _, _, W = T.pageOn(SPEC)
+        local o = T.lastPost("state").state.osc_panel
+        T.ok(o.strip_covered == true and o.selected_type == nil and o.count == nil, T.jsonEncode(o))
+        T.ok(T.count("3 oscillators by their spacing") == 1 and T.count("strip: covered — no dot at OSC 1's place") == 1,
+          T.dump())
+        local clicks = #S.clicks
+        T.tripFrom({ action = "toggle_osc_mute", args = { index = 2 }, focused = true }, W)
+        T.settle(2)
+        T.ok(#S.clicks == clicks and T.lastPost("error").text == "An oscillator's Mute: the oscillator strip is covered now, "
+          .. "perhaps by a menu of VPS Avenger's; nothing was clicked", T.lastPost("error").text)
+        -- A menu counting open over the overlay (O:menuOpen) covers it, whatever its dots; dots not read
+        -- at all are no cover: then the strip is not counted.
+        local Strip = S.included["modules/vps-avenger/src/read/strip.luau"][1]
+        local Open = S.included["modules/vps-avenger/src/read/open.luau"][1]
+        local P = S.included["modules/vps-avenger/src/read/picture.luau"][1]
+        local pl = P.placer({ client = { x = 98, y = 84, w = 1394, h = 898 } }, 1.6, 80)
+        local first = { mid = 98 + 1.6 * 247.25 }
+        T.ok(Strip.coverOf(pl, { first }, true, true) == "a menu counts open over the overlay"
+          and Strip.coverOf(pl, { first }, true, false) == nil and Strip.coverOf(pl, {}, false, false) == nil
+          and Strip.coverOf(pl, {}, true, false) == "no dot at OSC 1's place", "the cover's rule")
+        T.ok(Open.menuOpen({ menuOpen = function() return true end }) == true and Open.menuOpen(nil) == false
+          and Open.menuOpen({ menuOpen = function() error("gone") end }) == false, "O:menuOpen asked, guarded")
+    "##));
+}
+
+/// The OSC tabs' names are read from 32 to 38.3 units (tables/strip.luau, NAME_TOP and NAME_BOTTOM):
+/// clear of the tab's coloured rule above them (30.6 to 31.9) and of the level meter below them
+/// (38.55 to 39.15), every glyph row in (33.75 to 37.95, the descender of "Arp") — a pixel taken by
+/// its middle, as the picture draws it — at the factors 1, 1.6, 1.589 (the second Windows session's),
+/// 2 and 4, with Avenger's corner placed up to half a pixel either way (mt-verified, finding 11). The
+/// project's 28 to 42 held both; 38.75, as first proposed, takes the meter's row at 1 and at 1.6.
+#[test]
+fn the_osc_name_regions_leave_out_the_tabs_rule_and_the_meter() {
+    run_mac(&scenario(r##"
+        local ST = T.source("modules/vps-avenger/src/tables/strip.luau")(T.host)
+        T.ok(ST.NAME_TOP == 32 and ST.NAME_BOTTOM == 38.3, "the bounds")
+        local function check(top, bottom)
+          local bad = {}
+          for _, k in ipairs({ 1, 1.6, 1.589, 2, 4 }) do
+            for _, d in ipairs({ -0.5, -0.25, 0, 0.25, 0.5 }) do
+              local cy = 120 + d
+              local y1, y2 = math.floor(cy + k * top + 0.5), math.floor(cy + k * bottom + 0.5)
+              local function rows(a, b)
+                local out = {}
+                for j = 100, 400 do
+                  if j + 0.5 >= cy + k * a and j + 0.5 < cy + k * b then out[#out + 1] = j end
+                end
+                return out
+              end
+              for _, j in ipairs(rows(33.75, 37.95)) do
+                if j < y1 or j >= y2 then bad[#bad + 1] = string.format("%g/%g: glyph row %d out", k, d, j) end
+              end
+              for _, span in ipairs({ { 30.6, 31.9, "rule" }, { 38.55, 39.15, "meter" } }) do
+                for _, j in ipairs(rows(span[1], span[2])) do
+                  if j >= y1 and j < y2 then bad[#bad + 1] = string.format("%g/%g: %s row %d in", k, d, span[3], j) end
+                end
+              end
+            end
+          end
+          return bad
+        end
+        local bad = check(ST.NAME_TOP, ST.NAME_BOTTOM)
+        T.ok(#bad == 0, table.concat(bad, "; "))
+        T.ok(#check(28, 42) > 0 and #check(32, 38.75) > 0, "the old and the first proposed bounds fail it")
+    "##));
+}
+
+/// A Mute or a Solo changes no tab's selection, and its read after the click may decide none — the
+/// level meter lights with the un-muted oscillator's sound: that read's selection is not posted
+/// (src/act.luau, `leaves`), so the ring's tab is not wiped and the next Mute still clicks and is said
+/// by its tab (avw2-verified, X-F7 and A8).
+#[test]
+fn a_mute_whose_read_after_decides_no_tab_leaves_the_selected_tab_alone() {
+    run_mac(&scenario(r##"
+        local header = T.avengerAt80("LD Lead 1")
+        T.words({})
+        T.paintAvenger(98, 84, 1.6, { osc = 2, selected = "osc", index = 1 })
+        local ST = T.source("modules/vps-avenger/src/tables/strip.luau")(T.host)
+        local at = math.floor(98 + 1.6 * (ST.tabX(1, 2) + ST.MUTE_X_OFFSET) + 0.5) .. "," .. math.floor(84 + 1.6 * ST.MUTE_Y + 0.5)
+        local mute = T.indexOf(header, "Mute")
+        header.focus = mute - 1
+        T.tab()
+        T.pressAt(header, mute)
+        T.ok(T.clickAt() == at, "OSC 1's Mute: " .. T.clickAt())
+        -- After it, no tab stands out: every strip alike.
+        T.repaint({ osc = 2, strips = { 52, 52, drums = 52, trig = 52 }, mute = { [1] = true } })
+        T.tick(3)
+        T.ok(T.lastSaid() == "OSC 1 Mute ON", T.said())
+        -- The ring's tab kept: Mute announced by it, from what was read.
+        header.focus = mute - 1
+        T.tab()
+        T.ok(string.find(T.lastSaid() or "", "OSC 1, on", 1, true) ~= nil, T.said())
+        local clicks = #S.clicks
+        T.repaint({ osc = 2, selected = "osc", index = 1, mute = { [1] = true } })
+        T.pressAt(header, mute)
+        T.ok(#S.clicks == clicks + 1 and T.clickAt() == at, "clicked again: " .. T.clickAt())
+        T.repaint({ osc = 2, selected = "osc", index = 1 })
+        T.tick(3)
+        T.ok(T.lastSaid() == "OSC 1 Mute OFF", T.said())
+        T.ok(T.held() == 0, "every picture released: " .. T.held())
+    "##));
+}
+
+/// A choice of tab whose read after the click decides no tab is looked on from within the bound, as a
+/// drum action's is: the tab read once one decides, and at the bound the read before kept and said as
+/// not read — never a change with the selection posted as nil, which hid the page's Drums section
+/// (mt-verified, finding 4C). Another tab reading selected than the one clicked is said so.
+#[test]
+fn a_tab_click_whose_read_after_decides_nothing_is_looked_on_from() {
+    run_mac(&scenario(r##"
+        local _, _, W = T.pageOn({ osc = 2, selected = "osc", index = 1 })
+        T.tripFrom({ action = "select_drums_tab", args = {}, focused = true }, W)
+        T.repaint({ osc = 2, strips = { 52, 52, drums = 52, trig = 52 } })
+        T.tick(2)
+        T.ok(T.count("what it shows does not hold") >= 1, T.dump())
+        T.repaint({ osc = 2, selected = "drums" })
+        T.settle()
+        T.ok(T.lastPost("state").state.osc_panel.selected_type == "drums"
+          and T.count("[avenger] [act] 'The Drums tab': changed — Drums selected") == 1, T.dump())
+        -- Never decided by the bound.
+        T.event()
+        T.tripFrom({ action = "select_trig_tab", args = {}, focused = true }, W)
+        T.repaint({ osc = 2, strips = { 52, 52, drums = 52, trig = 52 } })
+        T.tick(16)
+        T.ok(T.lastPost("error").text == "The Trig tab: the selected tab cannot be read now"
+          and T.lastPost("state").state.osc_panel.selected_type == "drums", T.lastPost("error").text)
+        -- OSC 2 reads selected after Trig's click.
+        T.event()
+        T.tripFrom({ action = "select_trig_tab", args = {}, focused = true }, W)
+        T.repaint({ osc = 2, selected = "osc", index = 2 })
+        T.settle()
+        T.ok(T.lastPost("error").text == "The Trig tab: Trig was clicked; OSC 2 reads selected", T.lastPost("error").text)
         T.ok(T.held() == 0, "every picture released: " .. T.held())
     "##));
 }

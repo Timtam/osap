@@ -3,11 +3,13 @@
 -- the page's trips (src/actions/osc.luau, src/actions/macros.luau, src/act.luau):
 --
 --   Oscillator            a stepper over OSC 1 to n, Drums and Trig: the tab read as selected, an
---                         OSC tab by its name as the page names it — read off the screen where an
---                         action of the ring's read the names, else as the page last read it under
---                         the same preset's name and count, else the preset database's for the
---                         preset read where this session edited none of its tabs, said as it is,
---                         else Avenger's "OSC 1" (src/actions/osc.luau, Osc.oscName;
+--                         OSC tab by its name as the page names it — since 0.16 the preset
+--                         database's FIRST where it has the preset and this session edited none of
+--                         its tabs, as the page key's read checked it (marked where the two
+--                         disagreed), which reverses 0.14's order, the screen's name first (the
+--                         maintainer's decision of 2026-10-31: read/open.luau, THE DATABASE FIRST);
+--                         elsewhere as the page last read it under the same preset's name and
+--                         count; else Avenger's "OSC 1" (src/actions/osc.luau, Osc.oscName;
 --                         read/open.luau, wordsFor; the avenger_control developer's report of
 --                         2026-10-26). These cost no read: the strip's read places the preset
 --                         anyway
@@ -15,14 +17,17 @@
 --                         another tab's Solo said as silenced by it (read/strip.luau,
 --                         Strip.silencedBy); Return clicks it
 --   Add oscillator        Return adds one, none at eight
---   the Drums tab's group (the plan's slice 8), shown only once the strip read in this stay reads the
---   Drums tab selected, through the specs of src/actions/drums.luau:
+--   the Drums tab's group (the plan's slice 8), shown once the strip read in this stay reads the
+--   Drums tab selected, and kept — "selection not read now" — while a later read of it decides no
+--   tab, until one DECIDES another (the developer's Mac test of 2026-10-31: an undecided read before
+--   Slot mute hid the whole group; the maintainer's decision of that day, B4's variant that claims
+--   nothing), through the specs of src/actions/drums.luau:
 --     Drum pattern        on or off as read; Return clicks it
 --     Drum mode           a stepper over DRUMKIT and SEQUENCE: the mode read
 --     Drum lock           locked or unlocked as read; Return clicks LOCK
 --     Drum slot           a stepper over the twelve slots: the slot read as selected, by its
---                         factory name — the ring reads no text of the table (the slots' names are
---                         twelve text regions, too slow on an Intel Mac to read on a Tab)
+--                         role in the kit — the twelve fixed names Avenger draws abbreviated, never
+--                         read (read/drums.luau, THE NAMES)
 --     Slot mute, Slot solo   the selected slot's, on or off as read; Return clicks it
 --     Central tab         a stepper over EDITOR, ARP, DRUM SQ and STEP SQ: the central tab read
 --     and in it DRUM SQ's group (the plan's slice 8, its other half), shown only once a read in this
@@ -42,9 +47,12 @@
 --                         Reset transpose, Reset fine tune, Reset random pitch — as the tool's panel
 --                         has them, separate buttons: a double-click on the knob (the right button for
 --                         Pan and Random Pitch), then the knob read
---   Macro tab             a stepper over the macro tabs: the tab read as shown, of how many
+--   Macro tab             a stepper over the macro tabs: the tab read as shown, of how many — the
+--                         preset database's count where it has the preset (read/macros.luau)
 --   Add macro tab, Delete last macro tab
---   Macro 1 to 3          a knob's name and amount as read; Return turns it as the oscillator's knobs
+--   Macro 1 to 3          a knob's name and amount as read — the name the preset database's where it
+--                         has the preset, no field read for it (read/open.luau, THE DATABASE
+--                         FIRST); Return turns it as the oscillator's knobs
 --                         are turned (above; the tool's sentence for a macro: "… set the amount of
 --                         the Cutoff Slider …"); each followed by Reset macro 1 to 3, the tool's
 --                         separate reset: a double-click, then the amount read
@@ -53,6 +61,10 @@
 -- A part is read when one of its controls is first announced or pressed in a stay — the overlay's
 -- onActivate may not wait for a read (docs/api/overlay.md, "Where a hook runs") — and again after
 -- each of the ring's own actions on it, whose read after the click is what the control says next.
+-- A read of the strip that DECIDED no tab — the strip covered by a menu of Avenger's, or no tab
+-- standing out (read/strip.luau) — is announced as it was read, and read again at the next PRESS:
+-- only a decided read marks the part read (mt-verified, findings 4A and 4C; until 0.16 one covered
+-- read answered four presses with "cannot be counted now" and no new picture).
 -- Forgotten when the overlay leaves the front, where the preset may have changed with nothing read
 -- since (main.luau's `unseen`, ◀ and ▶), and at every trip of the page's, which acts on Avenger
 -- while the ring is away. One action at a time: a press while one is out sends nothing and says so
@@ -90,20 +102,24 @@ local D = host.include("src/tables/drums.luau")
 local C = host.include("src/tables/centre.luau")
 local Strip = host.include("src/read/strip.luau")
 local Am = host.include("src/amount.luau")
+local S = host.include("src/state.luau")
 
 local Ring = {}
 
 local R = nil -- main.luau's ring helpers (Ring.build)
 
--- What was read in this stay: the values, and which parts. `gen` counts the actions, so that an
--- action that ends after the cache was forgotten writes nothing into the new one. `centralAt`: when
--- the central tab was last read into it (host.now). `off`: by part, what a part that lay off the
--- screen at its last try says (read/open.luau, Open.offScreen).
-local cache = { values = {}, parts = {}, gen = 0, off = {} }
+-- What was read in this stay: the values, and which parts — `parts` those read with a decided
+-- selection where they read the strip, `seen` those read at all. `gen` counts the actions, so that
+-- an action that ends after the cache was forgotten writes nothing into the new one. `centralAt`:
+-- when the central tab was last read into it (host.now). `off`: by part, what a part that lay off
+-- the screen at its last try says (read/open.luau, Open.offScreen). `tab`: the tab the last read
+-- that decided one read as selected — the Drums group is kept by it while a later read decides
+-- none, and claims nothing of it.
+local cache = { values = {}, parts = {}, seen = {}, gen = 0, off = {} }
 local pending = nil -- the gen of the action out, or nil
 
 function Ring.forget()
-  cache = { values = {}, parts = {}, gen = cache.gen + 1, off = {} }
+  cache = { values = {}, parts = {}, seen = {}, gen = cache.gen + 1, off = {} }
   pending = nil
 end
 
@@ -144,16 +160,48 @@ local function say(words, quiet)
 end
 
 -- What part `name`'s read gives, merged: each key it read replaced, as state.luau's S.part does.
+-- The part marked read only where it decided its strip's selection (`selectionState` "read") — a
+-- part with no strip always, and a read that leaves the selection out (a Mute's: src/act.luau,
+-- `leaves`) as it was; marked seen whatever it found.
 local function merge(name, keys, values)
   for _, k in ipairs(keys) do cache.values[k] = values[k] end
   noteCentral(keys)
-  cache.parts[name] = true
+  local judged = Open.PARTS[name] and Open.PARTS[name].strip and table.find(keys, "selectionState") ~= nil
+  local decided = not judged or values.selectionState == "read"
+  if judged and decided then cache.tab = values.selectedType end
   -- The tab part reads the strip and the knobs too; the knobs, the drums and the central parts the
-  -- strip.
-  if name == "tab" then cache.parts.strip, cache.parts.knobs = true, true end
-  if name == "knobs" or name == "drums" or name == "central" then cache.parts.strip = true end
-  -- The central part reads DRUM SQ as the drumsq part does, and the strip besides.
-  if name == "central" then cache.parts.drumsq = true end
+  -- strip; the central part DRUM SQ as the drumsq part does.
+  local also = { name }
+  if name == "tab" then also = { name, "strip", "knobs" } end
+  if name == "knobs" or name == "drums" then also = { name, "strip" } end
+  if name == "central" then also = { name, "strip", "drumsq" } end
+  for _, n in ipairs(also) do
+    cache.seen[n] = true
+    if decided then
+      cache.parts[n] = true
+    elseif judged and n ~= "drumsq" then
+      cache.parts[n] = nil
+    end
+  end
+  if judged and not decided then
+    log(string.format("the %s read decided no tab (%s) — read again at the next press", name,
+      tostring(values.selectionState)))
+  end
+end
+
+-- Whether the Drums group is shown: the strip read selected the Drums tab, or decided none and the
+-- last read that decided one had Drums (cache.tab).
+local function drumsShown()
+  local t = cache.values.selectedType
+  return t == "drums" or (t == nil and cache.tab == "drums")
+end
+
+-- What a Drums group's control says instead of its value where the strip does not read the Drums
+-- tab selected now: the strip covered, or the selection not read; nil where it reads Drums.
+local function drumsUnread(v)
+  if v.selectedType == "drums" then return nil end
+  if v.stripCovered then return Strip.COVERED end
+  return "selection not read now"
 end
 
 -- Whether the words for the OSC tabs this stay's read holds (read/open.luau's wordsFor) were taken
@@ -167,10 +215,13 @@ local function placedNow(name)
 end
 
 -- Part `name` read now, unless it was in this stay with its words taken for the name known now
--- (placedNow) — in the handler that asks, where the picture and its questions wait. The values,
--- or nil when nothing could be read.
-local function ensure(o, name, text)
-  if cache.parts[name] and (not text or cache.parts[name .. " text"]) and placedNow(name) then
+-- (placedNow) — in the handler that asks, where the picture and its questions wait. A PRESS
+-- (`press`: a step, an activation) reads again a strip whose last read decided no tab; an
+-- announcement says what that read found. The values, or nil when nothing could be read.
+local function ensure(o, name, text, press)
+  local have
+  if press then have = cache.parts[name] else have = cache.seen[name] end
+  if have and (not text or cache.parts[name .. " text"]) and placedNow(name) then
     return cache.values
   end
   if pending then return nil end
@@ -189,7 +240,7 @@ local function ensure(o, name, text)
   end
   local gen = cache.gen
   local okR, v, keys = pcall(Open.part, snap, name, { pl = pl, text = text, preset = R.lastName(),
-    macroCount = cache.values.macroCount })
+    macroCount = cache.values.macroCount, menuOpen = Open.menuOpen(o) })
   snap:release()
   if not okR then
     log("the " .. name .. " could not be read: " .. tostring(v))
@@ -212,7 +263,14 @@ local function run(o, label, spec, quiet)
   local refused = false
   Act.run(o, spec, function(result)
     if pending == gen then pending = nil end
-    if not result or gen ~= cache.gen then return end
+    if not result then return end
+    -- What the action did that no read shows (an Add or Delete macro tab that changed the count:
+    -- state.luau, S.macrosEdited), noted in the window as a trip of the page's notes it.
+    if result.facts then
+      local id = Open.window()
+      for k, v in pairs(result.facts) do S.note(id, k, v) end
+    end
+    if gen ~= cache.gen then return end
     if result.part then
       merge(spec.part, result.part.keys, result.part.values)
       if spec.textAfter then cache.parts[spec.part .. " text"] = true end
@@ -270,17 +328,18 @@ local function oscillatorStepper(ov)
       if pending then return nil end
       local v = ensure(o, "strip")
       if not v then return unread("strip") end
+      if v.stripCovered then return Strip.COVERED end
       return Osc.tabWords(v) or "not read"
     end,
     onStep = function(dir, o)
       if busy("Oscillator") then return false end
-      local v = ensure(o, "strip")
+      local v = ensure(o, "strip", nil, true)
       local n = v and v.oscCount
       local kind, index = nil, nil
       if v then kind, index = selectedTab(v) end
       if not (n and kind) then
-        say("Oscillator: " .. (v and n and "the selected tab cannot be read now"
-          or unread("strip", "the oscillator tabs cannot be counted now")))
+        say("Oscillator: " .. ((v and v.stripCovered) and Strip.COVERED or (v and n and "the selected tab cannot be read now"
+          or unread("strip", "the oscillator tabs cannot be counted now"))))
         return false
       end
       local at = kind == "osc" and index or (kind == "drums" and n + 1 or n + 2)
@@ -295,9 +354,6 @@ local function oscillatorStepper(ov)
         spec = built("Oscillator", Osc.select_osc_tab, { index = to })
       elseif to == n + 1 then
         spec = built("Oscillator", Osc.select_drums_tab, {})
-        -- The slots' names are twelve text regions, too slow on an Intel Mac to read on a step
-        -- (above): the ring reads none.
-        if spec then spec.textAfter = nil end
       else
         spec = built("Oscillator", Osc.select_trig_tab, {})
       end
@@ -316,6 +372,7 @@ local function switch(ov, title)
       if pending then return nil end
       local v = ensure(o, "strip")
       if not v then return unread("strip") end
+      if v.stripCovered then return Strip.COVERED end
       local kind, index = selectedTab(v)
       local on
       if kind == "osc" then
@@ -336,11 +393,11 @@ local function switch(ov, title)
     end,
     onActivate = function(o)
       if busy(title) then return end
-      local v = ensure(o, "strip")
+      local v = ensure(o, "strip", nil, true)
       local kind, index = nil, nil
       if v then kind, index = selectedTab(v) end
-      if not kind then return say(title .. ": " .. (v and "the selected tab cannot be read now" or unread("strip",
-        "the selected tab cannot be read now"))) end
+      if not kind then return say(title .. ": " .. ((v and v.stripCovered) and Strip.COVERED
+        or (v and "the selected tab cannot be read now" or unread("strip", "the selected tab cannot be read now")))) end
       local build = Osc["toggle_" .. kind .. "_" .. lower]
       local spec = built(title, build, { index = index })
       if spec then run(o, title, spec) end
@@ -427,18 +484,22 @@ end
 
 -- A button of the group: `text(v)` its words from the part `part` read, `act(v)` the builder and
 -- its arguments, or nil and why — said.
-local function drumButton(ov, label, part, text, act)
+-- `drums`: a control of the Drums group, which says why its value is not said where the strip does
+-- not read the Drums tab selected now (drumsUnread).
+local function drumButton(ov, label, part, text, act, drums)
   ov:addCustomButton({
     label = label,
     text = function(o)
       if pending then return nil end
       local v = ensure(o, part)
       if not v then return unread(part) end
+      local why = drums and drumsUnread(v)
+      if why then return why end
       return text(v)
     end,
     onActivate = function(o)
       if busy(label) then return end
-      local v = ensure(o, part)
+      local v = ensure(o, part, nil, true)
       if not v then return say(label .. ": " .. unread(part, "VPS Avenger cannot be read now")) end
       local build, args, why = act(v)
       if not build then return say(label .. ": " .. why) end
@@ -459,13 +520,18 @@ local function drumStepper(ov, label, part, count, at, words, step)
       if pending then return nil end
       local v = ensure(o, part)
       if not v then return unread(part) end
+      local why = drumsUnread(v)
+      if why then return why end
       return words(v)
     end,
     onStep = function(dir, o)
       if busy(label) then return false end
-      local v = ensure(o, part)
+      local v = ensure(o, part, nil, true)
       local now, why = nil, unread(part, "VPS Avenger cannot be read now")
-      if v then now, why = at(v) end
+      if v then
+        now, why = at(v)
+        if v.selectedType ~= "drums" then now, why = nil, drumsUnread(v) end
+      end
       if not now then
         say(label .. ": " .. why)
         return false
@@ -577,17 +643,17 @@ local function slotSwitch(ov, label, button)
     return D.PART_LABELS[s] .. ", " .. (on == nil and "not read" or (on and "on" or "off"))
   end, function(v)
     local s, why = selectedSlot(v)
-    if not s then return nil, nil, why end
+    if not s then return nil, nil, v.selectedType ~= "drums" and drumsUnread(v) or why end
     return Drums.toggle_drumkit_button, { index = s, button = button }
-  end)
+  end, true)
 end
 
 local function drumsGroup(ov)
-  ov:group(function() return cache.values.selectedType == "drums" end, function(g)
+  ov:group(drumsShown, function(g)
     drumButton(g, "Drum pattern", "strip", function(v)
       if v.drumPattern == nil then return "not read" end
       return v.drumPattern and "on" or "off"
-    end, function() return Drums.toggle_drum_pattern, {} end)
+    end, function() return Drums.toggle_drum_pattern, {} end, true)
     drumStepper(g, "Drum mode", "strip", #MODE_ORDER, function(v)
       if v.drumMode == nil then return nil, "the drum mode cannot be read now" end
       return table.find(MODE_ORDER, v.drumMode)
@@ -596,7 +662,7 @@ local function drumsGroup(ov)
     drumButton(g, "Drum lock", "strip", function(v)
       if v.drumLock == nil then return "not read" end
       return v.drumLock and "locked" or "unlocked"
-    end, function() return Drums.select_drum_mode, { mode = "lock" } end)
+    end, function() return Drums.select_drum_mode, { mode = "lock" } end, true)
     drumStepper(g, "Drum slot", "drums", #D.PART_LABELS, selectedSlot, function(v)
       local s = v.kitSelected
       if not s then return "not read" end

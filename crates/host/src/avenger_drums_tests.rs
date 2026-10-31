@@ -8,18 +8,20 @@
 //! modes and the lock, a slot's name, its Mute, Solo, Lock and Loop, the drumkit's Back and Next and a
 //! slot's Back, Next and Edit Sample are clicked where the tool clicks them, through the overlay's
 //! frame and factor, and what they change is READ after: every slot's buttons (a Solo that mutes the
-//! others shows so, one that does not shows that), the slot selected by its background — one row that
-//! stands out, or "not read" — and the slots' names as text. A slot's menu is right-clicked, its item
+//! others shows so, one that does not shows that) and the slot selected by its background — one row
+//! that stands out, or "not read". No slot's name is read: the twelve slots are Avenger's fixed roles
+//! (the maintainer's decision of 2026-10-31), and the drumkit's and a slot's Back and Next send one
+//! click, said as sent, and read the switches after it. A slot's menu is right-clicked, its item
 //! chosen in Avenger's painted popup, and Copy Sample to's target chosen in the submenu that item opens,
 //! followed by the drawn test and counted from the submenu's own top, which opens upward low in
 //! Avenger as JUCE opens one (a Mac finding, unmeasured on Avenger's Windows toolkit, KalliGui); no
 //! submenu, or one too short for the target, is said, and the menu left open closed with
-//! Escape; Save Drumkit as waits for its file dialog. A name a text read missed is no change. Browse
-//! hands the keyboard over and decides by the slot's name read before and after Return; a knob is
-//! pressed, held and moved through the keys; its reset says what the change wait saw.
-//! The central tab is read after its click with any tab selected. The page key reads the table only on
-//! the Drums tab, the names only where the strip's dots gave the count. The ring's group shows only on
-//! the Drums tab. No picture is held at the end of any of it.
+//! Escape; Save Drumkit as waits for its file dialog. Browse hands the keyboard over and decides by
+//! the change wait on the slot's row right of its name after Return; a knob is pressed, held and moved
+//! through the keys; its reset says what the change wait saw. The central tab is read after its click
+//! with any tab selected. The page key reads the table only on the Drums tab. The ring's group shows
+//! on the Drums tab, and stays while a later read decides no tab. No picture is held at the end of
+//! any of it.
 
 use super::overlay_avenger_tests::{run, run_mac};
 
@@ -207,113 +209,93 @@ fn a_drum_action_off_the_drums_tab_clicks_nothing() {
 // The drumkit table.
 // ---------------------------------------------------------------------------------------------
 
-/// A read after Next taken while Avenger redraws — the Drums tab not read selected for a moment, as
-/// the second Mac test's log had it — is no answer (src/act.luau, `holds`): looked on from, and the
-/// kit said once the redraw is over; a redraw that never ends is said as that at the bound, the
-/// state left as read before the click — never "the Drums tab is not selected".
+/// A read after Next that does not read the Drums tab selected — the second Mac test's log had it
+/// after Next drumkit, taken then for a read while Avenger redraws and very probably the level meter
+/// (read/strip.luau, THE SELECTED TAB) — is no answer (src/act.luau, `holds`): looked on from, and the
+/// click said as sent once a read holds; one that never holds is said as sent all the same at the
+/// bound, the switches not read now — never an error, and never "the Drums tab is not selected" —
+/// the state left as read before the click (mt-verified, finding 5).
 #[test]
 fn a_read_taken_while_avenger_redraws_is_looked_on_from() {
     run_mac(&scenario(r##"
-        local _, _, W = T.pageOn(T.drums(), T.slotWords("KIT"))
+        local _, _, W = T.pageOn(T.drums())
         T.tripFrom({ action = "next_drumkit", args = {}, focused = true }, W)
         T.repaint(T.drums({ selected = "osc", index = 1 }))
         T.tick(2)
         T.ok(T.count("what it shows does not hold") >= 1 and T.count("'The next drumkit': changed") == 0, T.dump())
-        T.words(T.slotWords("KIT", { ["slot 1"] = "CR Wide" }))
-        T.repaint(T.drums())
+        T.repaint(T.drums({ pattern = true }))
         T.settle()
-        T.ok(T.count("[avenger] [act] 'The next drumkit': changed — Crash reads CR Wide") == 1
+        T.ok(T.count("[avenger] [act] 'The next drumkit': changed — Next drumkit sent") == 1
           and T.lastPost("error").text == "", T.lastPost("error").text)
-        T.ok(T.lastPost("state").state.osc_panel.selected_type == "drums", "the Drums tab, read")
+        T.ok(T.lastPost("state").state.osc_panel.selected_type == "drums"
+          and T.lastPost("state").state.osc_panel.drum_pattern == true, "the Drums tab, read after")
         T.event()
         T.tripFrom({ action = "next_drumkit", args = {}, focused = true }, W)
         T.repaint(T.drums({ selected = "osc", index = 1 }))
         T.tick(16)
-        T.ok(T.lastPost("error").text == "The next drumkit: VPS Avenger was still redrawing; what it shows now was not read",
+        T.ok(T.lastPost("error").text == "The next drumkit: sent; the drumkit's switches were not read now",
           T.lastPost("error").text)
+        T.ok(T.count("[avenger] [act] 'The next drumkit': unheld — sent; the drumkit's switches were not read now") == 1,
+          T.dump())
         T.ok(T.lastPost("state").state.osc_panel.selected_type == "drums", "the read before kept")
         T.ok(T.held() == 0, "every picture released: " .. T.held())
     "##));
 }
 
-/// The drumkit's Next at (623, 224.5) — (1095, 443) — with the twelve slots' names read before and after
-/// the click, in the one text read of each: the names that changed posted and in the log, up to three
-/// said; nothing changed is said at the bound, in SEQUENCE mode as the slots reading as before and
-/// the sequence not read; with no names read, the change wait's verdict.
+/// The drumkit's Next at (623, 224.5) — (1095, 443) — and Back at (616, 224.5) — (1084, 443): ONE
+/// click each, said as sent, with no text read before or after it and no name compared — the slots'
+/// names are Avenger's fixed roles, and comparing them said "nothing VPS Avenger shows changed" while
+/// the pattern switch had (the developer's Mac test of 2026-10-31, mt-verified finding 5). The change
+/// wait leaves the name column out, whose rows flash while a sequence plays; the switches read after
+/// it are posted. Nothing changed at the bound is said as sent too. In SEQUENCE mode without the lock
+/// the sequence is what was stepped; with the lock, the drumkit.
 #[test]
-fn back_and_next_read_the_slots_names_before_and_after() {
+fn back_and_next_send_one_click_and_say_it_sent() {
     run_mac(&scenario(r##"
-        local _, _, W = T.pageOn(T.drums(), T.slotWords("KIT"))
-        local reads = #S.recognized
+        local _, _, W = T.pageOn(T.drums())
+        local asked = T.recordSnapshots()
+        local reads, clicks = #S.recognized, #S.clicks
         T.tripFrom({ action = "next_drumkit", args = {}, focused = true }, W)
-        T.ok(T.clickAt() == "1095,443", "Next: " .. T.clickAt())
-        T.ok(T.slotReads(reads) == 12, "the names read before the click: " .. T.slotReads(reads))
-        T.words(T.slotWords("KIT", { ["slot 1"] = "CR Wide", ["slot 3"] = "RD Jazz", ["slot 10"] = "SD Tight",
-          ["slot 12"] = "BD 909", ["slot 8"] = "SD Rim" }))
-        T.repaint(T.drums())
+        T.ok(#S.clicks == clicks + 1 and T.clickAt() == "1095,443", "Next, once: " .. T.clickAt())
+        T.repaint(T.drums({ slots = { mute = { [3] = true } } }))
         T.settle()
-        T.ok(T.slotReads(reads) == 24, "and after it")
+        T.ok(#S.recognized == reads, "no text read: " .. (#S.recognized - reads))
+        T.ok(#S.clicks == clicks + 1, "one click in all")
         local o = T.lastPost("state").state.osc_panel
-        T.ok(o.drumkit_part_labels[1] == "CR Wide" and o.drumkit_part_labels[12] == "BD 909"
-          and o.drumkit_part_labels[2] == "KIT 2", tostring(o.drumkit_part_labels[1]))
-        T.ok(T.count("[avenger] [act] 'The next drumkit': changed — Crash reads CR Wide, Ride reads RD Jazz, "
-          .. "Snare 2 reads SD Rim, and 2 more") == 1, T.dump())
-        T.ok(T.lastPost("error").text == "", T.lastPost("error").text)
-        -- The same names again: nothing changed, at the bound.
+        T.ok(o.drumkit_mute_states[3] == true and o.drumkit_part_labels == nil, "the switches read after it, posted")
+        T.ok(T.count("[avenger] [act] 'The next drumkit': changed — Next drumkit sent") == 1
+          and T.lastPost("error").text == "", T.lastPost("error").text)
+        -- The name column, (271, …)-(318, …) — 531.6 to 606.8 on screen — out of the change wait's watch.
+        local waits = 0
+        for _, a in ipairs(asked) do
+          if a.change then
+            waits += 1
+            for _, w in ipairs(a.change.watch or {}) do
+              T.ok(w[1] >= 607 or w[3] <= 531, "a watched box clear of the names: " .. T.region(w))
+            end
+          end
+        end
+        T.ok(waits == 1, "one change wait: " .. waits)
+        -- Back, nothing changed: said as sent at the bound.
         T.event()
         T.tripFrom({ action = "previous_drumkit", args = {}, focused = true }, W)
-        -- Back at (616, 224.5), the middle of its ◀: 98 + 985.6 -> 1084.
         T.ok(T.clickAt() == "1084,443", "Back: " .. T.clickAt())
-        T.repaint(T.drums())
         T.tick(16)
-        T.ok(T.lastPost("error").text == "The previous drumkit: nothing VPS Avenger shows changed", T.lastPost("error").text)
-        -- One name missed by the read after, nothing repainted: a slot read once is no change, and the
-        -- change wait's verdict stands — unchanged at the bound.
-        T.event()
-        local now = table.clone(S.words)
-        T.tripFrom({ action = "next_drumkit", args = {}, focused = true }, W)
-        local missed = table.clone(now)
-        missed["slot 5"] = ""
-        T.words(missed)
-        T.tick(16)
-        T.ok(T.lastPost("error").text == "The next drumkit: nothing VPS Avenger shows changed", T.lastPost("error").text)
-        T.ok(T.count("redrew the drumkit") == 0 and T.count("Percussion 2 reads") == 0, T.dump())
-        -- The same with the picture changed: the change wait's verdict, "changed", and no name said
-        -- for it — never "unchanged" by taking the missed name as it was.
-        T.event()
-        T.words(now)
-        T.tripFrom({ action = "next_drumkit", args = {}, focused = true }, W)
-        T.words(missed)
-        T.repaint(T.drums())
-        T.settle()
-        T.ok(T.count("[avenger] [act] 'The next drumkit': changed — VPS Avenger redrew the drumkit") == 1
-          and T.count("Percussion 2 reads") == 0, T.dump())
-        T.words(now)
-        -- SEQUENCE mode, no lock: the sequence is not read.
+        T.ok(T.lastPost("error").text == "" and T.count("[avenger] [act] 'The previous drumkit': unchanged — Previous "
+          .. "drumkit sent") == 1, T.dump())
+        -- SEQUENCE mode, no lock: the sequence stepped.
         T.event()
         T.paintAvenger(98, 84, 1.6, T.drums({ mode = "sq" }))
         T.tripFrom({ action = "next_drumkit", args = {}, focused = true }, W)
         T.tick(16)
-        T.ok(T.lastPost("error").text == "The next drumkit: the slots read as before; the sequence is not read",
-          T.lastPost("error").text)
-        -- SEQUENCE with the lock: Back and Next step the drumkit, and nothing changed is said plainly.
+        T.ok(T.count("— Next sequence sent") == 1, T.dump())
+        -- SEQUENCE with the lock: the drumkit stepped.
         T.event()
         T.paintAvenger(98, 84, 1.6, T.drums({ mode = "sq", lock = true }))
         T.tripFrom({ action = "next_drumkit", args = {}, focused = true }, W)
         T.tick(16)
-        T.ok(T.lastPost("error").text == "The next drumkit: nothing VPS Avenger shows changed", T.lastPost("error").text)
-        -- No names read: the change wait decides.
-        T.event()
-        T.words({})
-        T.paintAvenger(98, 84, 1.6, T.drums())
-        T.tripFrom({ action = "next_drumkit", args = {}, focused = true }, W)
-        T.repaint(T.drums({ pattern = true }))
-        T.settle()
-        T.ok(T.count("[avenger] [act] 'The next drumkit': changed — VPS Avenger redrew the drumkit") == 2, T.dump())
-        T.event()
-        T.tripFrom({ action = "next_drumkit", args = {}, focused = true }, W)
-        T.tick(16)
-        T.ok(T.lastPost("error").text == "The next drumkit: nothing VPS Avenger shows changed", T.lastPost("error").text)
+        T.ok(T.count("'The next drumkit': unchanged — Next drumkit sent") == 1, T.dump())
+        T.ok(#S.recognized == reads, "still no text read")
         T.ok(T.held() == 0, "every picture released: " .. T.held())
     "##));
 }
@@ -459,14 +441,13 @@ fn lock_all_is_chosen_in_the_painted_slot_menu_and_every_lock_read() {
 /// Slot 2's Copy Sample to slot 5: the item at (615, 293) placed in the painted popup and, before its
 /// click, the drawn test's two pictures for the submenu, its region from the popup's right edge on;
 /// the submenu painted right of the popup and seen at 285, the target 5.75 + 4 × 11.5 below its top —
-/// (727, 368), the tool's (393, 176.5) within a point — chosen in it; both gone, the names read: slot
-/// 5 reads slot 2's. A submenu that never comes is said, and the popup left open closed with Escape
+/// (727, 368), the tool's (393, 176.5) within a point — chosen in it; both gone, the target's row
+/// redrawn said. A submenu that never comes is said, and the popup left open closed with Escape
 /// while it still counts open.
 #[test]
 fn copy_sample_to_opens_its_submenu_and_the_target_is_chosen_in_it() {
     run_mac(&scenario(r##"
-        local words = T.slotWords("KIT", { ["slot 2"] = "SN Crack", ["slot 5"] = "PC Shaker" })
-        local _, _, W = T.pageOn(T.drums(), words)
+        local _, _, W = T.pageOn(T.drums())
         T.tripFrom({ action = "drumkit_menu_item", args = { index = 2, item = "copy_sample_to", target_index = 5 },
           focused = true }, W)
         T.ok(T.clickAt() == "549,187" and S.clicks[#S.clicks].button == "right", "slot 2, right: " .. T.clickAt())
@@ -482,13 +463,12 @@ fn copy_sample_to_opens_its_submenu_and_the_target_is_chosen_in_it() {
         T.ok(T.count("[avenger] 'A drum slot's menu': the submenu at (381.9,125.6) 78.1x143.1 from Avenger's corner in "
           .. "50 % units, its first row 0.9 from its item's row; the target 51.8 below its top") == 1, T.dump())
         T.ok(T.count("— test 'drawn' sees a new popup at ") == 1, T.dump())
-        T.words(T.slotWords("KIT", { ["slot 2"] = "SN Crack", ["slot 5"] = "SN Crack" }))
         T.repaint(T.drums())
         T.settle(6)
-        local o = T.lastPost("state").state.osc_panel
-        T.ok(o.drumkit_part_labels[5] == "SN Crack" and T.lastPost().id == "drumkit-menu-2", tostring(o.drumkit_part_labels[5]))
-        T.ok(T.count("[avenger] [act] 'A drum slot's menu': changed — Copy Sample to chosen: Percussion 2 reads SN Crack") == 1,
-          T.dump())
+        T.ok(T.lastPost().id == "drumkit-menu-2", tostring(T.lastPost().id))
+        -- No slot's name read: what the change wait on the target's row saw is said.
+        T.ok(T.count("[avenger] [act] 'A drum slot's menu': changed — Copy Sample to chosen; VPS Avenger redrew Percussion "
+          .. "2's row") == 1, T.dump())
         T.ok(#S.clicks == clicks + 2, "clicked twice in all: " .. (#S.clicks - clicks))
         -- No submenu comes.
         T.event()
@@ -519,7 +499,7 @@ fn copy_sample_to_opens_its_submenu_and_the_target_is_chosen_in_it() {
 #[test]
 fn a_submenu_opened_upward_is_counted_from_its_own_top() {
     run_mac(&scenario(r##"
-        local _, _, W = T.pageOn(T.drums(), T.slotWords("KIT"))
+        local _, _, W = T.pageOn(T.drums())
         -- The target's click, with the submenu painted at `sub` once the item is clicked.
         local function swap(target, sub)
           T.event()
@@ -541,16 +521,16 @@ fn a_submenu_opened_upward_is_counted_from_its_own_top() {
         T.ok(on(c, 1) and c[1] == 727 and not on(c, 12), "slot 1 on the first row: " .. T.clickAt())
         T.ok(T.count("[avenger] 'A drum slot's menu': the submenu at (381.9,169.4) 78.1x135.6 from Avenger's corner in 50 % "
           .. "units, its first row -125.4 from its item's row; the target 5.8 below its top") == 1, "opened upward: " .. T.dump())
-        T.words(T.slotWords("KIT", { ["slot 1"] = "KIT 10", ["slot 10"] = "KIT 1" }))
         T.repaint(T.drums())
         T.settle(6)
-        T.ok(T.count("[avenger] [act] 'A drum slot's menu': changed — Snare 1 reads KIT 1, Crash reads KIT 10") == 1, T.dump())
+        T.ok(T.count("[avenger] [act] 'A drum slot's menu': changed — Swap Slot with chosen; VPS Avenger redrew both rows")
+          == 1, T.dump())
         c = swap(12, { 382, 168, 460, 306 })
         T.ok(on(c, 12), "slot 12 on the last row: " .. T.clickAt())
-        T.words(T.slotWords("KIT", { ["slot 1"] = "KIT 10", ["slot 10"] = "KIT 12", ["slot 12"] = "KIT 1" }))
         T.repaint(T.drums())
         T.settle(6)
-        T.ok(T.count("[avenger] [act] 'A drum slot's menu': changed — Snare 1 reads KIT 12, Bassdrum reads KIT 1") == 1, T.dump())
+        T.ok(T.count("[avenger] [act] 'A drum slot's menu': changed — Swap Slot with chosen; VPS Avenger redrew both rows")
+          == 2, T.dump())
         -- Four rows: too short for slot 12.
         local sent = #S.sent
         T.ok(swap(12, { 382, 168, 460, 214 }) == nil, "nothing chosen in it")
@@ -566,13 +546,14 @@ fn a_submenu_opened_upward_is_counted_from_its_own_top() {
     "##));
 }
 
-/// Swap Slot with: both rows' names read after it. Remove Sample: the slot's name read after it.
-/// Save Drumkit as: its file dialog, a window of the DAW's, waited for and Avenger in front again —
-/// "chosen"; with none within the bound, "no file dialog was seen".
+/// Swap Slot with and Remove Sample: what the change wait on their rows saw, said — no slot's name is
+/// read. Copy Slot to: the target's switches read after it, a Mute lit there a change. Save Drumkit
+/// as: its file dialog, a window of the DAW's, waited for and Avenger in front again — "chosen"; with
+/// none within the bound, "no file dialog was seen".
 #[test]
 fn swap_and_remove_are_read_back_and_save_waits_for_its_dialog() {
     run_mac(&scenario(r##"
-        local _, _, W = T.pageOn(T.drums(), T.slotWords("KIT", { ["slot 2"] = "SN Crack", ["slot 5"] = "PC Shaker" }))
+        local _, _, W = T.pageOn(T.drums())
         local function choose(args, after)
           T.event()
           T.tripFrom({ action = "drumkit_menu_item", args = args, focused = true }, W)
@@ -584,21 +565,19 @@ fn swap_and_remove_are_read_back_and_save_waits_for_its_dialog() {
           local clicks = #S.clicks
           T.paintAvenger(98, 84, 1.6, T.drums({ popup = { 282, 66, 380, 200 }, submenu = { 382, 145, 460, 290 } }))
           T.ok(T.untilClicks(clicks + 1), "the submenu's item: " .. T.dump())
-          T.words(T.slotWords("KIT", { ["slot 2"] = "PC Shaker", ["slot 5"] = "SN Crack" }))
           T.repaint(T.drums())
           T.settle(6)
         end)
-        T.ok(T.count("[avenger] [act] 'A drum slot's menu': changed — Open Hi-Hat reads PC Shaker, Percussion 2 reads SN Crack")
+        T.ok(T.count("[avenger] [act] 'A drum slot's menu': changed — Swap Slot with chosen; VPS Avenger redrew both rows")
           == 1, T.dump())
         -- Remove Sample on slot 2: (323, 64.5 + 126) -> (615, 389).
         choose({ index = 2, item = "remove_sample" }, function()
           T.ok(T.clickAt() == "615,389", "Remove Sample's row: " .. T.clickAt())
-          T.words(T.slotWords("KIT", { ["slot 2"] = "Empty", ["slot 5"] = "SN Crack" }))
           T.repaint(T.drums())
           T.settle(6)
         end)
-        T.ok(T.lastPost("state").state.osc_panel.drumkit_part_labels[2] == "Empty"
-          and T.count("changed — Open Hi-Hat reads Empty") == 1, T.dump())
+        T.ok(T.lastPost("state").state.osc_panel.drumkit_part_labels == nil
+          and T.count("changed — Remove Sample chosen; VPS Avenger redrew Open Hi-Hat's row") == 1, T.dump())
         -- Copy Slot to slot 5: its name as it was, its Mute lit after — the slot's settings copied,
         -- which its LEDs show.
         choose({ index = 2, item = "copy_slot_to", target_index = 5 }, function()
@@ -608,8 +587,8 @@ fn swap_and_remove_are_read_back_and_save_waits_for_its_dialog() {
           T.repaint(T.drums({ slots = { mute = { [5] = true } } }))
           T.settle(6)
         end)
-        T.ok(T.count("[avenger] [act] 'A drum slot's menu': changed — Copy Slot to chosen: Percussion 2 reads SN Crack") == 1,
-          T.dump())
+        T.ok(T.count("[avenger] [act] 'A drum slot's menu': changed — Copy Slot to chosen; VPS Avenger redrew Percussion 2's "
+          .. "row") == 1, T.dump())
         -- Save Drumkit as: (323, 64.5 + 43) -> (615, 256), then its dialog.
         local dialog = { id = 951, title = "Save", class = "AXWindow/AXDialog/", app = T.MAC_REAPER,
           bounds = { x = 300, y = 200, w = 700, h = 450 }, client = { x = 300, y = 228, w = 700, h = 422 } }
@@ -665,38 +644,39 @@ fn a_slot_menus_arguments_are_refused_without_a_trip() {
 // A slot's columns and knobs.
 // ---------------------------------------------------------------------------------------------
 
-/// Browse on slot 3: the strip read, the slot's name pictured and held, the keyboard handed over
-/// with Return alone, Browse clicked at (345, 80) — (650, 212) — and the tool's sentence #13 behind
-/// the screen reader; meanwhile the slot's name is not read in the state. Return through: a change
-/// wait on the name from the held picture, the table read with its text, the name posted, the page
-/// back on Browse. The page key during it: the give-up, the name posted as not read.
+/// Browse on slot 3: the strip read, the slot's row right of its name pictured and held — its
+/// sample's box, its switches and its knobs, (318.5, 72.25)-(526, 87.75), (608, 200)-(940, 224) at
+/// 1.6 — the keyboard handed over with Return alone, Browse clicked at (345, 80) — (650, 212) — and the
+/// tool's sentence #13 behind the screen reader. Return through: one change wait on the row from the
+/// held picture, the table read, what the wait saw said — no name read (the slots' names are fixed
+/// roles: the maintainer's decision of 2026-10-31) — the page back on Browse. The page key during
+/// it: the give-up.
 #[test]
-fn browse_hands_the_keyboard_over_and_reads_the_slots_name_after_return() {
+fn browse_hands_the_keyboard_over_and_reads_the_slots_row_after_return() {
     run_mac(&scenario(r##"
-        local _, _, W = T.pageOn(T.drums(), T.slotWords("KIT", { ["slot 3"] = "RD Ride 1" }))
-        T.ok(T.values(W).kitNames[3] == "RD Ride 1", "read at the key")
+        local _, _, W = T.pageOn(T.drums())
         local asked = T.recordSnapshots()
+        local reads = #S.recognized
         T.tripFrom({ action = "drumkit_column", args = { index = 3, column = "browse" }, focused = true }, W)
         T.ok(T.clickAt() == "650,212", "Browse: " .. T.clickAt())
         T.ok(S.holding["Return"] and not S.holding["Escape"] and T.open() == true, "Return alone, let through")
         T.ok(T.lastSaid() == "Use the Avenger browser. To return to Avenger Control, press Return."
           and S.speech[#S.speech].interrupt == false, tostring(T.lastSaid()))
-        -- The name (271, 73)-(318, 87) at 1.6: (532, 201)-(607, 223).
-        T.ok(T.held() == 1 and T.liveRegions() == "532,201,607,223", "the name's picture held: " .. T.liveRegions())
-        T.ok(T.values(W).kitNames[3] == nil and T.values(W).kitNames[4] == "KIT 4", "slot 3's name not read meanwhile")
-        T.words(T.slotWords("KIT", { ["slot 3"] = "RD Ride 2" }))
-        T.repaint(T.drums())
+        T.ok(T.held() == 1 and T.liveRegions() == "608,200,940,224", "the row's picture held: " .. T.liveRegions())
+        T.repaint(T.drums({ slots = { mute = { [3] = true } } }))
         T.ok(T.typed("Return") == "passed", "Return through to Avenger")
         T.tick()
         T.runDue()
         T.settle()
         local waits = {}
         for _, a in ipairs(asked) do if a.change then waits[#waits + 1] = a end end
-        T.ok(#waits == 1 and T.region(waits[1].region) == "532,201,607,223" and waits[1].change.settle == 50,
-          "one change wait on the name: " .. #waits)
+        T.ok(#waits == 1 and T.region(waits[1].region) == "608,200,940,224" and waits[1].change.settle == 50,
+          "one change wait on the row: " .. #waits)
+        T.ok(#S.recognized == reads, "no text read: " .. (#S.recognized - reads))
         local o = T.lastPost("state").state.osc_panel
-        T.ok(o.drumkit_part_labels[3] == "RD Ride 2" and T.lastPost().id == "drumkit-browse-3" and S.front == T.PAGE_WIN,
-          tostring(o.drumkit_part_labels[3]) .. " " .. tostring(T.lastPost().id))
+        T.ok(o.drumkit_mute_states[3] == true and T.lastPost().id == "drumkit-browse-3" and S.front == T.PAGE_WIN
+          and T.lastPost("error").text == "", tostring(T.lastPost().id))
+        T.ok(T.count("[avenger] [browse] 'slot 3': after Return — the slot's row changed") == 1, T.dump())
         T.ok(T.held() == 0 and not S.holding["Return"], "nothing held: " .. T.held())
         -- The page key while the user browses.
         T.event()
@@ -706,7 +686,6 @@ fn browse_hands_the_keyboard_over_and_reads_the_slots_name_after_return() {
         T.settle(2)
         T.ok(T.starts(T.lastPost("error").text, "A drum slot's Browse, Back, Next or Edit Sample: stopped by the page key"),
           tostring(T.lastPost("error").text))
-        T.ok(T.lastPost("state").state.osc_panel.drumkit_part_labels[3] == nil, "slot 3's name posted as not read")
         T.ok(T.held() == 0 and not S.holding["Return"], "nothing held")
         -- A hand-over refused: nothing clicked, said, nothing held.
         T.event()
@@ -721,23 +700,20 @@ fn browse_hands_the_keyboard_over_and_reads_the_slots_name_after_return() {
     "##));
 }
 
-/// Browse decides by the slot's name: read off the held picture with a callback while the user
-/// browses, and after Return. The same name with the selection repainted over the name's box —
-/// slot 3 selected by the click — is "unchanged"; another name with nothing repainted is the name
-/// said. Only where the name before was not read do the pixels decide: nothing repainted,
-/// "unchanged".
+/// Browse decides by the change wait on the slot's row right of its name, from the picture held
+/// before the click: a sample loaded redraws the row — "VPS Avenger redrew its row" — and nothing
+/// redrawn is "unchanged" at the bound. The name column is out of the watch: the selection repainted
+/// over the name's box alone — slot 3 selected by the click — is no change. Until 0.16 Browse compared
+/// the slot's name read before and after, a fixed role that no sample changes.
 #[test]
-fn browse_decides_by_the_slots_name_read_before_and_after() {
+fn browse_decides_by_the_change_wait_on_the_slots_row() {
     run_mac(&scenario(r##"
-        local _, _, W = T.pageOn(T.drums({ slots = { selected = 1 } }), T.slotWords("KIT", { ["slot 3"] = "RD Ride 1" }))
-        local function browse(before)
+        local _, _, W = T.pageOn(T.drums({ slots = { selected = 1 } }))
+        S.honourMinPixels = true
+        local function browse()
           T.event()
-          local reads = #S.reads
           T.tripFrom({ action = "drumkit_column", args = { index = 3, column = "browse" }, focused = true }, W)
-          local r = T.lastRead("vps-avenger browse slot")
-          T.ok(#S.reads == reads + 1 and r and r.snapshot ~= nil and T.region(r.region) == "532,201,607,223"
-            and r.names[1] == "slot 3", "the name read off the held picture, with a callback")
-          if before then T.answer(r, { status = "text", text = before, words = {}, lines = {} }) end
+          T.ok(S.holding["Return"], "handed over")
         end
         local function back()
           T.ok(T.typed("Return") == "passed", "Return through to Avenger")
@@ -745,53 +721,45 @@ fn browse_decides_by_the_slots_name_read_before_and_after() {
           T.runDue()
           T.tick(16)
         end
-        -- The same name, the selection repainted.
-        browse("RD Ride 1")
+        -- The selection repainted over the name's box alone: no change at the row.
+        browse()
         T.repaint(T.drums({ slots = { selected = 3 } }))
         back()
-        T.ok(T.lastPost("error").text == "A drum slot's Browse, Back, Next or Edit Sample: unchanged, Ride reads RD Ride 1",
-          T.lastPost("error").text)
-        T.ok(T.count("[avenger] [browse] 'slot 3': after Return — 'RD Ride 1', unchanged by the names (before: 'RD Ride 1')")
-          == 1, T.dump())
-        -- Another name, nothing repainted.
-        browse("RD Ride 1")
-        T.words(T.slotWords("KIT", { ["slot 3"] = "RD Ride 2" }))
+        T.ok(T.lastPost("error").text == "A drum slot's Browse, Back, Next or Edit Sample: unchanged: VPS Avenger drew no "
+          .. "change at Ride's row", T.lastPost("error").text)
+        -- The row redrawn: its Loop lit.
+        browse()
+        T.repaint(T.drums({ slots = { selected = 3, loop = { [3] = true } } }))
         back()
         T.ok(T.lastPost("error").text == "" and T.lastPost().id == "drumkit-browse-3"
-          and T.lastPost("state").state.osc_panel.drumkit_part_labels[3] == "RD Ride 2", T.lastPost("error").text)
-        T.ok(T.count("after Return — 'RD Ride 2', changed by the names (before: 'RD Ride 1')") == 1, T.dump())
-        -- The name before not read: the pixels, which show nothing new.
-        browse(nil)
-        back()
-        T.ok(T.lastPost("error").text == "A drum slot's Browse, Back, Next or Edit Sample: unchanged, Ride reads RD Ride 2",
-          T.lastPost("error").text)
-        T.ok(T.count("after Return — 'RD Ride 2', unchanged by the pixels (before: not answered yet)") == 1, T.dump())
+          and T.lastPost("state").state.osc_panel.drumkit_loop_states[3] == true, T.lastPost("error").text)
+        T.ok(T.count("[act]") >= 0 and T.count("[avenger] [browse] 'slot 3': after Return — the slot's row changed") == 1, T.dump())
         T.ok(T.held() == 0 and not S.holding["Return"], "nothing held: " .. T.held())
     "##));
 }
 
-/// A slot's Back at (389, 80) and Next at (401, 80) — (720, 212), (740, 212) — and its name read
-/// before and after; Edit Sample at (370, 80) — (690, 212) — and the selection and the central tab
-/// read after it.
+/// A slot's Back at (389, 80) and Next at (401, 80) — (720, 212), (740, 212): ONE click each, said as
+/// sent by the slot's role, with no text read — the slot's name is a fixed role, and comparing it said
+/// "unchanged, Bassdrum reads BD" of every step (mt-verified, finding 5) — the switches read after it;
+/// Edit Sample at (370, 80) — (690, 212) — and the selection and the central tab read after it.
 #[test]
 fn a_slots_back_next_and_edit_sample_are_read_after() {
     run_mac(&scenario(r##"
-        local _, _, W = T.pageOn(T.drums({ slots = { selected = 1 } }), T.slotWords("KIT", { ["slot 3"] = "RD A" }))
+        local _, _, W = T.pageOn(T.drums({ slots = { selected = 1 } }))
+        local reads, clicks = #S.recognized, #S.clicks
         T.tripFrom({ action = "drumkit_column", args = { index = 3, column = "back" }, focused = true }, W)
         T.ok(T.clickAt() == "720,212", "Back: " .. T.clickAt())
-        T.words(T.slotWords("KIT", { ["slot 3"] = "RD B" }))
-        T.repaint(T.drums({ slots = { selected = 1 } }))
+        T.repaint(T.drums({ slots = { selected = 1, loop = { [3] = true } } }))
         T.settle()
-        T.ok(T.lastPost("state").state.osc_panel.drumkit_part_labels[3] == "RD B" and T.lastPost().id == "drumkit-back-3"
-          and T.count("changed — Ride reads RD B") == 1, T.dump())
+        T.ok(T.lastPost("state").state.osc_panel.drumkit_loop_states[3] == true and T.lastPost().id == "drumkit-back-3"
+          and T.count("changed — Ride: previous sample sent") == 1, T.dump())
         T.event()
         T.tripFrom({ action = "drumkit_column", args = { index = 3, column = "next" }, focused = true }, W)
         T.ok(T.clickAt() == "740,212", "Next: " .. T.clickAt())
-        T.words(T.slotWords("KIT", { ["slot 3"] = "RD C" }))
-        T.repaint(T.drums({ slots = { selected = 1 } }))
-        T.settle()
-        T.ok(T.lastPost("state").state.osc_panel.drumkit_part_labels[3] == "RD C" and T.lastPost().id == "drumkit-next-3",
-          tostring(T.lastPost().id))
+        T.tick(16)
+        T.ok(T.lastPost().id == "drumkit-next-3" and T.lastPost("error").text == ""
+          and T.count("unchanged — Ride: next sample sent") == 1, T.dump())
+        T.ok(#S.clicks == clicks + 2 and #S.recognized == reads, "one click each, no text read")
         T.event()
         T.tripFrom({ action = "drumkit_column", args = { index = 3, column = "edit_sample" }, focused = true }, W)
         T.ok(T.clickAt() == "690,212", "Edit Sample: " .. T.clickAt())
@@ -800,20 +768,20 @@ fn a_slots_back_next_and_edit_sample_are_read_after() {
         local o = T.lastPost("state").state.osc_panel
         T.ok(o.drumkit_part_selected == "3" and o.central_panel_tab == "editor" and T.lastPost().id == "drumkit-edit-sample-3",
           tostring(o.drumkit_part_selected) .. " " .. tostring(T.lastPost().id))
-        T.ok(T.count("changed — RD C selected; EDITOR shown") == 1, T.dump())
-        local clicks = #S.clicks
+        T.ok(T.count("changed — Ride selected; EDITOR shown") == 1, T.dump())
+        local clicks2 = #S.clicks
         T.event()
         T.pageMsg({ action = "drumkit_column", args = { index = 3, column = "routing" }, focused = true })
-        T.ok(#S.clicks == clicks and T.lastPost("error").text
+        T.ok(#S.clicks == clicks2 and T.lastPost("error").text
           == "A drum slot's Browse, Back, Next or Edit Sample: routing is no column of a drum slot's", T.lastPost("error").text)
         T.ok(T.held() == 0, "every picture released: " .. T.held())
     "##));
 }
 
 /// A slot's Volume: pressed at (458, 80) — (831, 212) — with the left button and held, the tool's
-/// sentence #9 with the slot's name as read at the key; one PageUp is one move of one point times the
-/// factor; Return lets go once and reads nothing, the page back on the Volume button. With no name
-/// read, the factory name. Pan and Pitch at their points, the left button too.
+/// sentence #9 with the slot's role in the kit, whatever words a read would find there (no slot's name
+/// is read); one PageUp is one move of one point times the factor; Return lets go once and reads
+/// nothing, the page back on the Volume button. Pan and Pitch at their points, the left button too.
 #[test]
 fn a_drum_knob_is_pressed_held_and_released_through_the_keys() {
     for named in [true, false] {
@@ -824,8 +792,8 @@ fn a_drum_knob_is_pressed_held_and_released_through_the_keys() {
         T.tripFrom({ action = "drumkit_control", args = { index = 3, control = "volume" }, focused = true }, W)
         local downs = T.inputs("down")
         T.ok(#downs == 1 and T.xy(downs[1]) == "831,212" and downs[1].button == "left", "the press: " .. T.xy(downs[1]))
-        T.ok(T.lastSaid() == "Please press Page Up or Down to set volume for " .. (named and "SD Tight" or "Ride")
-          .. ". To Confirm, press Return." and S.speech[#S.speech].interrupt == false, tostring(T.lastSaid()))
+        T.ok(T.lastSaid() == "Please press Page Up or Down to set volume for Ride. To Confirm, press Return."
+          and S.speech[#S.speech].interrupt == false, tostring(T.lastSaid()))
         -- The tool's travel, 106 points either way of the knob's row at 80.
         T.ok(T.count("pressed (831,212) with the left button; PageUp moves up, PageDown down, 1 point × 1.60 each, -26..186")
           == 1, T.dump())
@@ -888,19 +856,22 @@ fn a_drum_knobs_reset_says_what_the_change_wait_saw() {
 }
 
 /// A slot's Browse with Avenger's window leaving the front between the act's check and the
-/// hand-over (while the slot's name is read off the held picture): handOver answers `not_in_front`,
-/// having given the trip up itself — Browse is not clicked, the picture is let go, and nothing more
-/// is ended on a trip already over.
+/// hand-over (while the slot's row is pictured to be held): handOver answers `not_in_front`, having
+/// given the trip up itself — Browse is not clicked, the picture is let go, and nothing more is ended
+/// on a trip already over.
 #[test]
 fn a_browse_refused_for_the_front_clicks_nothing_and_ends_nothing_more() {
     run_mac(&scenario(r##"
-        local _, _, W = T.pageOn(T.drums(), T.slotWords("KIT", { ["slot 3"] = "RD Ride 1" }))
-        local recognize = T.host.ocr.recognize
-        rawset(T.host.ocr, "recognize", function(r, opts, cb)
-          if type(opts) == "table" and opts.key == "vps-avenger browse slot" then
+        local _, _, W = T.pageOn(T.drums())
+        local snapshot = rawget(T.host.screen, "snapshot")
+        rawset(T.host.screen, "snapshot", function(opts, cb)
+          local r = opts and opts.region
+          if type(r) == "table" and T.region(r) == "608,200,940,224" and not (opts and opts.change) then
+            local s, why = snapshot(opts, cb)
             S.listed, S.front, S.chain = { W, T.OTHER }, T.OTHER, { T.OTHER }
+            return s, why
           end
-          return recognize(r, opts, cb)
+          return snapshot(opts, cb)
         end)
         local clicks = #S.clicks
         T.tripFrom({ action = "drumkit_column", args = { index = 3, column = "browse" }, focused = true }, W)
@@ -1003,10 +974,10 @@ fn a_central_tab_is_clicked_and_read_with_any_tab_selected() {
 // The page key, the ring, Windows, and the cost.
 // ---------------------------------------------------------------------------------------------
 
-/// The page key on the Drums tab reads the table off its one picture: every slot's buttons, the slot
-/// selected, and the twelve names in its one text read. On an oscillator tab no slot is read and none
-/// of the table's keys is posted; and where the dots gave no count — the strip's count from its text
-/// — the names are not asked, and the log says why.
+/// The page key on the Drums tab reads the table off its one picture: every slot's buttons and the
+/// slot selected — no slot's name. On an oscillator tab no slot is read and none of the table's keys is
+/// posted; and where the dots gave no count — the strip's count from its text — the table is read once
+/// the strip is decided.
 #[test]
 fn the_page_key_reads_the_drumkit_table_only_on_the_drums_tab() {
     run_mac(&scenario(r##"
@@ -1019,12 +990,13 @@ fn the_page_key_reads_the_drumkit_table_only_on_the_drums_tab() {
         T.openPage()
         T.event()
         local o = T.lastPost("state").state.osc_panel
-        T.ok(T.slotReads(reads) == 12, "the names in the one text read: " .. T.slotReads(reads))
-        T.ok(o.drumkit_part_selected == "4" and o.drumkit_part_labels[4] == "HH Closed" and o.drumkit_part_labels[1] == "KIT 1"
+        -- No slot's name read, whatever words lie there: the twelve are fixed roles (read/drums.luau, THE
+        -- NAMES; the maintainer's decision of 2026-10-31).
+        T.ok(T.slotReads(reads) == 0, "no slot's name in the text read: " .. T.slotReads(reads))
+        T.ok(o.drumkit_part_selected == "4" and o.drumkit_part_labels == nil
           and o.drumkit_mute_states[2] == true and o.drumkit_mute_states[1] == false and o.drumkit_solo_states[5] == true
           and o.drumkit_lock_states[1] == true and o.drumkit_loop_states[12] == true, "the table at the key")
-        T.ok(T.count("[avenger] [read] drums: slot 1 Mute ") == 1 and T.count("[avenger] [read] drums: the slots' names 1 'KIT 1'") == 1,
-          T.dump())
+        T.ok(T.count("[avenger] [read] drums: slot 1 Mute ") == 1 and T.count("the slots' names") == 0, T.dump())
         -- An oscillator tab.
         local back = function()
           S.focusAtOnce, S.focusLands = true, function() S.front, S.chain = W, { W } end
@@ -1040,17 +1012,20 @@ fn the_page_key_reads_the_drumkit_table_only_on_the_drums_tab() {
         T.ok(T.slotReads(reads) == 0, "no slot read on an oscillator tab")
         T.ok(o.drumkit_part_selected == nil and o.drumkit_part_labels == nil and o.drumkit_mute_states == nil
           and o.drumkit_loop_states == nil, "none of the table's keys")
-        -- No dots: the count from the strip's text.
+        -- OSC 1's dot and one that fits no count's step: the count from the strip's text, and the table
+        -- read after the strip is decided.
         back()
-        T.paintAvenger(98, 84, 1.6, { selected = "drums", mode = "drum", slots = { selected = 2 } })
+        local GREEN = { 100, 220, 180 }
+        T.paintAvenger(98, 84, 1.6, { selected = "drums", mode = "drum", slots = { selected = 2 },
+          dots = { { 246, 3, GREEN }, { 266, 3, GREEN } } })
         T.words(T.slotWords("KIT", { strip = "OSC 1 OSC 2" }))
         reads = #S.recognized
         T.openPage()
         T.event()
         o = T.lastPost("state").state.osc_panel
-        T.ok(T.slotReads(reads) == 0 and o.selected_type == "drums" and o.drumkit_part_selected == "2"
+        T.ok(T.slotReads(reads) == 0 and o.selected_type == "drums" and o.drumkit_part_selected == "2" and o.count == 2
           and o.drumkit_part_labels == nil, "no names asked: " .. T.slotReads(reads))
-        T.ok(T.count("drums: the slots' names are not read — the strip's count was not the dots'") == 1, T.dump())
+        T.ok(T.count("[avenger] [read] strip: the tabs read whole name OSC 1, 2 — 2 oscillators") == 1, T.dump())
         T.ok(T.held() == 0, "every picture released: " .. T.held())
     "##));
 }
@@ -1192,6 +1167,118 @@ fn the_drum_reads_loop_over_no_pixels_in_luau() {
         for _, n in ipairs(spent) do
           T.ok(n < 60000, string.format("a part read spent %d turns: %s", n, table.concat(spent, ", ")))
         end
+        T.ok(T.held() == 0, "every picture released: " .. T.held())
+    "##));
+}
+
+// ---------------------------------------------------------------------------------------------
+// The developer's Mac test of 2026-10-31: the slots' fixed names, and the Drums tab's controls kept
+// while the selection is not read (mt-verified, findings 4C and 6; the maintainer's decisions B4 and
+// B5 of that day).
+// ---------------------------------------------------------------------------------------------
+
+/// The twelve slots are Avenger's fixed roles — the column draws CRSH … BD whatever the kit, in all
+/// 144 reads of that test — and no slot's name is read: not at the page key, not after the Drums
+/// tab's click, not around a slot's click. A slot is said by its role ("Open Hi-Hat selected"), and
+/// the page shows the twelve roles, never "name not read" beside them.
+#[test]
+fn drum_reads_ask_no_slot_names_and_the_page_shows_the_fixed_roles() {
+    let js = include_str!("../../../modules/vps-avenger/ui/panel.js");
+    assert!(!js.contains("drumkitNamesRead") && !js.contains("drumkit_part_labels"), "panel.js reads no slot's name");
+    assert!(js.contains("const drumkitCurrentLabels = DRUMKIT_ROLES;"), "the roles are the slots' labels");
+    assert!(js.contains("const selectedSampleName = selectedSlot != null ? DRUMKIT_ROLES[selectedSlot - 1] : 'selected';"));
+    run_mac(&scenario(r##"
+        local _, _, W = T.pageOn({ osc = 2, selected = "osc", index = 1 }, T.slotWords("CR"))
+        local reads = #S.recognized
+        T.tripFrom({ action = "select_drums_tab", args = {}, focused = true }, W)
+        T.repaint(T.drums({ slots = { selected = 1 } }))
+        T.settle()
+        T.ok(T.lastPost("state").state.osc_panel.selected_type == "drums" and T.slotReads(reads) == 0,
+          "the Drums tab read, no slot's name: " .. T.slotReads(reads))
+        T.event()
+        T.tripFrom({ action = "select_drumkit_part", args = { index = 2 }, focused = true }, W)
+        T.repaint(T.drums({ slots = { selected = 2 } }))
+        T.settle()
+        T.ok(T.count("[avenger] [act] 'Choosing a drum slot': changed — Open Hi-Hat selected") == 1, T.dump())
+        T.ok(T.lastPost("state").state.osc_panel.drumkit_part_selected == "2"
+          and T.lastPost("state").state.osc_panel.drumkit_part_labels == nil, "the slot selected, no name posted")
+        T.ok(T.slotReads(reads) == 0, "still no slot's name read")
+        T.ok(T.held() == 0, "every picture released: " .. T.held())
+    "##));
+}
+
+/// The ring's Drums group stays while a read of the strip decides no tab — no tab stands out — and
+/// says "selection not read now" in place of its values; a press reads it again (one decided by it
+/// is what the control acts on), and nothing is clicked on an undecided read. A read that decides
+/// another tab hides it. Until 0.16 one undecided read before Slot mute hid the whole group
+/// (the developer's Mac test of 2026-10-31: Tab from Slot mute landed on Level).
+#[test]
+fn an_undecided_read_keeps_the_rings_drums_group_and_reads_again_at_the_next_press() {
+    run_mac(&scenario(r##"
+        local header = T.avengerAt80("LD Lead 1")
+        T.words({})
+        T.paintAvenger(98, 84, 1.6, T.drums({ slots = { selected = 3 } }))
+        local osc = T.indexOf(header, "Oscillator")
+        header.focus = osc - 1
+        T.tab()
+        T.ok(T.lastSaid() == "Oscillator, Drums, slider", T.said())
+        -- No tab stands out now.
+        local FLAT = T.drums({ selected = false, strips = { 52, 52, drums = 52, trig = 52 }, slots = { selected = 3 } })
+        T.paintAvenger(98, 84, 1.6, FLAT)
+        local clicks, snaps = #S.clicks, S.snaps
+        local mute = T.indexOf(header, "Slot mute")
+        T.pressAt(header, mute)
+        T.ok(#S.clicks == clicks and S.snaps > snaps and T.lastSaid() == "Slot mute: selection not read now", T.said())
+        T.tab()
+        T.ok(T.lastSaid() == "Slot solo, selection not read now, button", "the group kept: " .. T.said())
+        -- Drums read selected again: the press clicks the selected slot's Mute.
+        T.paintAvenger(98, 84, 1.6, T.drums({ slots = { selected = 3 } }))
+        T.pressAt(header, mute)
+        T.ok(#S.clicks == clicks + 1, "Mute clicked: " .. T.clickAt())
+        T.repaint(T.drums({ slots = { selected = 3, mute = { [3] = true } } }))
+        T.tick(3)
+        T.ok(T.lastSaid() == "Ride Mute ON", T.said())
+        -- OSC 1 decided: the group gone.
+        T.paintAvenger(98, 84, 1.6, { osc = 2, selected = "osc", index = 1 })
+        T.stepAt(header, osc, -1)
+        T.repaint({ osc = 2, selected = "osc", index = 2 })
+        T.tick(4)
+        header.focus = T.indexOf(header, "Add oscillator")
+        T.tab()
+        T.ok(T.starts(T.lastSaid(), "Level"), "the group hidden: " .. T.said())
+        T.ok(T.held() == 0, "every picture released: " .. T.held())
+    "##));
+}
+
+/// The page's Drums section is kept while a read decides no tab, its values not read — every value
+/// of the section's left out, the section said "selection not read now" (`drums_kept`) — and a drum
+/// action's read before its click that decides none clicks nothing. A read that decides a tab again
+/// takes the mark away.
+#[test]
+fn an_undecided_read_before_a_drum_click_keeps_the_pages_drums_section() {
+    run_mac(&scenario(r##"
+        local _, _, W = T.pageOn(T.drums({ slots = { selected = 3, mute = { [3] = true } } }))
+        local o = T.lastPost("state").state.osc_panel
+        T.ok(o.selected_type == "drums" and o.drums_kept == nil and o.drumkit_mute_states[3] == true, "Drums read")
+        T.paintAvenger(98, 84, 1.6, T.drums({ selected = false, strips = { 52, 52, drums = 52, trig = 52 } }))
+        local clicks = #S.clicks
+        T.tripFrom({ action = "toggle_drumkit_button", args = { index = 3, button = "mute" }, focused = true }, W)
+        T.settle(2)
+        o = T.lastPost("state").state.osc_panel
+        T.ok(#S.clicks == clicks and T.lastPost("error").text == "A drum slot's Mute, Solo, Lock or Loop: the selected tab cannot be read now",
+          T.lastPost("error").text)
+        T.ok(o.selected_type == nil and o.drums_kept == true and o.drumkit_mute_states == nil, T.jsonEncode(o))
+        local js = T.repoText("modules/vps-avenger/ui/panel.js")
+        T.ok(string.find(js, "else if (drumsKept) label = 'Drums, selection not read now';", 1, true) ~= nil, "panel.js")
+        -- Decided again.
+        T.event()
+        T.paintAvenger(98, 84, 1.6, T.drums({ slots = { selected = 3 } }))
+        T.tripFrom({ action = "toggle_drumkit_button", args = { index = 3, button = "mute" }, focused = true }, W)
+        T.ok(#S.clicks == clicks + 1, "clicked")
+        T.repaint(T.drums({ slots = { selected = 3, mute = { [3] = true } } }))
+        T.settle()
+        o = T.lastPost("state").state.osc_panel
+        T.ok(o.selected_type == "drums" and o.drums_kept == nil and o.drumkit_mute_states[3] == true, T.jsonEncode(o))
         T.ok(T.held() == 0, "every picture released: " .. T.held())
     "##));
 }

@@ -120,7 +120,10 @@ T.MENU_ITEMS = {
 }
 T.SUBMENU_ITEMS = { copy_sample_to = true, swap_sample_with = true, copy_slot_to = true, swap_slot_with = true }
 
--- The slots' names in Avenger's factory drumkit, top to bottom.
+-- The slots' names, top to bottom: Avenger's twelve fixed roles (the project's
+-- DRUMKIT_PART_LABELS), which the table draws abbreviated — CRSH, OH, RD, CL2, PC2, CL1, PC1, SN2,
+-- CLP, SN1, RS, BD — whatever the kit (read/drums.luau, THE NAMES). Every name the module says or
+-- the page shows of a slot is one of these.
 T.PART_LABELS = {
   "Crash",
   "Open Hi-Hat",
@@ -170,11 +173,20 @@ function T.rowY(index)
   return T.PART_FIRST_Y + (slot(index) - 1) * T.PART_Y_STEP
 end
 
--- Slot `index`'s name as a rectangle: the name column, 7 above and below the row's middle — the
--- text read, and Browse's watched box.
+-- Slot `index`'s name as a rectangle: the name column, 7 above and below the row's middle — Browse's
+-- watched box (no text is read in it: read/drums.luau, THE NAMES).
 function T.nameRect(index)
   local y = T.rowY(index)
   return { T.NAME_COLUMN[1], y - 7, T.NAME_COLUMN[2], y + 7 }
+end
+
+-- Slot `index`'s row RIGHT of its name, from Loop's box to Pitch's knob: its sample's box, its
+-- switches and its knobs — what a sample loaded or stepped there redraws, watched without the name
+-- column, whose selected and triggered rows flash while a sequence plays (the developer's Mac test of
+-- 2026-10-31: slot 12's name cell's background read 69.9 mid-sequence, mt-verified finding 5).
+function T.sampleRect(index)
+  local y = T.rowY(index)
+  return { T.NAME_COLUMN[2] + 0.5, y - T.SLOT_HALF, T.COLUMN_X.pitch + 8, y + T.SLOT_HALF }
 end
 
 -- Slot `index`'s whole row, from the name column to Pitch's knob.

@@ -351,9 +351,42 @@ local function shownExpansions()
   return shown
 end
 
+-- How many states were posted this session, each posted with its number (`seq`): the page echoes
+-- the number of the one it applied with its heading (onMessage's `applied`).
+local posted = 0
+
+-- One log line per state posted, numbered, with `why` ("the key", "trip '<label>'", "the page
+-- loaded"): what its heading says, and the open expansion and the loaded preset's row in it. The
+-- developer's Mac test of 2026-10-31 left no trace of what the page was told after Next, nor of what
+-- it showed (mt-verified, finding 3): this line and the page's echo of it say both.
+local function noteState(state, why)
+  posted += 1
+  local preset = "not read"
+  if state.preset ~= nil then
+    preset = "'" .. tostring(state.preset) .. "'"
+  elseif state.preset_before then
+    preset = string.format("not read, the one before %s '%s'", tostring(state.preset_before.after),
+      tostring(state.preset_before.name))
+  end
+  local open = "not read"
+  if state.expansion_open == true then
+    open = (state.selected_expansion ~= nil and state.selected_expansion ~= "") and tostring(state.selected_expansion)
+      or "one, its name not read"
+  elseif state.expansion_open == false then
+    open = "none"
+  end
+  local at = state.loaded_expansion_preset_index
+  host.log.info(string.format("[avenger] [page] state %d posted (%s): the preset %s, its expansion %s; open %s, the "
+    .. "preset loaded at %s", posted, why, preset, state.expansion and tostring(state.expansion) or "none", open,
+    at ~= nil and tostring(at + 1) or "none"))
+  return posted
+end
+
 -- The state of window `id` posted as a press or a trip read it: this page object has its reads.
-local function postState(id)
-  post({ kind = "state", state = S.snapshot(id, shownExpansions()) })
+-- `why` for the log line (noteState).
+local function postState(id, why)
+  local state = S.snapshot(id, shownExpansions())
+  post({ kind = "state", state = state, seq = noteState(state, why or "an action") })
   given = S.at(id)
 end
 
@@ -422,7 +455,7 @@ local function open(o, answer)
     host.log.info(string.format("[avenger] [page] read for the page: the preset %s, the zoom %s",
       values.preset and ("'" .. values.preset .. "'") or "not read", values.zoom and (values.zoom .. " %") or "not read"))
     plugin, keyAt = win, t0
-    postState(win.id)
+    postState(win.id, "the key")
     post({ kind = "error", text = values.cut and cutWords(values.zoom, values.offScreen) or "" })
     if shownOnce then
       post({ kind = "restoreFocus" })
@@ -481,7 +514,8 @@ end
 local function answerReady()
   local id = plugin and plugin.id
   local at = S.at(id)
-  post({ kind = "state", state = S.snapshot(id, shownExpansions(), { age = at ~= nil and at ~= given }) })
+  local state = S.snapshot(id, shownExpansions(), { age = at ~= nil and at ~= given })
+  post({ kind = "state", state = state, seq = noteState(state, "the page loaded") })
 end
 
 -- The settings as the page's Settings section shows them (ui/panel.js, applySettings): the six
@@ -518,6 +552,12 @@ local function onMessage(o, m)
   if type(m) ~= "table" then return end
   if m.kind == "problem" then
     host.log.info("[avenger] [page] the page reports: " .. tostring(m.text))
+    return
+  end
+  -- The page's echo of the state it applied (noteState): its heading, and whether it was shown.
+  if m.kind == "applied" then
+    host.log.info(string.format("[avenger] [page] the page shows state %s: the heading '%s', %s", tostring(m.seq),
+      tostring(m.heading), m.visible == true and "shown" or "while hidden"))
     return
   end
   if m.action == "ready" then

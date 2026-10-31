@@ -75,6 +75,23 @@
     return Number.isFinite(n) ? n : null;
   };
   const readText = (v) => (v == null ? null : String(v));
+  // The drum slots by their roles in the kit, top to bottom: Avenger's twelve fixed names, which its
+  // table draws abbreviated (CRSH … BD) whatever the kit — never read, the same in the module
+  // (src/tables/drums.luau, PART_LABELS: the project's DRUMKIT_PART_LABELS).
+  const DRUMKIT_ROLES = [
+    'Crash',
+    'Open Hi-Hat',
+    'Ride',
+    'Closed Hi-Hat 2',
+    'Percussion 2',
+    'Closed Hi-Hat 1',
+    'Percussion 1',
+    'Snare 2',
+    'Clap',
+    'Snare 1',
+    'Rimshot',
+    'Bassdrum'
+  ];
   // The twelve drum slots' list as the module posts it: a JSON list, or an object keyed by each
   // slot's number ("12") where few slots were read and slot 11 or 12 among them, which a JSON list
   // cannot carry; each entry through `read`, a hole as null. Neither, or an object with no slot (an
@@ -277,8 +294,18 @@
       );
     }
     if (s.preset == null) {
-      if ($('preset-name').textContent !== 'Preset name, not read') {
-        $('preset-name').textContent = 'Preset name, not read';
+      // A click whose name was not read: the name before it, said as that and never as the preset
+      // now (the maintainer's decision of 2026-10-31).
+      const before = s.preset_before && typeof s.preset_before === 'object' && s.preset_before.name != null
+        ? s.preset_before : null;
+      let text = 'Preset name, not read';
+      if (before) {
+        const exp = String(before.expansion || '').trim();
+        text = `Preset name not read after ${String(before.after || 'the last action')}; before it: ` +
+          `${String(before.name)}${exp ? `, (XP: ${exp})` : ''}`;
+      }
+      if ($('preset-name').textContent !== text) {
+        $('preset-name').textContent = text;
       }
     } else {
       // Render the preset name AND the loaded expansion in the H2 so
@@ -428,8 +455,10 @@
         drum_lock: readFlag(s.osc_panel.drum_lock),
         drum_mode: s.osc_panel.drum_mode ? String(s.osc_panel.drum_mode) : null,
         drumkit_part_selected: s.osc_panel.drumkit_part_selected ? String(s.osc_panel.drumkit_part_selected) : '',
-        // The names read, holes where one was not: never the factory names in their place.
-        drumkit_part_labels: readSlots(s.osc_panel.drumkit_part_labels, (label) => String(label || '')) || [],
+        // The strip read covered by a menu of Avenger's; the Drums section kept while the selection
+        // is not read now (the module's state.luau).
+        strip_covered: s.osc_panel.strip_covered === true,
+        drums_kept: s.osc_panel.drums_kept === true,
         drumkit_mute_states: readSlots(s.osc_panel.drumkit_mute_states, readFlag) || [],
         drumkit_solo_states: readSlots(s.osc_panel.drumkit_solo_states, readFlag) || [],
         drumkit_lock_states: readSlots(s.osc_panel.drumkit_lock_states, readFlag) || [],
@@ -751,6 +780,10 @@
       heading: name == null ? `OSC ${i + 1}, name not read` : String(name)
     }));
     if (!known) cols.push({ type: 'unread', label: 'OSC tabs, not read' });
+    // A strip covered by a menu of Avenger's: nothing of it read now, said in its own column.
+    if (oscPanel.strip_covered) {
+      cols.push({ type: 'unread', label: "The oscillator strip is covered now, perhaps by a menu of VPS Avenger's" });
+    }
     // A count the dots did not give is a column of its own, never taken for one read: the user's
     // confirmed one says so, the database's is the count alone.
     if (known && oscPanel.count_from) {
@@ -1214,11 +1247,7 @@
       : 'sample';
     const slotRead = readInt(oscPanel.drumkit_part_selected);
     const selectedSlot = slotRead == null ? null : Math.max(1, Math.min(12, slotRead));
-    const selectedSampleName = (
-      selectedSlot != null
-      && Array.isArray(oscPanel.drumkit_part_labels)
-      && oscPanel.drumkit_part_labels[selectedSlot - 1]
-    ) ? String(oscPanel.drumkit_part_labels[selectedSlot - 1]) : 'selected';
+    const selectedSampleName = selectedSlot != null ? DRUMKIT_ROLES[selectedSlot - 1] : 'selected';
     const tabLabels = [
       ['sample', 'Sample'],
       ['amp', 'Amp'],
@@ -2208,9 +2237,13 @@
     const items = $('osc-tab-detail-items');
     if (!detail) return;
     let label = oscPanel.selected_label || '';
+    // The Drums section kept while the selection is not read now: its controls offered, nothing of
+    // them claimed — each press reads first, and clicks nothing unless Drums reads selected.
+    const drumsKept = oscPanel.selected_type == null && oscPanel.drums_kept === true;
     if (!label) {
       if (oscPanel.selected_type === 'drums') label = 'Drums';
       else if (oscPanel.selected_type === 'trig') label = 'Trig';
+      else if (drumsKept) label = 'Drums, selection not read now';
       else if (oscPanel.selected_type == null) label = 'Selected tab, not read';
       else {
         const idx = Math.max(1, parseInt(oscPanel.selected_index, 10) || 1);
@@ -2222,9 +2255,9 @@
     detail.setAttribute('aria-label', label);
     if (!items) return;
     items.textContent = '';
-    if (oscPanel.selected_type === 'drums') {
+    if (oscPanel.selected_type === 'drums' || drumsKept) {
       const heading = document.createElement('h3');
-      heading.textContent = 'Drumkits & Sequences';
+      heading.textContent = drumsKept ? 'Drumkits & Sequences, selection not read now' : 'Drumkits & Sequences';
       heading.setAttribute('tabindex', '0');
       items.appendChild(heading);
 
@@ -2310,27 +2343,9 @@
       ]);
       items.appendChild(group);
 
-      const drumkitLabels = [
-        'Crash',
-        'Open Hi-Hat',
-        'Ride',
-        'Closed Hi-Hat 2',
-        'Percussion 2',
-        'Closed Hi-Hat 1',
-        'Percussion 1',
-        'Snare 2',
-        'Clap',
-        'Snare 1',
-        'Rimshot',
-        'Bassdrum'
-      ];
-      // A slot whose name was not read goes by its role in the kit, and its row says the name was
-      // not read: the factory names are never shown as this kit's.
-      const drumkitNamesRead = drumkitLabels.map((_, index) => Array.isArray(oscPanel.drumkit_part_labels)
-        && String(oscPanel.drumkit_part_labels[index] || '').trim() !== '');
-      const drumkitCurrentLabels = drumkitLabels.map((role, index) => (drumkitNamesRead[index]
-        ? String(oscPanel.drumkit_part_labels[index]).trim()
-        : role));
+      // Every slot by its role in the kit: the names Avenger draws are these, abbreviated, whatever
+      // the kit (the developer's Mac test of 2026-10-31; the maintainer's decision of that day).
+      const drumkitCurrentLabels = DRUMKIT_ROLES;
       const drumkitColumns = [
         ['browse', 'Browse'],
         ['back', 'Back'],
@@ -2548,7 +2563,7 @@
         const th = document.createElement('th');
         th.scope = 'row';
         th.appendChild(makeCellButton(
-          `${label}${drumkitNamesRead[index] ? '' : ', name not read'}${selected ? ' SELECTED' : ''}`,
+          `${label}${selected ? ' SELECTED' : ''}`,
           'select_drumkit_part',
           { index: index + 1 },
           `drumkit-part-${index + 1}`
@@ -3494,9 +3509,30 @@
   // that it goes back where it was; or the settings. Then the page asks for its state and its
   // settings: it starts with nothing.
   if (window.platform) {
+    // What the heading shows of the state last applied, echoed to the module's log by its number —
+    // once applied, and again when the page is shown — so that a log says whether the page showed
+    // what was posted, and whether it was hidden then (the developer's Mac test of 2026-10-31: the
+    // heading heard after Next was not in the log; mt-verified, finding 3).
+    let appliedSeq = null;
+    const echoApplied = () => {
+      if (appliedSeq == null) return;
+      post({
+        kind: 'applied',
+        seq: appliedSeq,
+        heading: $('preset-name') ? $('preset-name').textContent : '',
+        visible: document.visibilityState === 'visible'
+      });
+    };
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') echoApplied();
+    });
     window.platform.onmessage = (message) => {
       if (!message || typeof message !== 'object') return;
-      if (message.kind === 'state') applyState(message.state || {});
+      if (message.kind === 'state') {
+        applyState(message.state || {});
+        appliedSeq = readInt(message.seq);
+        echoApplied();
+      }
       else if (message.kind === 'error') showError(message.text, message.focus === true);
       else if (message.kind === 'focus') focusElementById(message.id);
       else if (message.kind === 'restoreFocus') restoreFocus();

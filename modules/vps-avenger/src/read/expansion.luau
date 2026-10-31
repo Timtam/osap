@@ -65,6 +65,28 @@ E.TITLE_OPEN = 0.005
 E.TITLE_DARK = 0.002
 E.BAR_DARK = 0.10
 
+-- THE VIEW'S ICON (tables/expansion.luau, VIEW_ICON): this Avenger draws an icon where the project
+-- read the view's caption — a light-blue back arrow with an expansion open, a square of light grey
+-- dots over the grid — and every text read of it on both platforms was nothing or an invention of
+-- the second recogniser's ('ton.', '-.', 'tn': the developer's Mac test of 2026-10-31 and the second
+-- Windows session of that day; mt-verified, finding 10). So it is told by its pixels: its box's share
+-- of the project's blue (src/read/browser.luau's Br.BLUE, written again here) and of light neutral
+-- grey — r + g + b of 300 or more, each channel within 14 of blue's. An expansion is OPEN where blue
+-- is ICON_BLUE or more and grey ICON_GREY_NONE or less; the GRID shows where grey is ICON_GREY or
+-- more, no less than blue, and right of the icon ICON_RIGHT or less — a caption drawn as words would
+-- go on there; anything else is neither, and only then is the caption read as text (an Avenger that
+-- draws its label, the project's). The numbers are the measurements' (tables/expansion.luau), with
+-- room on both sides: this module's own departure from the project's caption read
+-- (clicker/__init__.py, _parse_expansion_view_status), which takes the grid's icon for "open" too.
+E.ICON_BLUE_PRED = host.screen.predicate("b >= 121 and b - r >= 11 and b - g >= 11")
+E.ICON_GREY_PRED = host.screen.predicate(
+  "r + g + b >= 300 and r - b < 15 and b - r < 15 and g - b < 15 and b - g < 15")
+E.ICON_BLUE = 0.08
+E.ICON_GREY_NONE = 0.05
+E.ICON_GREY = 0.08
+E.ICON_RIGHT = 0.02
+local ICON_CELLS = 6
+
 -- The picture test's grids: only their shares over the whole band and the whole bar are wanted, so
 -- a few cells each — TITLE_CELLS across the band, one row; BAR_CELLS down the bar, one column — and
 -- Luau's work on them is a few dozen turns (a cell a unit across, as the other grids are, would be a
@@ -74,9 +96,19 @@ E.BAR_DARK = 0.10
 local TITLE_CELLS, BAR_CELLS = 24, 14
 
 -- The browser's grids, asked of the page's picture with the rest (read/open.luau) and of the
--- browser's own (src/read/browser.luau): the title band, the categories' scrollbar, and FAV's star
--- column twice.
+-- browser's own (src/read/browser.luau): the view's icon, its blue and its grey and the grey right
+-- of it; the title band, the categories' scrollbar, and FAV's star column twice.
 function E.ask(pl, out)
+  local icon, right = pl:rect(X.VIEW_ICON), pl:rect(X.VIEW_ICON_RIGHT)
+  if icon then
+    local cols = math.min(ICON_CELLS, icon[3] - icon[1])
+    out[#out + 1] = { name = "view icon blue", kind = "cells", rect = icon, cols = cols, rows = 1, pred = E.ICON_BLUE_PRED }
+    out[#out + 1] = { name = "view icon grey", kind = "cells", rect = icon, cols = cols, rows = 1, pred = E.ICON_GREY_PRED }
+  end
+  if right then
+    out[#out + 1] = { name = "view icon right", kind = "cells", rect = right, cols = math.min(ICON_CELLS, right[3] - right[1]),
+      rows = 1, pred = E.ICON_GREY_PRED }
+  end
   local band = pl:rect(X.TITLE_BAND)
   if band then
     out[#out + 1] = { name = "title band", kind = "cells", rect = band, cols = math.min(TITLE_CELLS, band[3] - band[1]),
@@ -138,11 +170,17 @@ function E.favorite(pl, got, v, log, marks, open)
     v.favoriteView and "ON" or "OFF"))
 end
 
--- The view's caption and the header's name as OCR entries.
-function E.entries(pl, out)
+-- The view's caption as an OCR entry: asked only where the view's icon tells neither state (E.look's
+-- `icon` nil — THE VIEW'S ICON, above).
+function E.captionEntry(pl, out)
   local r = pl:rect(X.VIEW_TEXT)
   if r then out[#out + 1] = { name = "expansion view", region = r } end
-  r = pl:rect(X.NAME_TEXT)
+end
+
+-- The header's name as an OCR entry, and with `caption` the view's caption (E.captionEntry).
+function E.entries(pl, out, caption)
+  if caption then E.captionEntry(pl, out) end
+  local r = pl:rect(X.NAME_TEXT)
   if r then out[#out + 1] = { name = "expansion name", region = r } end
 end
 
@@ -158,16 +196,39 @@ function E.parseView(text)
   return nil
 end
 
--- What the picture test says, from the grids `got` (E.ask's names): { title, bar = the shares, nil
--- where not read; verdict = "open" (the title band lit), "grid" (no title, the bar dark), "dark" (no
--- title, the bar lit or not read), "between" (a few light pixels: neither), or nil (the band not
--- read); words, for the log }.
+-- What the view's icon says, from the grids `got` (E.ask's names): "open", "grid" or nil — neither,
+-- or not read (THE VIEW'S ICON, above) — and its words for the log.
+function E.icon(pl, got)
+  local function shareOf(name, rect)
+    local g, r = got[name], pl:rect(rect)
+    if not (g and r) then return nil end
+    return (g:share(r))
+  end
+  local blue, grey = shareOf("view icon blue", X.VIEW_ICON), shareOf("view icon grey", X.VIEW_ICON)
+  local right = shareOf("view icon right", X.VIEW_ICON_RIGHT)
+  if blue == nil or grey == nil then return nil, "the view's icon not read" end
+  local icon = nil
+  if blue >= E.ICON_BLUE and grey <= E.ICON_GREY_NONE then
+    icon = "open"
+  elseif grey >= E.ICON_GREY and blue <= grey and right ~= nil and right <= E.ICON_RIGHT then
+    icon = "grid"
+  end
+  return icon, string.format("the view's icon %s blue, %s grey, %s grey right of it — %s", P.pct(blue), P.pct(grey),
+    P.pct(right), icon == "open" and "the back arrow" or (icon == "grid" and "the grid's" or "neither"))
+end
+
+-- What the picture test says, from the grids `got` (E.ask's names): { icon (E.icon's, and its words
+-- `iconWords`), title, bar = the shares, nil where not read; verdict = "open" (the title band lit),
+-- "grid" (no title, the bar dark), "dark" (no title, the bar lit or not read), "between" (a few
+-- light pixels: neither), or nil (the band not read); words, the title band's and the bar's, for the
+-- log }.
 function E.look(pl, got)
   local function shareOf(name, rect)
     local g, r = got[name], pl:rect(rect)
     if not (g and r) then return nil end
     return (g:share(r))
   end
+  local icon, iconWords = E.icon(pl, got)
   local title, bar = shareOf("title band", X.TITLE_BAND), shareOf("list bar", X.LIST_BAR)
   local verdict = nil
   if title ~= nil then
@@ -182,7 +243,7 @@ function E.look(pl, got)
   local words = string.format("title band %s lit, list bar %s lit — %s", P.pct(title), P.pct(bar), ({
     open = "an expansion's title", grid = "the grid", dark = "no title, the bar not dark",
     between = "neither", })[verdict] or "not read")
-  return { title = title, bar = bar, verdict = verdict, words = words }
+  return { icon = icon, iconWords = iconWords, title = title, bar = bar, verdict = verdict, words = words }
 end
 
 return E

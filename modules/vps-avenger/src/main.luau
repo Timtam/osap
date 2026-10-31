@@ -12,10 +12,13 @@
 --                      where the name read is Init Preset, which Avenger steps no preset from
 --   Preset info        only with the preset database: the preset's expansion, category,
 --                      oscillator tabs and macro names, said plainly (presets.luau)
---   Load, Save,        MENU's four items, each chosen in Avenger's own menu once a menu test sees
---   Save as,           it (O:chooseMenuItem); Save's and Initialize's warning box is an overlay of
---   Initialize         its own (dialog.luau); after Load's and Save as's file dialog, the name
---                      read and said once Avenger is in front again (O:afterDialog)
+--   Load, Save as      MENU's items that open a file dialog, clicked as the project clicks them:
+--                      MENU, and 0.18 s later the item at its fixed point — the maintainer's
+--                      documented exception to the rule against timers (below); after the dialog,
+--                      the name read and said once Avenger is in front again (O:afterDialog)
+--   Initialize         MENU's last item, chosen in Avenger's own menu once a menu test sees it
+--                      (O:chooseMenuItem); its warning box is an overlay of its own (dialog.luau)
+--                      Save, which the project leaves out on purpose, is left out since 0.16
 --   Undo, Redo list    UNDO clicked, or right-clicked for its redo list, whose keys are the list's
 --                      while a menu test sees it
 --   Zoom               a stepper over Avenger's zoom list: the entry beside the current one is
@@ -344,7 +347,8 @@ local function tidy(text)
 end
 
 -- A name read, the project's way: what its recogniser made of Avenger's blank preset ("hit
--- Presst" at 50 %) is "Init Preset", said and compared as that, and the log says it was taken so.
+-- Presst" at 50 %) is "Init Preset", said and compared as that, and the log says it was taken so;
+-- a lone bullet word before it is no part of it (read/ocr.luau, R.presetName).
 local function asName(t)
   local name, init = R.presetName(t)
   if init and name ~= t then
@@ -353,35 +357,150 @@ local function asName(t)
   return name
 end
 
--- The name as read now — the press's handler waits for the reading — or nil.
+-- ── Avenger's loading bar ────────────────────────────────────────────────────
+-- While Avenger loads a preset it draws a bar in the name's field: a fill of (183, 213, 255) that
+-- grows from the field's left, and pure black (0, 0, 0) right of it — the developer's Mac test of
+-- 2026-10-31, its six pictures of the field read while it showed (mt-verified, finding 7); the
+-- field's own navy is about (21, 23, 30) at its right end and (27, 30, 39) at its left, and has
+-- neither. A recogniser makes something of the bar each time: Vision nothing, and then PaddleOCR an
+-- invention, "PY" read twice alike and said as the preset — which "two readings alike" let through.
+-- So the name is read off a picture whose two ends are looked at first: the left end the bar's
+-- blue (b >= 200 and r + g + b >= 550) or the right end pure black (r + g + b <= 12), either on
+-- BAR_SHARE of its points, is the bar — the right end alone would miss a bar nearly full, whose
+-- right end is blue. Then no name is read off that picture. In table units at 50 %, inside
+-- G.NAME_REGION: the pictures' ends, x 0 to 5 and 279 to 287 of the 288 at 80 %, rows 4 to 20. On
+-- Windows the bar is not measured (KalliGui); a field that never shows it costs one look at its
+-- points per reading — off the picture already taken, a few microseconds.
+local BAR_LEFT = { 34.5, 9.5, 37, 19.5 }
+local BAR_RIGHT = { 208.5, 9.5, 213.5, 19.5 }
+local BAR_SHARE = 0.9
+-- What a reading of the bar is to the watch: a reading — it breaks a run of readings alike, as the
+-- name before it and the name after it are two names — that is never a name (settledName).
+local LOADING = "(VPS Avenger's loading bar)"
+
+-- Up to 4 x 6 points spread over screen rectangle `r`, each inside it.
+local function pointsIn(r)
+  local out = {}
+  local w, h = r[3] - r[1], r[4] - r[2]
+  local nx, ny = math.clamp(w, 1, 4), math.clamp(h, 1, 6)
+  for i = 0, nx - 1 do
+    for j = 0, ny - 1 do
+      out[#out + 1] = { r[1] + math.floor((i + 0.5) * w / nx), r[2] + math.floor((j + 0.5) * h / ny) }
+    end
+  end
+  return out
+end
+
+-- The bar's two ends on screen for overlay `o` now, or nil: placed when the name's field is, so
+-- that a picture of the field holds them.
+local function barEnds(o)
+  local l, r = o:toScreenRect(BAR_LEFT), o:toScreenRect(BAR_RIGHT)
+  if not (l and r and l[3] > l[1] and l[4] > l[2] and r[3] > r[1] and r[4] > r[2]) then return nil end
+  return { l, r }
+end
+
+-- Whether snapshot `snap` of the name's field shows the loading bar at `ends` (barEnds'): true and
+-- what it showed, for the log, or false. Its points read off the picture, at once.
+local function barIn(snap, ends)
+  if not ends then return false end
+  local left, right = pointsIn(ends[1]), pointsIn(ends[2])
+  local all = table.clone(left)
+  for _, p in ipairs(right) do all[#all + 1] = p end
+  local ok, colours = pcall(host.screen.pixels, all, { snapshot = snap })
+  if not (ok and type(colours) == "table" and #colours == #all) then return false end
+  local blue, black = 0, 0
+  for i, c in ipairs(colours) do
+    if i <= #left then
+      if c.b >= 200 and c.r + c.g + c.b >= 550 then blue += 1 end
+    elseif c.r + c.g + c.b <= 12 then
+      black += 1
+    end
+  end
+  local b, k = blue / #left, black / #right
+  if b < BAR_SHARE and k < BAR_SHARE then return false end
+  return true, string.format("its left end %d %% the bar's blue, its right end %d %% black", math.floor(b * 100 + 0.5),
+    math.floor(k * 100 + 0.5))
+end
+
+-- What reading `res` of the name's field gives as a name: nil for none — nothing read, or words a
+-- recogniser only guessed (read/ocr.luau, R.guessedOnly: PaddleOCR alone on a Mac, all 25 of whose
+-- readings of this field in the developer's Mac test of 2026-10-31 were inventions) unless the
+-- preset database has them as they stand — else the name, noted as the latest one read. `why`, for
+-- the log once per press: the guess is said there.
+local function nameOf(res, why)
+  if not (type(res) == "table" and res.status == "text") then return nil end
+  local t = tidy(res.text)
+  if t == "" then return nil end
+  local name = asName(t)
+  if R.guessedOnly(res) and not DB.catalogName(name) then
+    if why then
+      host.log.info(string.format("[avenger] %s: '%s' was read only in boxes the recogniser guessed, and is no "
+        .. "catalog name as it stands — not taken for the name", why, t))
+    end
+    return nil
+  end
+  return noted(name)
+end
+
+-- The name as read now — the press's handler waits for the reading — or nil. Read before a click
+-- of the module's own, where nothing is loading: the loading bar is the watch's to tell
+-- (nameAfter), and a press's read keeps the one picture an action takes where it takes one (a
+-- browser's).
 local function nameNow(o)
   local r = o:toScreenRect(G.NAME_REGION)
   if not r then return nil end
   local ok, res = pcall(host.ocr.recognize, r, { lang = H.lang() })
-  local t = ok and res and tidy(res.text) or ""
-  if t == "" then return nil end
-  return noted(asName(t))
+  return ok and nameOf(res, "the name read now") or nil
 end
 
 -- The last name read for press `gen` and which reading it came from (`names.seq`, counted up for
--- every name a read's answer brings), and a new read started when none is out. The watch looks
--- more often than a read answers — every 100 ms against 130 to 200 for a read on a Mac — so the
--- same answer is handed to several looks, and the reading's number is what tells the watch it is
--- the same one (O:watch counts readings, not looks).
+-- every name a read's answer brings, and for every reading of the loading bar), and a new read
+-- started when none is out: a picture of the name's field with a callback, its ends looked at
+-- (barIn), and the name read off it with a callback. The watch looks more often than a read
+-- answers — every 100 ms against 130 to 200 for a read on a Mac — so the same answer is handed to
+-- several looks, and the reading's number is what tells the watch it is the same one (O:watch
+-- counts readings, not looks).
 local function nameAfter(o, gen)
   if gen ~= names.gen then return nil end
   if not names.reading then
     local r = o:toScreenRect(G.NAME_REGION)
     if r then
       names.reading = true
-      local ok = pcall(host.ocr.recognize, r, { lang = H.lang(), key = "vps-avenger name" }, function(res)
-        names.reading = false
-        if gen ~= names.gen or res.status ~= "text" then return end
-        local t = tidy(res.text)
-        if t ~= "" then
-          t = noted(asName(t))
-          names.text, names.textGen = t, gen
-          names.seq += 1
+      local ends = barEnds(o)
+      local function reading(text)
+        names.text, names.textGen = text, gen
+        names.seq += 1
+      end
+      local ok = pcall(host.screen.snapshot, { region = r }, function(snap)
+        if not snap or gen ~= names.gen then
+          if snap then snap:release() end
+          names.reading = false
+          return
+        end
+        local loading, what = barIn(snap, ends)
+        if loading then
+          snap:release()
+          names.reading = false
+          if names.barSaid ~= gen then
+            names.barSaid = gen
+            host.log.info("[avenger] the name's field shows VPS Avenger's loading bar (" .. what .. ") — a reading, "
+              .. "and no name")
+          end
+          return reading(LOADING)
+        end
+        local okR = pcall(host.ocr.recognize, r, { lang = H.lang(), key = "vps-avenger name", snapshot = snap },
+          function(res)
+            snap:release()
+            names.reading = false
+            if gen ~= names.gen then return end
+            local why = names.guessSaid ~= gen and "the name read after the click" or nil
+            if R.guessedOnly(res) then names.guessSaid = gen end
+            local t = nameOf(res, why)
+            if t then reading(t) end
+          end)
+        if not okR then
+          snap:release()
+          names.reading = false
         end
       end)
       if not ok then names.reading = false end
@@ -396,15 +515,23 @@ end
 -- at its first reading. Avenger shows a loading display while it loads a preset, and a read of it
 -- comes out as some other text each time ("cYanmaGentaYellowb", "PY", "M": the first Mac test of
 -- the page, 2026-10-14, where the first reading that differed was said as the preset in seven of
--- ten steps), so two readings alike are the name. A loading display read alike twice in a row would
--- still pass; that log had none. `n` is O:watch's count of readings in a row.
+-- ten steps), so two readings alike are the name — and a reading of the loading bar itself
+-- (LOADING), which the picture tells since 0.16, never is: "PY" read twice alike off it passed in
+-- the developer's Mac test of 2026-10-31. `n` is O:watch's count of readings in a row.
 local function settledName(now, n)
+  if now == LOADING then return false end
   return n >= 2 or DB.catalogName(now)
 end
 
 -- What the watch's bound leaves of reading `now`, read `n` times in a row, after `before`: nil for
--- a name that changed and never settled — said as not read, not as the preset — and `now` otherwise.
+-- a name that changed and never settled — said as not read, not as the preset — and for the loading
+-- bar still shown, and `now` otherwise.
 local function keptAtBound(label, now, before, n)
+  if now == LOADING then
+    host.log.info(string.format("[avenger] '%s': VPS Avenger still shows its loading bar at the bound — no name taken",
+      label))
+    return nil
+  end
   if now == nil or now == before or settledName(now, n) then return now end
   host.log.info(string.format("[avenger] '%s': '%s' was read once and is no catalog name — not taken", label, now))
   return nil
@@ -565,12 +692,14 @@ local function presetInfo(ov)
   })
 end
 
--- ── MENU's items ─────────────────────────────────────────────────────────────
+-- ── MENU's Initialize ────────────────────────────────────────────────────────
 -- Chosen in Avenger's own menu, a popup it draws itself — painted inside Avenger's editor in
 -- Logic, as a JUCE popup given a parent is (a Mac finding), possibly a window of its own elsewhere
 -- (popups.luau; unmeasured on Avenger's Windows toolkit, KalliGui): MENU is clicked, and the item
 -- once a menu test (below, the binding) sees the popup and says where it is — never after a wait
--- — and the choice counts once the popup has taken it (O:chooseMenuItem).
+-- — and the choice counts once the popup has taken it (O:chooseMenuItem). Load preset and Save
+-- preset as are clicked as the project clicks them instead (below, "Load preset and Save preset
+-- as").
 --
 -- The item is placed from Avenger's corner, where the project's figures are, across the middle of
 -- the popup's own width, in screen pixels at the factor MENU was clicked at (the runtime hands it
@@ -629,25 +758,259 @@ end
 -- What each item leaves on screen, for the preset database (presets.luau, DB.forget): after Load
 -- and Save as, most likely the user's own file, whose name is not looked for in the catalog by
 -- similarity (the project's tool skips its snap there too); after Initialize, Avenger's blank
--- preset; Save keeps the name, so whether it is the user's own stays as it was.
+-- preset.
 local OWN_NAME = { ["Load preset"] = true, ["Save preset as"] = true, ["Initialize preset"] = false }
 
--- The items that open a file dialog, clicked once (O:chooseMenuItem's `retries = 0`): Avenger's
--- popup stays drawn, frozen, while the dialog opens — the second Mac test clicked Load preset four
--- times, and a second click lands in the dialog. The runtime waits on a popup frozen as at the
--- click since 0.13, but a click it follows and still finds so at the press's bound is given up as
--- not taken, and the popup is then closed by a click on MENU (closeLeftOpen), which would land in
--- the dialog too; so these are chosen at their click, as the project's tool clicks them once.
-local ONE_CLICK = { ["Load preset"] = true, ["Save preset as"] = true }
+-- Initialize: chosen in the popup seen (above), and its warning box looked for once the choice
+-- has been taken (dialog.luau). Not chosen where the box would lie off the screen.
+local function initializeEntry(ov, label, item)
+  ov:addCustomButton({
+    label = label,
+    onActivate = function(o)
+      if Ring.stillWorking(label) then return end
+      local r, zoom, s = boxOffScreen(o)
+      if r then
+        host.log.info(string.format("[avenger] '%s' not chosen: Avenger's warning box would lie at "
+          .. "(%d,%d)-(%d,%d), past the screen's %dx%d", label, r[1], r[2], r[3], r[4], s.w, s.h))
+        host.speech.output(string.format("%s: Avenger's warning box would open off the screen%s — "
+          .. "zoom out first", label, zoom and (" at " .. zoom .. " percent") or ""), { interrupt = true })
+        return
+      end
+      local origin = o:origin()
+      local id = origin and origin.id
+      local pick = {}
+      local opened = o:chooseMenuItem({
+        label = label,
+        at = G.MENU,
+        menuItem = menuItemAt(label, item, pick),
+        onDone = function(w, chosen, err)
+          if chosen then
+            -- The preset is blanked: the database's position is not Avenger's any more, nor the
+            -- latest name read.
+            DB.forget(label .. " chosen", OWN_NAME[label])
+            unseen()
+            D.arm(id, label)
+            return
+          end
+          closeLeftOpen(w, pick, err, label, G.MENU)
+        end,
+      })
+      -- What a hotspot says on its click: MENU was clicked. What the item did is the plug-in's to
+      -- show: the warning box's own overlay.
+      if opened then
+        H.popup(origin)
+        host.speech.output(label .. ", activated", { interrupt = true })
+      end
+    end,
+  })
+end
+
+-- ── Load preset and Save preset as ───────────────────────────────────────────
+-- LIKE THE ORIGINAL (the maintainer's decision of 2026-10-31, after the developer's Mac test of
+-- that day): the two items that open the DAW's file dialog are chosen as the avenger_control
+-- project chooses them (its actions.py: _pick_menu_item, action_pick_load_preset and
+-- action_pick_save_preset_as) — MENU clicked once, then, MENU_OPEN_DELAY after that click is made,
+-- the item clicked ONCE at its fixed point, the project's MENU_ITEMS (header_map.py: Load at (257, 32), Save as at
+-- (257, 55), at 50 % from Avenger's corner: G.LOAD, G.SAVE_AS), placed through the overlay's frame
+-- and factor as every point of this module is — the factor MENU is clicked at, since the popup is
+-- drawn at the zoom it opened at. No menu test sees the popup first, the item is never clicked a
+-- second time, MENU is never clicked again to close a popup, and nothing is tried again because a
+-- picture did not confirm it. Then the file dialog is the user's, and the name is said after it
+-- (nameAfterDialog).
+--
+-- THE EXCEPTION. MENU_OPEN_DELAY is a timer deciding UI state — that the popup is drawn by then —
+-- which this project's rule forbids (docs/api/overlay.md, O:chooseMenuItem: "the settle between
+-- the two would be a timer deciding that the menu is up by then"). The maintainer made these two
+-- items the rule's explicit, documented exception, for the evidence of that test: the drawn test
+-- (O.menuTests.drawn) missed Avenger's popup when it was ALREADY OPEN at the press — left open by
+-- a choice before it, which a click on MENU does not close (the test's pictures: the popup the same
+-- before and after the click) — saw nothing change in its region, and gave every one of ten such
+-- presses up after 8 s, the keys held for the plug-in meanwhile (mt-verified, finding 1). The
+-- original never asks; its 0.18 s is its "one frame" of Avenger's render, "the same beat we use for
+-- the zoom dropdown". Initialize stays on O:chooseMenuItem (above), and every other popup of the
+-- module is chosen once a menu test sees it. The same test's pictures settled the points: MENU's
+-- popup at 80 % puts Load's row at y 43 to 61 and Save as's at 81 to 99 below Avenger's corner, and
+-- the project's points land at 51 and 88 in them (geometry.luau).
+--
+-- THE CLICK'S CHECKS are a click of the module's own (pointAt): MENU's as any; the item's inside
+-- the plug-in, and with host.window.ownsPoint asked about it — the plug-in's window drawn there.
+-- Avenger paints the popup inside its editor on a Mac (popups.luau), so the plug-in's window is
+-- what is drawn at the item there. Where the popup is a window of its own — possible on Windows,
+-- where Avenger's toolkit is KalliGui and its popups are unmeasured — ownsPoint answers false at
+-- the item; then a window of the plug-in's process that the window server lists now
+-- (host.window.windowsOf) and did not list at MENU's click, over the item's point, is taken for the
+-- popup and asked about itself (ownsPoint's `listed`), as O:chooseMenuItem asks a menu's window,
+-- and a false from that, or no such window, refuses the click and says so. The log says what was
+-- decided either way. The item is clicked only while the overlay is in front on the window MENU was
+-- clicked in; a popup that took the front from it (unmeasured) leaves it unclicked, and the ring
+-- says so as well as the log (the review of 0.16, its finding 5: "Load preset, activated" was the
+-- last word the user heard).
+--
+-- THE DELAY RUNS FROM MENU'S CLICK MADE, not asked for (the same review, its finding 1): on Windows
+-- a click within the double-click time and rectangle of the host's last press of its button is held
+-- on the host's gesture thread until that time has passed (docs/api/input.md, host.input.click,
+-- Windows) — up to about half a second: after the click on MENU that closes a popup Initialize left
+-- open, say, with Load pressed at once — and an item asked for 0.18 s after the call would queue
+-- behind it and go out with it, before the popup is drawn. The click's callback comes once the click is made, held or
+-- not (on the tick after the call for one made at it), so the delay is armed there.
+local MENU_OPEN_DELAY = 180
+
+-- The label whose item is still to be clicked, or nil: a press meanwhile sends nothing.
+local fileOut = nil
+
+-- The process of the plug-in's window for overlay `o`, as the runtime's newWindow finds it: its
+-- origin's, or the window in front's.
+local function processOf(o)
+  local origin = o:origin()
+  local pid = origin and origin.app and origin.app.pid
+  if pid then return pid end
+  local ok, a = pcall(host.window.active)
+  return ok and type(a) == "table" and a.app and a.app.pid or nil
+end
+
+-- The window server's windows of process `pid` now, keyed by id, or nil.
+local function listing(pid)
+  if not pid then return nil end
+  local ok, list = pcall(host.window.windowsOf, pid)
+  if not (ok and type(list) == "table") then return nil end
+  local ids = {}
+  for _, w in ipairs(list) do ids[w.id] = w end
+  return ids
+end
+
+-- Whether the item `label` is clicked at screen point (x, y) on overlay `o` (THE CLICK'S CHECKS):
+-- true, or false and what was said (or would have been, `quiet`). `before`: the listing at MENU's
+-- click.
+local function itemClickable(o, label, x, y, pid, before, quiet)
+  local function refuse(said)
+    if not quiet then host.speech.output(said, { interrupt = true }) end
+    return false, said
+  end
+  local origin = o:origin()
+  local b = origin and origin.bounds
+  if not (b and x >= b.x and x < b.x + b.w and y >= b.y and y < b.y + b.h) then
+    host.log.info(string.format("[avenger] '%s': its item resolves to (%d,%d), outside the plug-in — not clicking",
+      label, x, y))
+    return refuse(label .. " is not where it should be")
+  end
+  local ok, mine = pcall(host.window.ownsPoint, origin.id, x, y)
+  if not ok or mine ~= false then
+    host.log.info(string.format("[avenger] '%s': at its item (%d,%d) the plug-in's window is drawn (ownsPoint %s) — "
+      .. "clicking it", label, x, y, ok and tostring(mine) or ("raised: " .. tostring(mine))))
+    return true
+  end
+  local popup = nil
+  for id, w in pairs(listing(pid) or {}) do
+    if not (before and before[id]) and type(w.x) == "number" and x >= w.x and x < w.x + (w.w or 0) and y >= w.y
+      and y < w.y + (w.h or 0) and (popup == nil or (w.w or 0) * (w.h or 0) > popup.w * popup.h
+        or ((w.w or 0) * (w.h or 0) == popup.w * popup.h and id < popup.id)) then
+      popup = { id = id, x = w.x, y = w.y, w = w.w or 0, h = w.h or 0 }
+    end
+  end
+  if popup then
+    local okP, drawn = pcall(host.window.ownsPoint, popup.id, x, y, { listed = true })
+    if okP and drawn ~= false then
+      host.log.info(string.format("[avenger] '%s': at its item (%d,%d) another window is drawn — window %s of the "
+        .. "plug-in's process, %dx%d at %d,%d, listed since MENU's click, is taken for MENU's popup as a window of "
+        .. "its own (ownsPoint %s) — clicking it", label, x, y, tostring(popup.id), popup.w, popup.h, popup.x, popup.y,
+        okP and tostring(drawn) or "raised"))
+      return true
+    end
+  end
+  host.log.info(string.format("[avenger] '%s': at its item (%d,%d) another window is drawn, %s — not clicking", label,
+    x, y, popup and string.format("over window %s, which came with MENU's click", tostring(popup.id))
+      or "and no window of the plug-in's process came with MENU's click"))
+  return refuse("something else is covering " .. label .. ", or its window is gone")
+end
+
+-- MENU, then `label`'s item at table point `item`, on overlay `o` (above): true once MENU's click
+-- is handed to the host, and `done(o, true)` — as a handler, MENU_OPEN_DELAY after MENU's click was
+-- made — once the item is clicked; or `done(o, false, said)` where it was not: `said` what was said
+-- (or would have been, `quiet`) — MENU's click not made after all, the item refused, or the overlay
+-- no longer where the press was — and nil where `here()` said no, whose trip says the rest. False
+-- and what was said where the host refused MENU's click at the call, or nil where nothing is said
+-- (a press while an item is still to come). `here()`: whether to go on at the item — a trip's
+-- trip:inFront(); by default the overlay in front on the window MENU was clicked in.
+local function pickFileItem(o, label, item, quiet, here, done)
+  if fileOut then
+    host.log.info(string.format("[avenger] '%s': %s's item is still to be clicked — this press is not sent", label,
+      fileOut))
+    return false, nil
+  end
+  local mx, my = pointOf(o, label, G.MENU, quiet)
+  if not mx then return false, my end
+  local ix, iy = o:toScreen(item[1], item[2])
+  if not ix then
+    host.log.info(string.format("[avenger] '%s' cannot be placed now — %s; nothing clicked", label, tostring(iy)))
+    local said = label .. " is not available now"
+    if not quiet then host.speech.output(said, { interrupt = true }) end
+    return false, said
+  end
+  local pid = processOf(o)
+  local before = listing(pid)
+  local hwnd = o:hwnd()
+  local function say(said)
+    if not quiet then host.speech.output(said, { interrupt = true }) end
+    return said
+  end
+  -- The item, MENU_OPEN_DELAY after MENU's click was made.
+  local function itemNow()
+    fileOut = nil
+    local fine
+    if here then
+      fine = here()
+    else
+      fine = o.active and o:hwnd() == hwnd
+    end
+    if not fine then
+      host.log.info(string.format("[avenger] '%s': its item is not clicked — the overlay is no longer in front on the "
+        .. "window MENU was clicked in", label))
+      -- A trip's own check has ended its trip, whose give-up says why; the ring says it here,
+      -- queued: the user is in another window by now, whose own words it does not cut off.
+      if here then return done(o, false, nil) end
+      local said = label .. ": not clicked — VPS Avenger is no longer in front"
+      if not quiet then host.speech.output(said, { interrupt = false }) end
+      return done(o, false, said)
+    end
+    local ok, said = itemClickable(o, label, ix, iy, pid, before, quiet)
+    if not ok then return done(o, false, said) end
+    host.input.click(ix, iy)
+    done(o, true)
+  end
+  host.log.info(string.format("[avenger] '%s': clicking MENU (%d,%d), and %d ms after that click is made its item at "
+    .. "(%d,%d), the project's (%g,%g) — the original's way, no menu test (the maintainer's decision of 2026-10-31)",
+    label, mx, my, MENU_OPEN_DELAY, ix, iy, item[1], item[2]))
+  local refused = false
+  local okCall, err = host.input.click(mx, my, nil, function(made, why)
+    -- Refused at the call: answered there, below.
+    if refused then return end
+    if not made then
+      fileOut = nil
+      host.log.info(string.format("[avenger] '%s': MENU's click was not made — %s; its item is not clicked", label,
+        tostring(why)))
+      return done(o, false, say(label .. " was not clicked: " .. tostring(why)))
+    end
+    host.timer.after(MENU_OPEN_DELAY, itemNow)
+  end)
+  if okCall == false then
+    refused = true
+    host.log.info(string.format("[avenger] '%s': MENU's click was refused — %s; nothing clicked", label, tostring(err)))
+    return false, say(label .. " was not clicked: " .. tostring(err))
+  end
+  fileOut = label
+  return true
+end
 
 -- After Load and Save as, the name (the second Mac test's finding 18: the ring said nothing of the
 -- preset loaded): the file dialog the item opens is the user's, and once the plug-in is in front
--- again after it — the overlay runtime's O:afterDialog (0.14), the overlay holding its place over
--- the dialog or coming back to the window it was chosen in — the name is watched as the page's Load
--- watches it (watchName: read until it differs from `was` and has settled, up to NAME_WITHIN) and
--- said in the page's words, "Load preset: <name>", or that it cannot be read. No dialog within the
--- runtime's bound: the name all the same, with that said. A wait the runtime refuses says nothing
--- more than the press did.
+-- again after it — the overlay runtime's O:afterDialog (0.14), asked after the item's click, so
+-- that a popup that is a window of its own is listed before the wait and is no dialog (0.16.1) —
+-- the name is watched as the page's Load watches it (watchName: read until it differs from `was`
+-- and has settled, up to NAME_WITHIN) and said in the page's words, "Load preset: <name>"; a name
+-- that did not change by the watch's bound — the dialog cancelled — "Load preset: <name>,
+-- unchanged" (mt-verified, finding 8: a cancelled Load was said as if it had loaded); or that it
+-- cannot be read. No dialog within the runtime's bound: the name all the same, with that said. A
+-- wait the runtime refuses says nothing more than the press did.
 local function nameAfterDialog(w, label, was)
   local ok, err = w:afterDialog(function(o, seen)
     if not o.active then
@@ -655,12 +1018,13 @@ local function nameAfterDialog(w, label, was)
         seen and "back after the dialog" or "no file dialog came"))
       return
     end
-    watchName(o, was, function(now)
+    watchName(o, was, function(now, before, changed)
       local said
       if now == nil then
         said = label .. ": the preset name cannot be read now"
       else
-        said = label .. ": " .. now .. (seen and "" or " — no file dialog was seen")
+        local same = not changed and before ~= nil and now == before
+        said = label .. ": " .. now .. (same and ", unchanged" or "") .. (seen and "" or " — no file dialog was seen")
       end
       host.log.info(string.format("[avenger] '%s': the name after the dialog — %s", label, said))
       host.speech.output(said, { interrupt = true })
@@ -671,49 +1035,25 @@ local function nameAfterDialog(w, label, was)
   end
 end
 
--- `arms`: the item opens Avenger's warning box, which is looked for once the choice has been
--- taken.
-local function menuEntry(ov, label, item, arms)
+-- Load preset or Save preset as in the ring: MENU and the item (pickFileItem), said as a hotspot
+-- says its click once MENU is clicked; once the item is clicked, the preset may be another — the
+-- database's position and the latest name read are forgotten — and the name is said after the
+-- dialog.
+local function fileEntry(ov, label, item)
   ov:addCustomButton({
     label = label,
     onActivate = function(o)
       if Ring.stillWorking(label) then return end
-      if arms then
-        local r, zoom, s = boxOffScreen(o)
-        if r then
-          host.log.info(string.format("[avenger] '%s' not chosen: Avenger's warning box would lie at "
-            .. "(%d,%d)-(%d,%d), past the screen's %dx%d", label, r[1], r[2], r[3], r[4], s.w, s.h))
-          host.speech.output(string.format("%s: Avenger's warning box would open off the screen%s — "
-            .. "zoom out first", label, zoom and (" at " .. zoom .. " percent") or ""), { interrupt = true })
-          return
-        end
-      end
       local origin = o:origin()
-      local id = origin and origin.id
-      local pick = {}
-      -- The name before the choice, for the watch after Load's and Save as's dialog.
+      -- The name before the choice, for the watch after the dialog.
       local was = names.last
-      local opened = o:chooseMenuItem({
-        label = label,
-        at = G.MENU,
-        menuItem = menuItemAt(label, item, pick),
-        retries = ONE_CLICK[label] and 0 or nil,
-        onDone = function(w, chosen, err)
-          if chosen then
-            -- Every item may load, rename, overwrite or blank the preset: the database's position
-            -- is not Avenger's any more, nor the latest name read.
-            DB.forget(label .. " chosen", OWN_NAME[label])
-            unseen()
-            if arms then D.arm(id, label) end
-            if ONE_CLICK[label] then nameAfterDialog(w, label, was) end
-            return
-          end
-          closeLeftOpen(w, pick, err, label, G.MENU)
-        end,
-      })
-      -- What a hotspot says on its click: MENU was clicked. What the item did is the plug-in's to
-      -- show — a file dialog, or the warning box's own overlay.
-      if opened then
+      local clicked = pickFileItem(o, label, item, false, nil, function(w, ok)
+        if not ok then return end
+        DB.forget(label .. " chosen", OWN_NAME[label])
+        unseen()
+        nameAfterDialog(w, label, was)
+      end)
+      if clicked then
         H.popup(origin)
         host.speech.output(label .. ", activated", { interrupt = true })
       end
@@ -836,19 +1176,31 @@ local header = placed(O.new("VPS Avenger"))
 -- empty read is the recogniser's failure — Avenger always shows a name — and is said as that; a
 -- reading of the blank preset the project knows for a misread is said as "Init Preset" (`value`),
 -- and kept as the latest name read while the overlay is in front, for ◀ and ▶.
+-- A reading only in boxes a recogniser guessed (PaddleOCR alone, overlay runtime 0.16.2's `reading`)
+-- is no name unless the preset database has it as it stands (nameOf), and says that it cannot be
+-- read now.
 header:addOCRButton({ label = "Preset", region = G.NAME_REGION, readOnly = true, fallback = "cannot be read now",
-  value = function(o, text)
-    local name = R.presetName(text)
+  value = function(o, text, reading)
+    local name = asName(text)
+    if reading and R.guessedOnly(reading) and not DB.catalogName(name) then
+      host.log.info(string.format("[avenger] 'Preset': '%s' was read only in boxes the recogniser guessed, and is no "
+        .. "catalog name as it stands — not said as the name", text))
+      return "cannot be read now"
+    end
     if o.active then noted(name) end
     return name
   end })
 presetStep(header, "Previous preset", G.PREV, -1)
 presetStep(header, "Next preset", G.NEXT, 1)
 if DB.present then presetInfo(header) end
-menuEntry(header, "Load preset", G.LOAD, false)
-menuEntry(header, "Save preset", G.SAVE, true)
-menuEntry(header, "Save preset as", G.SAVE_AS, false)
-menuEntry(header, "Initialize preset", G.INITIALIZE, true)
+-- MENU's items: Load preset and Save preset as the project's way, Initialize in the popup seen.
+-- Save preset is left out since 0.16, as the project leaves it out (its header_map.py, MENU_ITEMS:
+-- Avenger's overwrite warning; the maintainer's decision of 2026-10-31): in the developer's Mac test
+-- of that day its item was drawn greyed, and a click on it left the popup open for the eight
+-- seconds the choice was waited for — where the cascade of finding 1 began (mt-verified).
+fileEntry(header, "Load preset", G.LOAD)
+fileEntry(header, "Save preset as", G.SAVE_AS)
+initializeEntry(header, "Initialize preset", G.INITIALIZE)
 -- UNDO, clicked as a hotspot clicks and said as one says its click; an undo may take the preset
 -- back — after Initialize, to the one before — so what this module read of it is forgotten.
 header:addCustomButton({
@@ -918,6 +1270,7 @@ Page.start({
     watchName = watchName,
     settledName = nameSettles,
     menuItemAt = menuItemAt,
+    pickFileItem = pickFileItem,
     zoomEntry = zoomEntry,
     closeLeftOpen = closeLeftOpen,
     doubleAt = doubleAt,
@@ -948,7 +1301,7 @@ header:bind(BINDING, { specificity = O.layer.base,
 -- ── The warning box ──────────────────────────────────────────────────────────
 -- Its own overlay on the same slot and binding, at the dialog layer: the box's text, YES and NO.
 -- `pollMatch`: the box comes and goes inside Avenger with no window event, so its gate is asked
--- every half second — and only while a Save or Initialize of this module is waiting for it
+-- every half second — and only while an Initialize of this module is waiting for it
 -- (`pollWhen`, dialog.luau). `resume(false)`: the box comes up in the same window every time, so
 -- the runtime would resume on the button the last box was answered with; every box starts on its
 -- own text, and a user who counts stops from there lands where they expect.

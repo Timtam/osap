@@ -78,15 +78,14 @@ Pp.SUBMENU = { rect = { 0, -150, 160, 150 }, min = { 30, 23 } }
 local AVENGER = { 0, 0, G.WIDTH_AT_50, G.HEIGHT_AT_50 }
 
 -- Which popup a press opens, by the label the ring and the page press it with (main.luau,
--- actions.luau): the zoom field's, MENU's items, UNDO's right click, the Expansion View field's.
+-- actions.luau): the zoom field's, MENU's Initialize, UNDO's right click, the Expansion View
+-- field's. MENU's Load preset and Save preset as are no press: they are clicked at their points
+-- with no menu test, as the project clicks them (main.luau, "Load preset and Save preset as").
 -- Every other press with a point and the right button is a right click's menu (actions/osc.luau,
 -- actions/macros.luau), and one with the left button named a field's popup below it
 -- (actions/sample.luau, actions/drumsq.luau).
 local BY_LABEL = {
   Zoom = Pp.ZOOM_LIST,
-  ["Load preset"] = Pp.MENU,
-  ["Save preset"] = Pp.MENU,
-  ["Save preset as"] = Pp.MENU,
   ["Initialize preset"] = Pp.MENU,
   ["Redo list"] = Pp.REDO,
   Redo = Pp.REDO,

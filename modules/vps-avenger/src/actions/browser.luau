@@ -42,8 +42,11 @@
 --                         tool's (B.goToCategory)
 --   select_expansion_preset, load_expansion_preset, mark_expansion_preset_favorite {preset_index, …}
 --                         its category clicked first where this session's clicks did not leave it
---                         shown, the presets' scrollbar clicked to its page by the tool's measured
---                         table (Pg.presetPlace, Pg.presetScroll), then a click, a double-click, or a
+--                         shown — its presets' place not known after that click (the avenger_control
+--                         developer's correction of 2026-10-31) — the presets' scrollbar clicked to
+--                         its page by the tool's measured table (Pg.presetPlace, Pg.presetScroll),
+--                         from the end of the whole category first where the place is not known,
+--                         then a click, a double-click, or a
 --                         click on its star at the tool's row — Select a preview, the strip and the
 --                         macros read after it and no name; Load's double-click confirmed by the
 --                         preset's name watched after it; the star read after Mark's click
@@ -292,8 +295,7 @@ end
 -- The header read off picture `s` as text, the picture test, and the state they say with the
 -- expansion `expected` (Br.state): the state, its words, the readings and the test.
 local function stateOf(ctx, s, expected)
-  local byName = Br.read(s, ctx.pl)
-  local look = Br.look(s, ctx.pl)
+  local byName, look = Br.readAndLook(s, ctx.pl)
   local st, words = Br.state(byName, look, { window = ctx.window, zoom = ctx.pl.zoom, expected = expected })
   return st, words, byName, look
 end
@@ -451,15 +453,26 @@ local LIST_WORDS = { grid = "the grid's scrollbar", categories = "the categories
 -- (taken over), each followed by a change wait on the list's bands: a click at a point that moved
 -- nothing is not made again at that point, as the list stands at that end. `done(picture or nil,
 -- sentence?)` with the last picture — the caller's — or nil where none came; with the sentence where
--- a point could not be clicked. Nothing where the trip ended meanwhile.
+-- a point could not be clicked. Nothing where the trip ended meanwhile. A click at the point of the
+-- one before it says in its line how long after that one it was asked (host.now): the second
+-- Windows session (2026-10-31) lost the second of two clicks at one point of the grid's scrollbar,
+-- most likely paired into a double-click (avw2-verified, B-F2), and these gaps show whether every
+-- "stood still" followed one under the system's double-click time (A4). The host holds such a
+-- click out of a double-click on Windows since then (docs/api/input.md); a held click is answered
+-- when it is handed over, and the change wait from the picture before it looks the same.
 local function clickSeries(o, trip, ctx, list, pic, clicks, label, done)
   local watch = onScreen(ctx, bands(list))
   local i, still = 0, nil
+  local lastAt = {} -- "x,y" -> host.now() of the last click there
   local function step()
     i += 1
     while clicks[i] and still and clicks[i][1] == still[1] and clicks[i][2] == still[2] do i += 1 end
     local c = clicks[i]
     if not c then return done(pic) end
+    local key = c[1] .. "," .. c[2]
+    local before = lastAt[key]
+    local now = host.now()
+    lastAt[key] = now
     local ok, said = E.ring.clickAt(o, label, c, nil, true)
     if not ok then
       pic:release()
@@ -469,7 +482,8 @@ local function clickSeries(o, trip, ctx, list, pic, clicks, label, done)
       if not s then return done(nil) end
       pic = s
       still = (not changed) and c or nil
-      log("'%s': %s clicked at %.1f — the list %s", label, LIST_WORDS[list], c[2], changed and "moved" or "stood still")
+      log("'%s': %s clicked at %.1f — the list %s%s", label, LIST_WORDS[list], c[2], changed and "moved" or "stood still",
+        before and string.format(", %d ms after the click before it at this point", now - before) or "")
       step()
     end)
   end
@@ -716,21 +730,45 @@ function B.open(o, trip, args, name, label, known)
         finish({ error = words .. ", and it is still open" }, clicked .. ", " .. other .. " in the header, still open")
       end)
   end
-  -- After the click: the header read and its picture tested, FAV where an expansion reads open.
+  -- After the click: the header read and its picture tested.
   local function readOpen(s)
     local st2, words = stateOf(ctx, s, nil)
     log("'%s': after the click, %s", label, words)
-    local r = { st = st2 }
-    if st2 and st2.open then
-      local marks = {}
-      r.fav = Br.fav(s, pl, marks)
-      Br.picture(string.format("browser-open-%dpct", pl.zoom or 0), s, ctx.region, marks)
-    end
-    return r
+    return { st = st2 }
   end
-  local function opened(r, changed)
+  local clickedAt = nil
+  -- FAV off a SETTLED picture of the open expansion, from picture `s` (taken over), the first whose
+  -- header read open: a change wait on the star column and the presets' rows from it, with B.SETTLE's
+  -- still spell, in what is left of CHANGE_WITHIN since the click; then `next(fav or nil)`. The first
+  -- picture can hold the grid's tiles still drawn under the open expansion's lists — the developer's
+  -- `browser-open-80pct.png` of 2026-10-31 shows exactly that frame — and the eighth column of tiles
+  -- (23 + 7 × 27.5 = 215.5) lies in the star column, which read FAV on after every Open of the second
+  -- Windows session (2026-10-31) and off at every later read (avw2-verified, B-F3, A5). The tool reads
+  -- it 0.10 s after its open (actions.py, action_open_expansion). Where Avenger drew the open expansion
+  -- whole in that first picture, nothing changes and the wait runs to its bound: its picture is then
+  -- the one read. No picture: FAV not read.
+  local function settledFav(s, next)
+    local left = CHANGE_WITHIN - (host.now() - (clickedAt or host.now()))
+    waitFrom(trip, ctx, s, onScreen(ctx, { X.STAR_COLUMN, X.PRESET_TEXT }), math.max(1, left), B.SETTLE,
+      function(s2, changed)
+        if not s2 then
+          log("'%s': FAV not read — no picture of the open expansion settled", label)
+          return next(nil)
+        end
+        local marks = {}
+        local fav = Br.fav(s2, pl, marks)
+        log("'%s': FAV read off the %s picture after the open", label, changed and "settled" or "unchanged")
+        Br.picture(string.format("browser-open-%dpct", pl.zoom or 0), s2, ctx.region, marks)
+        s2:release()
+        next(fav)
+      end)
+  end
+  local function opened(r, changed, s)
     local st2 = r and r.st
     if not (st2 and st2.open and st2.name == name) then unconfirmed() end
+    if not (st2 and st2.open and not (st2.name and st2.name ~= name)) then
+      if s then s:release() end
+    end
     if not st2 then return finish({ error = "VPS Avenger's browser cannot be read now" }, clicked .. ", nothing read after") end
     if st2.open and st2.name and st2.name ~= name then return closeAgain(st2.name) end
     if st2.open == false then
@@ -738,19 +776,23 @@ function B.open(o, trip, args, name, label, known)
       return finish({ part = partOf(st2, known), error = "nothing VPS Avenger shows changed" }, clicked
         .. ", the grid still shown")
     end
-    local okL, lists = pcall(DB.lists, name)
-    local v = { expansionOpen = true, selectedExpansion = name, lists = okL and lists or nil, favoriteView = r.fav,
-      loadedIndex = loadedIn(E.ring.lastName(), name) }
     -- What this session's click opened, kept for the reads after it (Br.state): its lists' places
     -- not known yet — nothing below the header is read — so its first category's or preset's action
     -- clicks the category first.
     S.setBrowserAt(ctx.window, { expansion = name })
-    if not st2.name then
-      return finish({ part = { keys = KEYS, values = v }, focus = "open-expansion-name", note = "VPS Avenger shows an "
-        .. "expansion open where " .. name .. " lies by its place in the list chosen; its name cannot be read in the "
-        .. "header now" }, clicked .. ", an expansion open, its name not read in the header")
+    local function told(fav)
+      local okL, lists = pcall(DB.lists, name)
+      local v = { expansionOpen = true, selectedExpansion = name, lists = okL and lists or nil, favoriteView = fav,
+        loadedIndex = loadedIn(E.ring.lastName(), name) }
+      if not st2.name then
+        return finish({ part = { keys = KEYS, values = v }, focus = "open-expansion-name", note = "VPS Avenger shows an "
+          .. "expansion open where " .. name .. " lies by its place in the list chosen; its name cannot be read in the "
+          .. "header now" }, clicked .. ", an expansion open, its name not read in the header")
+      end
+      finish({ part = { keys = KEYS, values = v }, focus = "open-expansion-name" }, clicked .. ", the header confirms it")
     end
-    finish({ part = { keys = KEYS, values = v }, focus = "open-expansion-name" }, clicked .. ", the header confirms it")
+    if not s then return told(nil) end
+    settledFav(s, told)
   end
   spec.click = function(at, pic)
     local x, y = pl:point(at[1], at[2])
@@ -763,11 +805,12 @@ function B.open(o, trip, args, name, label, known)
       return finish({ sentence = said }, "the tile's click refused")
     end
     clicked = string.format("clicked (%d,%d)", x, y)
+    clickedAt = host.now()
     Br.picture(string.format("browser-grid-%s-%dpct", (string.gsub(string.lower(view), " ", "-")), pl.zoom or 0), pic,
       ctx.region, { { x = x, y = y } })
     lookOn(trip, ctx, pic, { X.VIEW_TEXT, X.NAME_TEXT, X.AREA }, readOpen, function(r2)
       return r2.st ~= nil and r2.st.open == true
-    end, opened)
+    end, opened, true)
   end
   B.byPlace(o, trip, ctx, spec)
 end
@@ -807,9 +850,14 @@ end
 -- Category `cat` of `lists` (the expansion `expansion`'s) clicked, from picture `pic` (taken over):
 -- the categories' scrollbar first clicked to the end that shows it where this session's clicks did
 -- not leave it there (Pg.category, Pg.categoryScroll), then its row; a change wait on the two lists
--- after it. `done(picture or nil, changed, sentence?)` — the picture the caller's — and the facts
--- (S.browserAt) say the category clicked and its presets at their top, as the tool takes them after
--- a category's click.
+-- after it, and whether they changed in the log. `done(picture or nil, changed, sentence?)` — the
+-- picture the caller's — and the facts (S.browserAt) say the category clicked and its presets'
+-- place NOT known: a category's click leaves Avenger's list where Avenger last had it (the
+-- avenger_control developer's correction of 2026-10-31, actions.py action_select_expansion_category
+-- and _invalidate_expansion_preset_scroll), where the tool had taken it to its top. The place is
+-- set not known before the click, as his correction invalidates it before click_expansion_category;
+-- the categories' end before their scrollbar's series, stored once it has gone through: a trip
+-- ended or a click refused partway leaves neither known.
 local function clickCategory(o, trip, ctx, label, expansion, lists, cat, pic, done)
   local ci = table.find(lists.categories, cat)
   local place = ci and Pg.category(ci - 1, #lists.categories)
@@ -822,6 +870,8 @@ local function clickCategory(o, trip, ctx, label, expansion, lists, cat, pic, do
   local clicks = (place.at and at.categories ~= place.at) and Pg.categoryScroll(place.at) or {}
   if #clicks > 0 then
     log("'%s': the list of categories to its %s first, for %s, the %d of %d", label, place.at, cat, ci, #lists.categories)
+    at.categories = nil
+    S.setBrowserAt(ctx.window, at)
   end
   clickSeries(o, trip, ctx, "categories", pic, clicks, label, function(s, sentence)
     if sentence then return done(nil, false, sentence) end
@@ -829,14 +879,17 @@ local function clickCategory(o, trip, ctx, label, expansion, lists, cat, pic, do
     if place.at then at.categories = place.at end
     local x, y = ctx.pl:point(place.point[1], place.point[2])
     log("'%s': clicking %s at (%d,%d), the tool's row %d of the categories", label, cat, x, y, place.row + 1)
+    at.presets = Pg.presetsUnknown()
+    S.setBrowserAt(ctx.window, at)
     local ok, said = E.ring.clickPoint(o, label, x, y, nil, true)
     if not ok then
       s:release()
       return done(nil, false, said)
     end
-    at.category, at.presets = cat, { page = 0, first = 0, final = false }
+    at.category = cat
     S.setBrowserAt(ctx.window, at)
     waitFrom(trip, ctx, s, onScreen(ctx, { X.CATEGORY_TEXT, X.PRESET_TEXT }), CHANGE_WITHIN, B.SETTLE, function(s2, changed)
+      log("'%s': the lists %s after %s's click", label, changed and "changed" or "did not change", cat)
       done(s2, changed)
     end)
   end)
@@ -871,12 +924,17 @@ function B.category(o, trip, target, label, known)
       if rows then
         Br.stars(s, ctx.pl, rows)
         v.favoriteStates = starsOver(rows, known, expansion)
+      else
+        -- A category of more than fourteen: where its list stands is not known after its click (the
+        -- developer's correction), so no row is placed — as the tool's action reads none. They come
+        -- with the next preset action of the category, whose place is known.
+        log("'%s': the stars not read — where %s's list stands is not known after its click", label, name)
       end
     end
     s:release()
     local result = { part = { keys = keys, values = v } }
     if not changed then
-      log("'%s': nothing in the lists changed after %s's click%s", label, name, shownBefore and " — it was shown" or "")
+      if shownBefore then log("'%s': %s was shown", label, name) end
       result.note = shownBefore and ("unchanged, " .. name)
         or (name .. " clicked; nothing VPS Avenger shows changed, and its presets cannot be read")
     end
@@ -896,8 +954,10 @@ end
 -- select_expansion_preset ("select"), load_expansion_preset ("load"), mark_expansion_preset_favorite
 -- ("mark"), as the tool clicks them: the preset's category clicked first where this session's clicks
 -- did not leave it shown (the tool clicked it where the page showed every category, and assumed it
--- shown otherwise), the presets' scrollbar clicked to the preset's page by the tool's table, then
--- its row's click, its double-click, or its star's click. Load is confirmed by the preset's name
+-- shown otherwise), its presets' place not known after that click; the presets' scrollbar clicked to
+-- the preset's page by the tool's table — from the end of the whole category first where the place
+-- is not known, the avenger_control developer's correction of 2026-10-31 — then its row's click, its
+-- double-click, or its star's click. Load is confirmed by the preset's name
 -- read after it, `forget` (actions.luau's go) told before its double-click; a name that is not the
 -- preset asked is said, and where the lists stand is forgotten. Select is a PREVIEW: Avenger lets
 -- the preset be heard and loads none — the header's name stays — so, as the tool's
@@ -1084,14 +1144,22 @@ function B.preset(o, trip, forget, kind, arg, label, known)
     if not ok then return trip:done({ sentence = said }) end
   end
 
-  -- Its page: from where this session's clicks left the category's list, the tool's clicks.
+  -- Its page: from where this session's completed clicks left the category's list, the tool's
+  -- clicks — from the end of the whole category where that is not known (Pg.presetScroll, the
+  -- avenger_control developer's correction of 2026-10-31).
   local function toPage(pic)
-    -- With no window to keep it by, what the category's click just did.
-    local at = S.browserAt(ctx.window) or { expansion = expansion, category = cat, presets = { page = 0, first = 0 } }
+    -- With no window to keep it by: not known.
+    local at = S.browserAt(ctx.window) or { expansion = expansion, category = cat, presets = Pg.presetsUnknown() }
+    local known = Pg.presetsKnown(at.presets)
     local clicks = Pg.presetScroll(at.presets, place, #members)
     if #clicks > 0 then
-      log("'%s': %s is the %d of %d in %s — page %d, row %d; %d click(s) on the presets' scrollbar", label, pname,
-        within, #members, cat, place.page + 1, place.row + 1, #clicks)
+      log("'%s': %s is the %d of %d in %s — page %d, row %d; %d click(s) on the presets' scrollbar%s", label, pname,
+        within, #members, cat, place.page + 1, place.row + 1, #clicks,
+        known and "" or (" (where the list stands is not known: its top first, from the end of " .. cat .. ")"))
+      -- Not known while the series runs: a trip ended or a click refused partway leaves it so, and no
+      -- preset is clicked; the place is stored only once the whole series has gone through.
+      at.presets = Pg.presetsUnknown()
+      S.setBrowserAt(ctx.window, at)
     end
     clickSeries(o, trip, ctx, "presets", pic, clicks, label, function(s, sentence)
       if sentence then return trip:done({ sentence = sentence }) end

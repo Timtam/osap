@@ -1,6 +1,6 @@
 -- The drumkit table of the Drums tab, read off a picture (read/open.luau's `drums` part, and the
 -- page key's read while the strip reads the Drums tab selected): every slot's Mute, Solo, Lock and
--- Loop, which slot is selected, and the twelve slots' names.
+-- Loop, and which slot is selected.
 --
 -- SOURCE: the avenger_control project's detect_drumkit_button_state (its clicker/__init__.py),
 -- taken over with its developer's permission (NOTICE): a slot's button is lit by the project's own
@@ -9,9 +9,17 @@
 -- table. The project read Mute, Solo and Lock so, and Loop not at all, flipping it from memory: here
 -- Loop is read by the same test, a starting value (TODO.md, D4). It never read which slot is
 -- selected, nor any slot's name — its page showed SELECTED on the last slot it clicked and the
--- factory names, changed only by what its menu choices were assumed to do. Here the names are
--- read as text, and the selection by a rule of this module's own (below), which a calibrating
--- run's picture and the log settle with the Avenger developer (TODO.md, D2).
+-- factory names, changed only by what its menu choices were assumed to do. Here the selection is
+-- read by a rule of this module's own (below), which a calibrating run's picture and the log settle
+-- with the Avenger developer (TODO.md, D2).
+--
+-- THE NAMES are Avenger's twelve fixed roles (tables/drums.luau, PART_LABELS: the project's
+-- DRUMKIT_PART_LABELS), never read: the column draws the same twelve abbreviations whatever the kit
+-- — CRSH, OH, RD, CL2, PC2, CL1, PC1, SN2, CLP, SN1, RS, BD, dim or bright — in all 144 reads of the
+-- developer's Mac test of 2026-10-31, and he says so (mt-verified, finding 6; the maintainer's
+-- decision of that day, B5). Until 0.16 they were read as text, twelve regions at every Drums read
+-- (about 300 to 350 ms on that Mac), and the page said "OH selected", "Bassdrum reads BD". Whether
+-- Copy to and Swap with move the abbreviations is the developer's to say (TODO.md).
 --
 -- THE SELECTION. Avenger draws its selected slot differently, or its sample editor could not show
 -- "the selected slot"; how, nobody here has seen. So the rule looks only for ONE row that stands
@@ -24,7 +32,6 @@
 local P = host.include("src/read/picture.luau")
 local T = host.include("src/tables/drums.luau")
 local Strip = host.include("src/read/strip.luau")
-local R = host.include("src/read/ocr.luau")
 
 local Dr = {}
 
@@ -34,10 +41,8 @@ local SELECTED_MARGIN = 8
 -- How much less the next one may stand out: half.
 local NEXT_SHARE = 0.5
 
--- The values of a part with the table (state.luau's), found or not; the names only where the
--- part's text is read.
+-- The values of a part with the table (state.luau's), found or not.
 Dr.KEYS = { "kitMute", "kitSolo", "kitLock", "kitLoop", "kitSelected" }
-Dr.NAME_KEYS = { "kitNames" }
 
 -- The four buttons of a slot's row: the values' key, the column, the log's word.
 local BUTTONS = {
@@ -67,14 +72,6 @@ function Dr.ask(pl, out)
   add(P.cells("slot loop bright", loop, Strip.BRIGHT, CELL * pl.k))
   -- Its rows are what is used: the background above and below each name.
   add(P.profile("slot names", pl:rect(NAMES), "both"))
-end
-
--- The twelve slots' names as regions of the one text read, into `entries`.
-function Dr.entries(pl, entries)
-  for i = 1, #T.PART_LABELS do
-    local r = pl:rect(T.nameRect(i))
-    if r then entries[#entries + 1] = { name = "slot " .. i, region = r } end
-  end
 end
 
 -- The background of slot `i`'s name column, above and below its name, from the profile's rows; nil
@@ -127,10 +124,9 @@ local function selected(pl, prof)
     list
 end
 
--- The table into `v`, off the answers `got` (and the text read, `byName`, or nil where the part's
--- text was not read): only where the strip reads the Drums tab selected. `marks` collects the points
--- for the calibration picture.
-function Dr.decide(pl, got, byName, v, log, marks)
+-- The table into `v`, off the answers `got`: only where the strip reads the Drums tab selected.
+-- `marks` collects the points for the calibration picture.
+function Dr.decide(pl, got, v, log, marks)
   local function mark(p) local x, y = pl:point(p[1], p[2]); marks[#marks + 1] = { x = x, y = y } end
   local words = {}
   for _, b in ipairs(BUTTONS) do v[b[1]] = {} end
@@ -152,18 +148,6 @@ function Dr.decide(pl, got, byName, v, log, marks)
   v.kitSelected = s
   log(string.format("drums: the name column's background %s — selected: %s", means or "not read", tostring(why)))
   for i = 1, #T.PART_LABELS do mark({ T.NAME_COLUMN[1] + 4, T.rowY(i) }) end
-  if byName then
-    v.kitNames = {}
-    local said = {}
-    for i = 1, #T.PART_LABELS do
-      local r = byName["slot " .. i]
-      local text = r and r.status == "text" and R.tidy(r.text) or ""
-      if text ~= "" then v.kitNames[i] = text end
-      said[#said + 1] = string.format("%d %s", i, text ~= "" and ("'" .. R.forLog(text) .. "'")
-        or (r and r.status or "not answered"))
-    end
-    log("drums: the slots' names " .. table.concat(said, "; "))
-  end
 end
 
 return Dr

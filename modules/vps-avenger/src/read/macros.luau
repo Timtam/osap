@@ -8,11 +8,14 @@
 -- numbers, as shares of one picture (read/picture.luau). Two reads are this module's own, since
 -- the project kept them in memory rather than reading them: which tab is shown — the darkest
 -- bottom strip, as the project reads the oscillator and central tabs — and the five names, read
--- as text and checked against the preset database's (read/ocr.luau).
+-- as text where the preset database does not have the preset, and at the page key only, as a
+-- check, where it does (Mc.count, Mc.labels: the database first, the maintainer's decision of
+-- 2026-10-31, as the project names them).
 
 local P = host.include("src/read/picture.luau")
 local M = host.include("src/tables/macros.luau")
 local R = host.include("src/read/ocr.luau")
+local DB = host.include("src/presets.luau")
 
 local Mc = {}
 
@@ -112,40 +115,118 @@ function Mc.selected(pl, got, count, v, log, marks)
       or "none taken as shown"))
 end
 
--- The OCR entries of the macro panel: its tabs' captions, and the shown tab's five names.
-function Mc.entries(pl, out)
-  local r = pl:rect(M.TAB_TEXT)
-  if r then out[#out + 1] = { name = "macro tabs", region = r } end
+-- The OCR entries of the macro panel: its tabs' captions (`count`), and the shown tab's five names
+-- (`names`) — each only where it is read (read/open.luau: where the preset database has the preset,
+-- the names are its own, and the screen is read for them at the page key only, as a check).
+function Mc.entries(pl, out, count, names)
+  if count ~= false then
+    local r = pl:rect(M.TAB_TEXT)
+    if r then out[#out + 1] = { name = "macro tabs", region = r } end
+  end
+  if names == false then return end
   for _, f in ipairs(M.FIELD_ORDER) do
     local fr = pl:rect(M.FIELD_NAMES[f])
     if fr then out[#out + 1] = { name = "macro " .. f, region = fr } end
   end
 end
 
--- How many macro tabs the captions read say, into `v.macroCount`; the words for the log.
-function Mc.count(byName, v)
-  local tabs = byName["macro tabs"]
-  local text = tabs and tabs.status == "text" and tabs.text or ""
-  v.macroCount = R.macroTabCount(text)
-  return string.format("tabs '%s' — %s", R.forLog(text),
-    v.macroCount and (v.macroCount .. " tab" .. (v.macroCount == 1 and "" or "s")) or "no count")
+local function tabs(n) return n .. " tab" .. (n == 1 and "" or "s") end
+
+-- How many macro tabs there are, into `v.macroCount`: the preset database's where it has the
+-- preset (`dbTabs`, its macro tabs, or nil) — the project's own source (its _current_macro_info),
+-- and on Windows the only one there was: the caption read "UACRO 1" all through the second Windows
+-- session (2026-10-31; mt-verified, finding 12) — else what the captions read (R.macroTabCount).
+-- Where both are there and differ, the log says so. The words for the log.
+function Mc.count(byName, v, dbTabs)
+  local r = byName and byName["macro tabs"]
+  local text = r and r.status == "text" and r.text or ""
+  local read = r and R.macroTabCount(text) or nil
+  local db = dbTabs and #dbTabs > 0 and math.min(4, #dbTabs) or nil
+  v.macroCount = db or read
+  local caption = r and string.format("tabs '%s' — %s", R.forLog(text), read and tabs(read) or "no count")
+    or "tabs not read"
+  if db then
+    return string.format("%s; %s, the database's%s", caption, tabs(db),
+      (read and read ~= db) and string.format(", where the caption reads %d — the database's taken", read) or "")
+  end
+  return caption
 end
 
--- The shown tab's five names into `v.macroLabels` (nil where not read), each in the database's
--- spelling where the read was near it — said in the log and nowhere else (src/presets.luau, WHAT IT
--- MAY DO). `vocab`: the database's five names of the shown tab, or nil. `counted`: Mc.count's
--- words, said in the same line.
-function Mc.labels(byName, v, vocab, counted, log)
+-- A dot word before a macro's name — "•", "·", "o", "O", "0" or "°" — is the pink dot each name field
+-- has at its left: in the developer's Mac test of 2026-10-31 at 3.75 to 6.25 units from the field's
+-- left edge (its macros picture at 80 %; the names begin at 15, "Soften To Pad" two pixels after the
+-- dot), read as "•" or "0" on the Mac (mt-verified, finding 12) and as "o" before every name on
+-- Windows. A first word that is one of those and whose box ends left of DOT_END from the field's left
+-- is dropped by its place, the rest kept as read — never by cutting the region, which would cut
+-- such a name. A box the recogniser only guessed has no place to go by: such a reading, and one
+-- whose dot is no word of its own, loses only a lone bullet word and a space (R.withoutBullet).
+local DOT_END = 7
+local DOT_WORDS = { ["•"] = true, ["·"] = true, ["o"] = true, ["O"] = true, ["0"] = true, ["°"] = true }
+
+-- The name read in field `f` (M.FIELD_ORDER's) from reading `r`, or nil: nothing read. And the
+-- word dropped before it, or nil.
+function Mc.fieldText(pl, f, r)
+  if not (r and r.status == "text") then return nil end
+  local words = r.words or {}
+  local first = words[1]
+  if first and #words > 1 and not first.approx and DOT_WORDS[R.tidy(first.text)] then
+    local field = pl:rect(M.FIELD_NAMES[f])
+    if field and type(first.x) == "number" and first.x + (first.w or 0) <= field[1] + DOT_END * pl.k then
+      local rest = {}
+      for j = 2, #words do rest[#rest + 1] = words[j].text end
+      local t = R.tidy(table.concat(rest, " "))
+      if t ~= "" then return t, R.tidy(first.text) end
+    end
+  end
+  local t = R.tidy(r.text)
+  if t == "" then return nil end
+  return R.withoutBullet(t)
+end
+
+-- The shown tab's five names into `v.macroLabels` (nil where not known):
+--   * where the preset database has the preset (`db`, its five names of the shown tab — the
+--     maintainer's decision of 2026-10-31: the database first, as the project names them), its
+--     names; read (`byName`, the page key's check) and the read not near the database's name, that
+--     name MARKED, ", from the database" (src/presets.luau, WHAT IT MAY DO: a name the database
+--     puts where the screen's read is not); not read, `kept[i]` — the page key's checked name,
+--     marked or not — or the database's;
+--   * elsewhere — Init Preset, a user's own preset, no database — as read, without the field's
+--     dot (Mc.fieldText), in Avenger's own default's spelling where the read is near it (Avenger
+--     shows "Macro 1" … "MacroBtn 2" where a name was never given: R.defaultMacroName), its look-
+--     alike letters folded for the comparison (R.snap); and nil where nothing was read.
+-- `counted`: Mc.count's words, said in the same line of the log.
+function Mc.labels(pl, byName, v, db, counted, log, kept)
   local said = { counted }
   v.macroLabels = {}
+  local tab = v.macroSelected
   for i, f in ipairs(M.FIELD_ORDER) do
-    local r = byName["macro " .. f]
-    local t = r and r.status == "text" and R.tidy(r.text) or ""
-    if t ~= "" then
-      local name, snapped, ratio = R.snap(t, vocab and vocab[i])
+    local r = byName and byName["macro " .. f]
+    local t, dropped = Mc.fieldText(pl, f, r)
+    local raw = r and r.status == "text" and R.forLog(r.text) or nil
+    local how = dropped and string.format(" ('%s' before it dropped)", dropped) or ""
+    if db and db[i] then
+      local name = db[i]
+      if t then
+        local _, snapped, ratio = R.snap(t, name)
+        if snapped or ratio == 1 then
+          v.macroLabels[i] = name
+          said[#said + 1] = string.format("%s '%s'%s, the database's '%s' (%.2f alike)", f, raw, how, name, ratio)
+        else
+          v.macroLabels[i] = name .. ", " .. DB.MARK
+          said[#said + 1] = string.format("%s '%s'%s, not the database's '%s' (%.2f alike) — the database's, marked", f,
+            raw, how, name, ratio or 0)
+        end
+      else
+        v.macroLabels[i] = (kept and kept[i]) or name
+        said[#said + 1] = string.format("%s '%s', the database's%s", f, v.macroLabels[i],
+          r and string.format(" (not read: %s)", tostring(r.status)) or "")
+      end
+    elseif t then
+      local default = tab and R.defaultMacroName(tab, i)
+      local name, snapped, ratio = R.snap(t, default)
       v.macroLabels[i] = name
-      said[#said + 1] = string.format("%s '%s'%s", f, t, snapped
-        and string.format(" -> '%s', the database's (%.2f alike)", name, ratio) or "")
+      said[#said + 1] = string.format("%s '%s'%s%s", f, raw, how, snapped
+        and string.format(" -> '%s', Avenger's default (%.2f alike)", name, ratio) or "")
     else
       said[#said + 1] = string.format("%s not read (%s)", f, r and r.status or "not asked")
     end

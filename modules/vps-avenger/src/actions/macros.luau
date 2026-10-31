@@ -2,13 +2,15 @@
 -- src/act.luau, as src/actions/osc.luau's are. The avenger_control tool's names, arguments and
 -- points (its actions.py, clicker and header_map.py, src/tables/macros.luau), its defects fixed:
 --
---   select_macro_tab        the tab, after the tabs are counted from their captions — tab 3's point
+--   select_macro_tab        the tab, after the tabs are counted (the preset database's count, else
+--                           their captions read: read/macros.luau, Mc.count) — tab 3's point
 --                           lies 14 from the "+" of two tabs, so a tab past the count is never
 --                           clicked; the tab shown, its names, buttons and amounts read
 --   add_macro_tab           "+", where the count puts it, none at four; the captions read
 --   delete_macro_tab        macro tab 1's menu with the right button, its item; none at one tab
 --   toggle_macro_button     the button, then its share of highlight and blue read — never turned
---                           over from memory, as the tool did when its read was unsure
+--                           over from memory, as the tool did when its read was unsure; no text
+--                           read: its name is the one last read, or the preset database's
 --   macro_reset_mode        a knob's field's menu, its reset mode: VPS Avenger shows the mode only
 --                           in that menu, so the menu taking the click is all there is to read
 --   macro_button_menu_item  a button's menu, its item once (a tick: a second click would undo it);
@@ -19,6 +21,12 @@
 --
 -- Builders as osc.luau's: `(args, label, known) -> spec | nil, why`, `known` the values last read
 -- in this window, for words (a name, the tab shown for the page's focus) and never a decision.
+--
+-- The macros' count and names are the preset database's where it has the preset (read/open.luau,
+-- THE DATABASE FIRST): an action reads the tabs' captions only where it counts them — Add and Delete
+-- macro tab (`readCount`), whose count read after the click is what they change — and no name at
+-- all there. Once one of them has changed the count, the database's count and names are not the
+-- preset's any more (state.luau, S.macrosEdited, the fact `macrosEdited`).
 
 local M = host.include("src/tables/macros.luau")
 local Knob = host.include("src/read/knob.luau")
@@ -84,12 +92,20 @@ function A.select_macro_tab(args, label)
   }
 end
 
+-- The fact an Add or Delete that changed the count leaves (state.luau, S.macrosEdited): the
+-- preset's name the read before was taken for.
+local function edited(vb, how)
+  if how ~= "changed" then return nil end
+  return { macrosEdited = { preset = vb.macrosOf } }
+end
+
 function A.add_macro_tab(_, label)
   return {
     label = label,
     part = "macros",
     text = true,
     textAfter = true,
+    readCount = true,
     decide = function(vb)
       local n, why = counted(vb)
       if not n then return nil, why end
@@ -99,11 +115,11 @@ function A.add_macro_tab(_, label)
     end,
     watch = function() return { TABS } end,
     same = function(vb, va) return va.macroCount ~= nil and va.macroCount == vb.macroCount end,
-    answer = function(_, va, how)
+    answer = function(vb, va, how)
       local n = va and va.macroCount
       if not n then return { error = "the macro tabs cannot be counted now" } end
       if how == "unchanged" then return { note = "unchanged, " .. plural(n, "macro tab"), said = plural(n, "macro tab") .. ", unchanged" } end
-      return { said = plural(n, "macro tab"), focus = "macro-tab-" .. n }
+      return { facts = edited(vb, how), said = plural(n, "macro tab"), focus = "macro-tab-" .. n }
     end,
   }
 end
@@ -115,6 +131,7 @@ function A.delete_macro_tab(_, label)
     part = "macros",
     text = true,
     textAfter = true,
+    readCount = true,
     decide = function(vb)
       local n, why = counted(vb)
       if not n then return nil, why end
@@ -124,11 +141,11 @@ function A.delete_macro_tab(_, label)
     end,
     watch = function() return { TABS } end,
     same = function(vb, va) return va.macroCount ~= nil and va.macroCount == vb.macroCount end,
-    answer = function(_, va, how)
+    answer = function(vb, va, how)
       local n = va and va.macroCount
       if not n then return { error = "Delete chosen; the macro tabs cannot be counted now" } end
       if how == "unchanged" then return { note = "unchanged, " .. plural(n, "macro tab"), said = plural(n, "macro tab") .. ", unchanged" } end
-      return { said = plural(n, "macro tab"), focus = n > 1 and "macro-delete-last" or "macro-tab-1" }
+      return { facts = edited(vb, how), said = plural(n, "macro tab"), focus = n > 1 and "macro-delete-last" or "macro-tab-1" }
     end,
   }
 end
@@ -139,8 +156,11 @@ function A.toggle_macro_button(args, label, known)
   return {
     label = label,
     part = "macros",
-    -- The names, for the button's own in what is said; the count with them, for the tab shown.
-    text = true,
+    -- No text: the button's name is the one last read in this window, or the database's (Open.part's
+    -- words where it has the preset), and the tab shown is read by its pixels with the count last
+    -- read. Its six regions cost 350 to 361 ms a toggle in the developer's Mac test of 2026-10-31
+    -- for a name nameOf had already (mt-verified, finding 13).
+    macroCount = known and known.macroCount,
     decide = function() return { at = { M.BUTTON_X[i], M.BUTTON_Y } } end,
     watch = function() return { M.BUTTON_BOUNDS[i] } end,
     same = function(vb, va)

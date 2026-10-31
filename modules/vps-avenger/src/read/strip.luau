@@ -72,15 +72,42 @@ end
 -- A dot that was not found leaves the spacing, and the count, as they are.
 local SPACING_SLACK = 0.25
 
--- THE SELECTED TAB, by the project's darkest bottom strip with a margin of this module's own: the
--- darkest has to lead the next by TAB_LEAD at least, and by no less than the others differ among
--- themselves — one stands out, the rest are alike. A read while Avenger redraws, every tab's strip
--- brighter by its own amount, is then not read (the second Mac test of the page, 2026-10-24: Trig
--- read selected by 7.3 over tabs 21 apart). Measured on the ten `OSC Tabs/Avenger 100, …` pictures,
--- the band ending at T.SELECTION_BAND_BOTTOM: leads of 16.0 to 19.0 over spreads of at most 2.3;
--- with Avenger's corner 0.75 of a unit low 5.0 to 6.0 over at most 0.7, and 0.75 high 14.6 to 19.3
--- over at most 11.1.
+-- THE SELECTED TAB, by the project's darkest bottom strip — read as its FLOOR, the mean over its
+-- columns of each column's darkest pixel (P.bandFloor), where the project takes the band's mean
+-- (its bottom_mean) — with a margin of this module's own: the darkest has to lead the next by
+-- TAB_LEAD at least, and by no less than the others differ among themselves — one stands out, the
+-- rest are alike. Avenger draws a LEVEL METER in the band: a light bar one row tall, centred under
+-- a tab's name, that grows with the oscillator's sound (the developer's Mac test of 2026-10-31,
+-- mt-verified finding 4B — the bar in the OSC name crops, lit only while the oscillator sounds, on
+-- Windows too). It lifted a tab's mean by up to 28 and left the selection undecided or, by the
+-- project's darkest-wins, wrong in three of five reads; what was taken for a read "while Avenger
+-- redraws" (the second Mac test of the page, 2026-10-24: Trig selected by 7.3 over tabs 21 apart)
+-- was very probably the meter too. The floor does not see it: on all eight of that test's OSC 1
+-- crops it is 47.9 whether the meter is lit or not (the mean 51.7 to 60.5). Measured with the floor
+-- on the second Mac test's `OSC Tabs/Avenger 100, …` and `Mutesolo/…` pictures (100 % and 50 %),
+-- the band ending at T.SELECTION_BAND_BOTTOM, Avenger's corner placed exactly and 0.75 of a unit
+-- either way: the selected tab leads by 11.8 to 18.4 over the others' spread of at most 6.4 (at 100 %
+-- 15.4 to 18.4 over at most 2.7, where the mean's lead fell to 5.0 with the corner low); and on the
+-- developer's `strip-80pct.png` of 2026-10-31, MENU's popup over OSC 1, Drums by 13.8. TAB_LEAD is
+-- the mean's, kept: the floor leads by more than twice it everywhere. The log says the floor and
+-- the mean of every tab for a test round.
 local TAB_LEAD = 5
+
+-- A COVERED STRIP (mt-verified, finding 4A): a popup of Avenger's over the strip — MENU's, left open
+-- across stays in the developer's Mac test of 2026-10-31 — hides OSC 1's dot and puts its own pixels
+-- in the selection band, and the strip's text read "Load preset.. OSC 1 Save": 0 dots, a tab named
+-- after the menu, a selection decided on the popup's pixels. OSC 1 is always there, and its dot is
+-- drawn in one of the three colours DOT_ANY counts: in every read of both logs that found dots one
+-- lay at tab 1 (68 of 68), in none of the six with the menu open. So a read with no dot within
+-- ANCHOR_SLACK of OSC 1's place is COVERED, as is one while a menu counts open over the overlay
+-- (O:menuOpen) and one whose text holds MENU's items' words (MENU_WORDS) — and a covered read
+-- decides nothing of the strip: no selection, no Mute or Solo, no Drums switches, no names; only a
+-- count that does not come from the screen (read/open.luau, Open.countElsewhere). Whether some
+-- state of Avenger draws OSC 1 with no dot at all is not known (the developer's question C3): it
+-- would read as covered, "not read now", never as a value.
+local ANCHOR_SLACK = SPACING_SLACK * T.STEP_BY_COUNT[8][1]
+S.MENU_WORDS = { "load preset", "save preset", "initialize" }
+S.COVERED = "the oscillator strip is covered now, perhaps by a menu of VPS Avenger's"
 
 -- Of DRUMKIT's and SEQUENCE's captions, the one whose bright, unsaturated pixels are 8 brighter
 -- on average than the other's. Its pixels: (r + g + b) / 3 above 95, and their channels less than
@@ -128,6 +155,35 @@ function S.namesFromWords(pl, words, count)
     if #parts > 0 then out[i] = table.concat(parts, " ") end
   end
   return out
+end
+
+-- Whether text `text` holds a word of MENU's items (S.MENU_WORDS): the strip read under MENU's popup.
+function S.menuWords(text)
+  local t = string.lower((string.gsub(tostring(text or ""), "%s+", " ")))
+  for _, w in ipairs(S.MENU_WORDS) do
+    if string.find(t, w, 1, true) then return w end
+  end
+  return nil
+end
+
+-- Whether dots `dots` (S.count's) hold OSC 1's: one whose middle lies within ANCHOR_SLACK of
+-- T.DOT_MIDDLE (A COVERED STRIP, above).
+function S.anchored(pl, dots)
+  local x0 = pl:exact(T.DOT_MIDDLE, 0)
+  for _, d in ipairs(dots or {}) do
+    if math.abs(d.mid - x0) <= ANCHOR_SLACK * pl.k then return true end
+  end
+  return false
+end
+
+-- Whether a read of the strip is covered (A COVERED STRIP, above), from its dots — `dots` and
+-- whether they were read at all (`read`, S.count's) — and `menuOpen` (O:menuOpen of the overlay the
+-- read is made for, false where none): why, for the log and the answers, or nil. Dots not read at
+-- all are no cover: the strip is then not counted (`selectionState` "uncounted").
+function S.coverOf(pl, dots, read, menuOpen)
+  if menuOpen then return "a menu counts open over the overlay" end
+  if read and not S.anchored(pl, dots) then return "no dot at OSC 1's place" end
+  return nil
 end
 
 -- ── What is asked ────────────────────────────────────────────────────────────
@@ -205,8 +261,9 @@ end
 -- How many oscillators the dots say, by their spacing, or nil; and the dots, for the log and the
 -- picture: { mid (the middle's screen x), tab (its number, where the count was read), colour
 -- (S.dotColour's, of its middle pixel, or nil) }, off snapshot `snap`, where their pixels' colours
--- are read. Every dot's colour counts: a muted tab's dot is pink, and while one tab is soloed every
--- other tab's is (SILENT, above).
+-- are read; and whether the dots were read at all (A COVERED STRIP: 0 dots read is a cover, none
+-- read is none). Every dot's colour counts: a muted tab's dot is pink, and while one tab is soloed
+-- every other tab's is (SILENT, above).
 function S.count(pl, got, log, snap)
   local g = got["strip dots"]
   if not g then
@@ -249,14 +306,27 @@ function S.count(pl, got, log, snap)
     #words > 0 and (": " .. table.concat(words, "; ")) or "", #said > 0 and ("; the dots " .. table.concat(said, ", ")) or "",
     count and (count .. " oscillator" .. (count == 1 and "" or "s") .. " by their spacing")
       or (spacing and ("no count: " .. spacing) or "no count")))
-  return count, dots
+  return count, dots, true
 end
 
 -- What Strip.decide read by a count that turned out short (read/open.luau): the tabs' Mute and
 -- Solo, and the selection where it was an OSC tab's — Drums' and Trig's places are their own.
 function S.unread(v)
   v.oscMute, v.oscSolo = nil, nil
-  if v.selectedType == "osc" then v.selectedType, v.selectedIndex = nil, nil end
+  if v.selectedType == "osc" then
+    v.selectedType, v.selectedIndex, v.selectionState = nil, nil, "uncounted"
+  end
+end
+
+-- A read of the strip covered (S.coverOf's `why`) into `v`: nothing of the strip decided — every
+-- value S.decide reads left out — and said so, in the log and as `stripCovered` (posted to the page as
+-- osc_panel.strip_covered, a key of the port's).
+function S.covered(v, why, log)
+  v.oscMute, v.oscSolo, v.selectedType, v.selectedIndex = nil, nil, nil, nil
+  v.drumsMute, v.drumsSolo, v.trigMute, v.trigSolo = nil, nil, nil, nil
+  v.drumPattern, v.drumLock, v.drumMode = nil, nil, nil
+  v.selectionState, v.stripCovered = "covered", true
+  log("strip: covered — " .. tostring(why) .. "; nothing of the strip is read")
 end
 
 -- Whether the tabs' names `names` (tab -> text read) say that `count` is short: a name read as
@@ -337,17 +407,19 @@ function S.decide(pl, snap, got, count, v, log, marks)
   one("Trig Solo", T.TRIG_SOLO, "trigSolo")
   log("strip: " .. table.concat(words, "; "))
 
-  -- The selected tab: the darkest bottom strip of the OSC tabs, Drums and Trig, where it stands out
-  -- (TAB_LEAD).
+  -- The selected tab: the darkest bottom strip of the OSC tabs, Drums and Trig — by its floor —
+  -- where it stands out (TAB_LEAD). `selectionState` says how the read went: "read" (one decided),
+  -- "undecided" (none stood out), "uncounted" (no count, or the band not read).
   local prof = got["strip band"]
+  v.selectionState = "uncounted"
   if prof and count then
-    local means, ranked = {}, {}
+    local floors, ranked = {}, {}
     local function tab(label, kind, index, x1, x2)
       local a = pl:point(x1, T.SELECTION_TOP)
       local b = pl:point(x2, T.SELECTION_TOP)
-      local m = P.bandMean(prof, a, b)
-      means[#means + 1] = string.format("%s %s", label, m and string.format("%.1f", m) or "not read")
-      if m then ranked[#ranked + 1] = { kind = kind, index = index, mean = m, label = label } end
+      local f, _, m = P.bandFloor(prof, a, b)
+      floors[#floors + 1] = string.format("%s %s", label, f and string.format("%.1f (%.1f)", f, m) or "not read")
+      if f then ranked[#ranked + 1] = { kind = kind, index = index, floor = f, label = label } end
     end
     for i = 1, count do
       local r = T.tabSpan(i, count, T.SELECTION_TOP, T.SELECTION_BOTTOM)
@@ -355,21 +427,24 @@ function S.decide(pl, snap, got, count, v, log, marks)
     end
     tab("Drums", "drums", 1, T.DRUMS_SELECTION[1], T.DRUMS_SELECTION[2])
     tab("Trig", "trig", 1, T.TRIG_SELECTION[1], T.TRIG_SELECTION[2])
-    table.sort(ranked, function(a, b) return a.mean < b.mean end)
+    table.sort(ranked, function(a, b) return a.floor < b.floor end)
     local verdict
+    v.selectionState = "undecided"
     if #ranked < 2 then
       verdict = "none read"
     else
       local best = ranked[1]
-      local lead, spread = ranked[2].mean - best.mean, ranked[#ranked].mean - ranked[2].mean
+      local lead, spread = ranked[2].floor - best.floor, ranked[#ranked].floor - ranked[2].floor
       if lead >= TAB_LEAD and lead >= spread then
         v.selectedType, v.selectedIndex = best.kind, best.index
+        v.selectionState = "read"
         verdict = string.format("%s, by %.1f, the others within %.1f", best.label, lead, spread)
       else
         verdict = string.format("none: %s by %.1f, the others within %.1f", best.label, lead, spread)
       end
     end
-    log(string.format("strip: the tabs' bottom strips, darkest selected: %s — %s", table.concat(means, ", "), verdict))
+    log(string.format("strip: the tabs' bottom strips' floor (their means), darkest selected: %s — %s",
+      table.concat(floors, ", "), verdict))
   else
     log("strip: the selected tab is not read (" .. (count and tostring(got.why["strip band"]) or "no count") .. ")")
   end

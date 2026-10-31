@@ -51,8 +51,12 @@ local H = host.include("src/header.luau")
 local P = host.include("src/read/picture.luau")
 local Open = host.include("src/read/open.luau")
 local Pp = host.include("src/popups.luau")
+local Strip = host.include("src/read/strip.luau")
 
 local Act = {}
+
+-- What a click refused on a covered strip says (read/strip.luau, A COVERED STRIP).
+Act.COVERED = Strip.COVERED .. "; nothing was clicked"
 
 local R = nil -- main.luau's ring helpers (Act.start)
 local Header = nil -- the header overlay, the one with menu tests (Act.start)
@@ -99,8 +103,8 @@ function Act.notChosen(err)
   return NOT_CHOSEN[err.code] or ("nothing was chosen (" .. tostring(err) .. ")")
 end
 
--- Where no menu can be seen: a trip's overlay is the warning box while the box holds the slot (a
--- Save or Initialize waiting for it), and the box has no menu tests, so O:chooseMenuItem and
+-- Where no menu can be seen: a trip's overlay is the warning box while the box holds the slot (an
+-- Initialize waiting for it), and the box has no menu tests, so O:chooseMenuItem and
 -- trip:afterMenu raise there — a mistake in the call, by the runtime's rule. Nothing is chosen on
 -- it, and the page is told so. Only the header has the menu tests (main.luau, its binding).
 Act.NO_MENU_HERE = "the menu cannot be seen here; nothing was chosen"
@@ -193,6 +197,11 @@ end
 --             Pp.submenuRow); `dialog`: the item opens a file dialog, waited for in a trip, nothing
 --             read after it — with "read", the part read once more when Avenger is in front again
 --   macroCount   the macro tabs counted before, where the part's text is not read (the tab shown)
+--   readCount    the macro tabs' captions read for the count before and after the click, the
+--             preset database's count only where they read none — what Add and Delete macro tab
+--             change (read/open.luau, Open.part)
+--   screenNames  the OSC tabs' names read off the screen before and after the click, never the
+--             preset database's — what an OSC tab's menu edits (read/open.luau, THE DATABASE FIRST)
 --   pictured(snap, pl)   once the click is decided, before it: what the action keeps of the picture
 --             the read before was made of — its profiles, waited for, for a comparison after the
 --             click (src/actions/browser.luau, Close's view list); never the picture itself, which
@@ -200,19 +209,44 @@ end
 --   watch(vb, click) -> { rect }?   the boxes the change is looked for in (default: the part)
 --   same(vb, va) -> boolean?   nothing this action changes changed; nil — or no `same` — where
 --             nothing read says it: the change wait's verdict decides
---   holds(va) -> boolean?   a read after the click is an answer at all: false for one taken while
---             Avenger redraws (the Drums tab no longer read selected after a drumkit's step); one
---             that does not hold is looked on from, as an unchanged one is, and at the bound the
---             action ends with that said and what was read before it kept
+--   holds(va) -> boolean?   a read after the click is an answer at all: false for one whose
+--             selection the level meter lifted (the Drums tab no longer read selected after a
+--             drumkit's step) or that decided no tab (a choice of tab); one that does not hold is
+--             looked on from, as an unchanged one is, and at the bound the action ends with that
+--             said — `unheld`'s words, else that VPS Avenger was still redrawing — and what was read
+--             before it kept
+--   unheld    what the action says where no read after it held by the bound (holds)
+--   sentAnyway   a click said as sent (a drumkit's or a slot's Back and Next): where no read after it
+--             held by the bound, `answer` is asked with how "unheld" and no read after
+--   leaves    keys the read after the click is posted without — what this action does not change
+--             and a read of it may not decide (a Mute's or a Solo's selected tab: avw2-verified, A8)
 --   answer(vb, va, how) -> result   how: "changed", "unchanged" (at the bound), "chosen" (a menu
 --             that changes nothing shown, or a file dialog seen), "no dialog" (none within the
---             runtime's bound) or "unread" (no picture after the click)
+--             runtime's bound), "unread" (no picture after the click) or "unheld" (`sentAnyway`)
+-- A read before the click whose strip is COVERED — a menu of Avenger's over it (read/strip.luau, A
+-- COVERED STRIP) — clicks nothing, for every part that reads the strip: the popup would take the
+-- click (mt-verified, finding 4A).
 -- `done(result)`: { part = { keys, values }?, error = a reason?, sentence = a whole sentence (a
 -- click refused, as the ring's clicks say it)?, note = a reason?, focus = an id of the page's?, said =
 -- the ring's words? } — `part` is filled in with the last read when the answer has none — or nil:
 -- the user moved on.
 function Act.run(o, spec, done, trip)
   local label = spec.label
+  -- What this action does not change is not posted from its reads (`leaves`), whichever read the
+  -- answer carries — the one after the click, or the one before a refusal.
+  if spec.leaves then
+    local told = done
+    done = function(result)
+      if result and result.part then
+        local keys = {}
+        for _, k in ipairs(result.part.keys) do
+          if not table.find(spec.leaves, k) then keys[#keys + 1] = k end
+        end
+        result.part = { keys = keys, values = result.part.values }
+      end
+      return told(result)
+    end
+  end
   local function log(fmt, ...)
     host.log.info(("[avenger] [act] '%s': " .. fmt):format(label, ...))
   end
@@ -247,7 +281,8 @@ function Act.run(o, spec, done, trip)
   end
   -- The window the reads' values are kept by, taken once, while the plug-in is in front.
   local readOpts = { pl = pl, text = spec.text, preset = R.lastName(), macroCount = spec.macroCount,
-    fields = spec.fields, expected = spec.expected, window = Open.window() }
+    fields = spec.fields, expected = spec.expected, window = Open.window(), readCount = spec.readCount,
+    screenNames = spec.screenNames, menuOpen = Open.menuOpen(o) }
   local okB, vb, keysB = pcall(Open.part, snap, spec.part, readOpts)
   if not okB then
     snap:release()
@@ -259,6 +294,11 @@ function Act.run(o, spec, done, trip)
     return movedOn()
   end
   local before = { keys = keysB, values = vb }
+  if vb.stripCovered then
+    snap:release()
+    log("nothing clicked — the strip read before the click is covered")
+    return done({ part = before, error = Act.COVERED })
+  end
   local okD, click, refusal, refusalFocus = pcall(spec.decide, vb)
   if not okD then
     snap:release()
@@ -283,7 +323,7 @@ function Act.run(o, spec, done, trip)
 
   local afterOpts = { pl = pl, text = spec.textAfter, preset = readOpts.preset,
     macroCount = vb.macroCount or spec.macroCount, fields = spec.fields, expected = spec.expected,
-    window = readOpts.window }
+    window = readOpts.window, readCount = spec.readCount, screenNames = spec.screenNames }
   local deadline = nil
   local last = nil -- { keys, values } of the latest read after the click
 
@@ -322,6 +362,7 @@ function Act.run(o, spec, done, trip)
         snap:release()
         return movedOn()
       end
+      afterOpts.menuOpen = Open.menuOpen(o)
       local okR, va, keys = pcall(Open.part, s, spec.part, afterOpts)
       if not okR then
         s:release()
@@ -348,7 +389,9 @@ function Act.run(o, spec, done, trip)
           s:release()
           snap:release()
           log("what VPS Avenger showed after the click did not hold by the bound — the read before is kept")
-          return done({ part = before, error = "VPS Avenger was still redrawing; what it shows now was not read" })
+          -- A click said as sent is said so all the same (`sentAnyway`).
+          if spec.sentAnyway then return finish("unheld") end
+          return done({ part = before, error = spec.unheld or "VPS Avenger was still redrawing; what it shows now was not read" })
         end
       end
       last = { keys = keys, values = va }
@@ -488,6 +531,10 @@ function Act.partBefore(pl, part, text, log, fields)
   if not okR then
     log("'%s': nothing clicked — the read before failed: %s", part, tostring(v))
     return nil, nil, "reading VPS Avenger failed"
+  end
+  if v.stripCovered then
+    log("'%s': nothing clicked — the strip read before the click is covered", part)
+    return nil, nil, Act.COVERED
   end
   return v, keys
 end

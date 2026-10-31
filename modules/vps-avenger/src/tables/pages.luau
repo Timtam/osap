@@ -10,7 +10,9 @@
 -- _expansion_8_page_starts and _expansion_8_visible_start, _expansion_6/5/4/3_page_starts and
 -- their counts, _expansion_page_for_index, _click_expansion_page_scroll,
 -- action_select_expansion_category, _preset_scroll_target_offset with its measured table,
--- _estimated_preset_scroll_specs and _ensure_expansion_preset_visible — and its
+-- _estimated_preset_scroll_specs and _ensure_expansion_preset_visible, with its developer's
+-- correction of 2026-10-31 (state.py's "-1" for the presets' place not known; actions.py's
+-- _invalidate_expansion_preset_scroll and the reset from the end of the whole category) — and its
 -- clicker/header_map.py — expansion_view_shape, expansion_cell_pos, expansion_list_cell_pos,
 -- expansion_scroll_pos, expansion_list_scroll_pos, expansion_category_pos, expansion_preset_pos and
 -- the scrollbars' EXPANSION_*_SCROLL_* points — taken over with its developer's permission (NOTICE,
@@ -464,29 +466,55 @@ function Pg.presetRows(page, count)
   return out, s[3]
 end
 
+-- The presets' list's place where it is not known: { page = -1, first = -1, final = false } — the
+-- avenger_control developer's correction of 2026-10-31 (state.py, AVGPresetScrollOffset and
+-- AVGPresetScrollPage "-1"; actions.py, _invalidate_expansion_preset_scroll): a category's click
+-- leaves Avenger's list where Avenger last had it — his diagnosis, "Kategorie-Klick setzt den
+-- gespeicherten Preset-Scrollstand auf 0, ohne die rechte Liste hochzuscrollen" — so only this
+-- session's completed scrollbar clicks make it known.
+function Pg.presetsUnknown() return { page = -1, first = -1, final = false } end
+
+-- Whether `p` ({ page, first, final }) is known: both numbers, neither below 0. A missing value is
+-- not known, never 0 — the correction's "nicht vorab per 'or 0'".
+function Pg.presetsKnown(p)
+  return type(p) == "table" and type(p.page) == "number" and p.page >= 0 and type(p.first) == "number"
+    and p.first >= 0
+end
+
 -- The clicks on the presets' scrollbar that take a category of `count` from `from` — { page,
--- first, final } as this session's own clicks left it, page 0 right after the category's click — to
--- `to` (Pg.presetPlace's), the project's (_ensure_expansion_preset_visible): a category of 65 or
--- fewer back to its top — three clicks or more, as many as either page — then down a click a page;
--- a longer one up or down a click a page, by way of its top where it goes back from its third page
--- on or from its last. A list of table points, each clicked in turn.
+-- first, final } as this session's own completed clicks left it, or not known (Pg.presetsKnown) —
+-- to `to` (Pg.presetPlace's), the project's (_ensure_expansion_preset_visible, with its developer's
+-- correction of 2026-10-31). Not known: back to the top from the end of the WHOLE category,
+-- max(3, its last page + 2) clicks, none for fourteen or fewer (all shown), then on from page 0 —
+-- the reset not made again by the short list's rule. Known: a category of 65 or fewer back to its
+-- top — three clicks or more, as many as either page — then down a click a page; a longer one up or
+-- down a click a page, by way of its top where it goes back from its third page on or from its
+-- last. A list of table points, each clicked in turn. The reset's cost where the list stood at its
+-- top already: its first click moves nothing and the rest at that point are not made
+-- (src/actions/browser.luau, clickSeries) — one change wait's bound, B.STEP_WITHIN, 2 s, where the
+-- tool spends its 9 × 0.35 s.
 function Pg.presetScroll(from, to, count)
   local ys = {}
   local function at(y, n)
     for _ = 1, n do ys[#ys + 1] = y end
   end
   local top, bottom = Pg.PRESET_SCROLL.top, Pg.PRESET_SCROLL.bottom
-  local page, first, final = from.page or 0, from.first or 0, from.final == true
-  if count <= 65 then
-    if page ~= 0 or first ~= 0 or to.page > 0 then at(top, math.max(1, page, to.page, 3)) end
-    if to.page > 0 then at(bottom, to.page) end
+  local page, reset = 0, 0
+  if not Pg.presetsKnown(from) then
+    if count > X.PRESET_VISIBLE_ROWS then reset = math.max(3, Pg.presetPlace(count - 1, count).page + 2) end
   else
-    if to.page < page and (page >= 2 or final) then
-      at(top, math.max(1, page))
-      page = 0
+    page = from.page
+    if count <= 65 then
+      if page ~= 0 or from.first ~= 0 or to.page > 0 then reset = math.max(1, page, to.page, 3) end
+    elseif to.page < page and (page >= 2 or from.final == true) then
+      reset = math.max(1, page)
     end
-    if page ~= to.page then at(to.page > page and bottom or top, math.max(1, math.abs(to.page - page))) end
   end
+  if reset > 0 then
+    at(top, reset)
+    page = 0
+  end
+  if page ~= to.page then at(to.page > page and bottom or top, math.max(1, math.abs(to.page - page))) end
   local out = {}
   for i, y in ipairs(ys) do out[i] = { Pg.PRESET_SCROLL.x, y } end
   return out

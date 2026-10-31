@@ -1,6 +1,6 @@
 id = "com.platform.vps-avenger"
 name = "VPS Avenger"
-version = "0.15.1"
+version = "0.16.0"
 license = "GPL-3.0-or-later"
 # The runtime's page support (O:addPage, O:inPlugin) came with version 0.6; `identify`'s `again`
 # and O:watch's count of readings, which the header's read and the name after ◀ and ▶ use, with 0.7;
@@ -19,8 +19,12 @@ license = "GPL-3.0-or-later"
 # browser's Load use (src/act.luau, src/main.luau, src/actions/browser.luau), with 0.15; a hand-over's
 # and a hold's `swallow`, with which every hand-over of the module's — a knob held from the page or
 # the ring, a rename, the browsers — swallows Tab and Shift+Tab, which switch Avenger's oscillators
-# on Windows, and says once how it ends (src/act.luau, src/amount.luau, src/handover.luau), with 0.16.
-dependencies = ["com.platform.overlay >= 0.16", "com.platform.daw-hosts"]
+# on Windows, and says once how it ends (src/act.luau, src/amount.luau, src/handover.luau), with 0.16;
+# O:afterDialog's dialog that the window server lists and nothing brings to the front — Logic's
+# "Load Preset..." panel after the ring's Load preset (src/main.luau) — with 0.16.1; and the reading
+# an OCR button's `value` is handed, by whose words the Preset read-out says no name a recogniser
+# only guessed (src/main.luau), with 0.16.2.
+dependencies = ["com.platform.overlay >= 0.16.2", "com.platform.daw-hosts"]
 # The catalog of Avenger's expansions (modules/vps-avenger-presets), when it is installed:
 # the preset's expansion, category, oscillators and macros, the names by which the ring's
 # Oscillator stepper, Mute, Solo and the knobs' sentences name a tab whose name was not read
@@ -37,18 +41,22 @@ optional_dependencies = ["com.platform.vps-avenger-presets"]
 # What this module's own code calls; the overlay runtime's calls are covered by its own manifest.
 #   window  ownsPoint before a click of its own, recheck once the warning box's read has decided,
 #           the window's title; on Avenger's own window (Windows) the window in front and its
-#           changes (onFocus), the visits that bound the header's reads (src/header.luau)
+#           changes (onFocus), the visits that bound the header's reads (src/header.luau); the
+#           process's windows (windowsOf) at MENU's click and at its Load or Save as item, where
+#           the popup could be a window of its own (src/main.luau)
 #   ocr     Avenger's header (identity and zoom), the preset's name, the warning box; for the
-#           page, the words of one picture of Avenger (src/read/open.luau) — on the Drums tab the
-#           twelve drum slots' names among them (src/read/drums.luau) — and a name renamed in
+#           page, the words of one picture of Avenger (src/read/open.luau) — never a drum slot's
+#           name, a fixed role (src/read/drums.luau), nor the strip's under a cover — and a name renamed in
 #           Avenger's editor, read back off a picture (src/handover.luau); the sample editor's
 #           menus' fields, the envelope's preset name, the sample browser's rows and a field typed
 #           into (src/read/sample.luau, src/handover.luau), and DRUM SQ's SPEED
-#           (src/read/drumsq.luau); the expansion browser's header — its view's caption and the
-#           open expansion's name — once per picture (src/read/browser.luau), never its grid, its
+#           (src/read/drumsq.luau); the expansion browser's header — the open expansion's name, and
+#           its view's caption only where the view's icon's pixels tell neither state — once per
+#           picture (src/read/browser.luau), never its grid, its
 #           categories, its preset rows or the view list a Close may open on the grid, which its
 #           pixels tell
-#   input   the clicks on ◀ and ▶, UNDO and the redo list's right click, an opener clicked again
+#   input   the clicks on ◀ and ▶, UNDO and the redo list's right click, MENU and its Load preset
+#           or Save preset as item 0.18 s after it (src/main.luau), an opener clicked again
 #           (or Escape, for a right click's) to close a popup a choice left open, and the warning
 #           box's YES the page answers; the oscillator strip's and the macros' clicks, right clicks
 #           and double-clicks (src/act.luau); for a rename, the double-click that opens Avenger's
@@ -71,20 +79,24 @@ optional_dependencies = ["com.platform.vps-avenger-presets"]
 #           its place (src/actions/browser.luau), that the page key changed, and that the
 #           page was described again when its mode changed from it (src/page.luau)
 #   log     what was read, and where
-#   screen  the screen's size, before a choice that opens Avenger's warning box; for the page, one
-#           picture of Avenger and its grids, profiles and points (src/read); for an action of the
+#   screen  the screen's size, before a choice that opens Avenger's warning box; the name's field's
+#           picture, and its loading bar's points looked at in it before the name is read off it
+#           (src/main.luau); the display's scaling at Avenger's own window (src/header.luau); for
+#           the page, one picture of Avenger and its grids, profiles and points (src/read); for an
+#           action of the
 #           strip's or the macros', a picture of its part before the click and a change wait after
 #           it (src/act.luau); for a rename, the field's pictures, the change waits that see
 #           Avenger's editor open and closed, and the profiles of its edges (src/read/editor.luau);
 #           for a knob turned, its picture before the press and the change wait after Return, its
 #           points read (src/amount.luau); the drumkit table's grids and its name column's profile
-#           (src/read/drums.luau), and for a drum slot's Browse its name's picture and a change wait
+#           (src/read/drums.luau), and for a drum slot's Browse its row's picture and a change wait
 #           after Return (src/handover.luau); the sample editor's tabs' captions' grid and points,
 #           and its switches' grid (src/read/sample.luau); LENGTH's change waits
 #           (src/actions/drumsq.luau); DRUM SQ's watcher's picture, its key's pending, and its
-#           questions with callbacks (src/watch.luau); the expansion browser's pictures, its title
-#           band's, its list bar's, the star column's and the stars' grids, the change waits after
-#           a click and after every click on a scrollbar, and the profiles of the view list's place
+#           questions with callbacks (src/watch.luau); the expansion browser's pictures, its view's
+#           icon's, its title band's, its list bar's, the star column's and the stars' grids, the
+#           change waits after a click, after every click on a scrollbar and before FAV is read after
+#           an Open, and the profiles of the view list's place
 #           before and after a Close where nothing told (src/actions/browser.luau, src/act.luau,
 #           src/read/browser.luau);
 #           the calibration pictures of the header, the warning box, the page's reads, the editor,
@@ -97,6 +109,8 @@ optional_dependencies = ["com.platform.vps-avenger-presets"]
 #           and in the page's own Settings section, which writes the same settings (src/page.luau)
 #   sound   Open.wav and Close.wav as the page comes and goes, and Slider.wav at a knob's limit
 #           (sounds/, the project's)
-#   timer   DRUM SQ's watcher, at the `drumSqCadence` setting's pace (src/watch.luau); the overlay
+#   timer   DRUM SQ's watcher, at the `drumSqCadence` setting's pace (src/watch.luau); the 0.18 s
+#           between MENU and its Load preset or Save preset as item, the project's own pause and the
+#           maintainer's documented exception to the rule against timers (src/main.luau); the overlay
 #           runtime's own timers are covered by its manifest
 require = ["window", "ocr", "input", "speech", "log", "screen", "path", "gui", "settings", "sound", "timer"]

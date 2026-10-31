@@ -10,24 +10,25 @@
 --   toggle_drum_pattern   the pattern switch; read after it
 --   select_drum_mode      DRUMKIT, LOCK or SEQUENCE; the mode or the lock read after it (the tool
 --                         wrote the mode before it read)
---   previous_drumkit, next_drumkit   the drumkit's Back and Next; the twelve slots' names read before
---                         and after, and the ones that changed said (the tool reset the names to the
---                         factory ones, or kept the old kit's)
---   select_drumkit_part   a slot's name; the slot read as selected after it (the tool took the slot
---                         clicked for the selected one)
+--   previous_drumkit, next_drumkit   the drumkit's Back and Next: ONE click, said as sent, and the
+--                         drumkit's switches read after it (the tool clicked and read its buttons
+--                         0.08 s later)
+--   select_drumkit_part   a slot's name; the slot read as selected after it, said by its role (the
+--                         tool took the slot clicked for the selected one)
 --   toggle_drumkit_button   a slot's Mute, Solo, Lock or Loop; every slot's four read after it —
 --                         a Solo that mutes the others shows so, one that does not shows that (the
 --                         tool wrote every other slot muted, flipped Loop from memory)
 --   drumkit_menu_item     a slot's menu with the right button, its item at the tool's row: Lock All
 --                         and Unlock All (every lock read), Copy and Swap, whose four items open a
 --                         submenu of the slots chosen in it (O:chooseMenuItem's `submenu`), the
---                         target placed from the submenu's own top, Remove Sample (the names read),
+--                         target placed from the submenu's own top, Remove Sample (the rows watched),
 --                         and Save Drumkit as, whose file dialog is waited for (the tool wrote the
 --                         locks and moved the names in memory, and clicked the submenu after 0.08 s
 --                         whether or not anything had opened, at its item's row plus the target's,
 --                         which a submenu opened upward, as JUCE opens one, does not have)
---   drumkit_column        a slot's Back, Next (its name read) and Edit Sample (the selection and the
---                         central tab read); its Browse is a hand-over (src/handover.luau)
+--   drumkit_column        a slot's Back and Next (one click, said as sent) and Edit Sample (the
+--                         selection and the central tab read); its Browse is a hand-over
+--                         (src/handover.luau)
 --   reset_drumkit_control   a double-click on a slot's Volume, Pan or Pitch: no reader reads a drum
 --                         knob, so the answer is the change wait's own (src/act.luau)
 --   select_central_tab    EDITOR, ARP, DRUM SQ or STEP SQ, and the central tab read after it with
@@ -37,7 +38,9 @@
 -- (src/amount.luau, Am.drum), which refuses as these do (A.refusal).
 --
 -- Each builder is `(args, label, known) -> spec | nil, why`, as osc.luau's: `known` what was last
--- read in this window, for words only — a slot's name. nil refuses before anything is read.
+-- read in this window, for words only. nil refuses before anything is read. A slot is said by its
+-- role in the kit (D.PART_LABELS): the twelve fixed names Avenger draws abbreviated, never read
+-- (read/drums.luau, THE NAMES; the maintainer's decision of 2026-10-31).
 
 local D = host.include("src/tables/drums.luau")
 local C = host.include("src/tables/centre.luau")
@@ -124,9 +127,11 @@ end
 
 -- Builder `build` with its spec's `holds` (src/act.luau): a read after the click counts only where
 -- `refusal` finds nothing in it — the part as the action needs it, the Drums tab read selected. A
--- read taken while Avenger redraws reads every tab's strip brighter (the second Mac test of the
--- page, 2026-10-24: Trig read selected after Next drumkit, and the page lost its Drums section), and
--- is looked on from.
+-- read whose band the level meter lifts (read/strip.luau, THE SELECTED TAB: the second Mac test of
+-- the page, 2026-10-24, had Trig read selected after Next drumkit, and the page lost its Drums
+-- section — taken then for a read while Avenger redraws, and very probably the meter, the
+-- developer's Mac test of 2026-10-31 shows) is looked on from; the selection is read by the band's
+-- floor since 0.16, which the meter does not move.
 function A.holding(build, refusal)
   return function(...)
     local spec, why = build(...)
@@ -143,25 +148,12 @@ local function slotArg(v)
 end
 A.slotArg = slotArg
 
--- Slot `i`'s name for words: as read in `v`, else as last read (`known`), else its factory name —
--- the slot's role in the kit.
-function A.slotName(v, known, i)
-  local n = v and v.kitNames and v.kitNames[i]
-  if n and n ~= "" then return n end
-  n = known and known.kitNames and known.kitNames[i]
-  if n and n ~= "" then return n end
+-- Slot `i`'s name for words: its role in the kit (D.PART_LABELS), the fixed name Avenger draws
+-- abbreviated; `v` and `known` are what was read, which holds no slot's name since 0.16.
+function A.slotName(_, _, i)
   return D.PART_LABELS[i]
 end
 local slotName = A.slotName
-
--- Whether `v` has any slot's name read.
-local function namesRead(v)
-  if not (v and v.kitNames) then return false end
-  for i = 1, #D.PART_LABELS do
-    if v.kitNames[i] then return true end
-  end
-  return false
-end
 
 -- A decide that refuses off the Drums tab, and clicks `at` (with `extra`'s fields) on it.
 local function onDrums(at, extra)
@@ -174,9 +166,12 @@ local function onDrums(at, extra)
   end
 end
 
--- The two modes' captions and the lock between them; the name column down the whole table.
+-- The two modes' captions and the lock between them; the name column down the whole table; the
+-- table right of its names — every slot's sample box, switches and knobs (D.sampleRect's, down the
+-- table).
 local MODE_BAND = { D.MODE_DRUM_SELECTION[1], D.MODE_SELECTION_TOP, D.MODE_SQ_SELECTION[2], D.MODE_SELECTION_BOTTOM }
 local NAME_COLUMN = { D.NAME_COLUMN[1], D.TABLE_TOP, D.NAME_COLUMN[2], D.TABLE_BOTTOM }
+local SAMPLES = { D.NAME_COLUMN[2] + 0.5, D.TABLE_TOP, D.COLUMN_X.pitch + 8, D.TABLE_BOTTOM }
 
 -- The page's words for what a read after an action says, and its focus.
 local function told(words, how, focus)
@@ -184,6 +179,18 @@ local function told(words, how, focus)
   return { said = words, focus = focus }
 end
 A.told = told
+
+-- What a click said as sent says (`words`, "Next drumkit sent"): that alone where the read after it
+-- held — what it changed is the read's, posted — and with "the drumkit's switches were not read
+-- now" where it did not (src/act.luau's `sentAnyway`, how "unheld"): never an error, the click went
+-- out. `focus` the page's element.
+local function sent(words, how, focus)
+  if how == "unheld" then
+    return { said = words .. "; the drumkit's switches were not read now", note = "sent; the drumkit's switches were "
+      .. "not read now", focus = focus }
+  end
+  return { said = words, focus = focus }
+end
 
 function A.toggle_drum_pattern(_, label)
   return {
@@ -231,44 +238,34 @@ function A.select_drum_mode(args, label)
   }
 end
 
--- The drumkit's Back or Next: the names read before and after; what changed is said. In SEQUENCE
--- mode without the lock they step the sequence, which nothing reads (the tool's help says so).
-local function kitStep(at)
+-- The drumkit's Back or Next (`dir` "Previous" or "Next"): ONE click, said as sent — "Next drumkit
+-- sent", "Next sequence sent" in SEQUENCE mode without the lock, as the page words the buttons
+-- (ui/panel.js) — then one change wait on what a step redraws, bounded by Act.CHANGE_WITHIN, and the
+-- drumkit's switches read off its picture: posted, not compared. The developer's Mac test of
+-- 2026-10-31 (mt-verified, finding 5): until 0.16 the step compared the slots' names read before and
+-- after, and they are Avenger's fixed roles — the same twelve abbreviations every time — so it
+-- waited up to 3.4 s to say "nothing VPS Avenger shows changed" while the pattern switch and the
+-- names' brightness had changed. The original clicks, waits 0.08 s and reads its buttons
+-- (actions.py, action_next_drumkit). The watch leaves the name column out: the selected and the
+-- triggered slot's names flash while a sequence plays, which would end the wait before Avenger
+-- redrew. No retry: one click.
+local function kitStep(at, dir)
   return function(_, label)
     return {
       label = label,
       part = "drums",
-      text = true,
-      textAfter = true,
+      sentAnyway = true,
       decide = onDrums(at),
-      watch = function() return { NAME_COLUMN, MODE_BAND } end,
-      -- Only the slots read both times count; one read only once leaves it to the change wait.
-      same = function(vb, va) return verdict({ compared(vb.kitNames, va.kitNames, 1, #D.PART_LABELS) }) end,
-      answer = function(vb, va, how)
-        if not va then return { error = "the drumkit cannot be read now" } end
-        if how == "unchanged" then
-          if vb.drumMode == "sq" and not vb.drumLock then return { note = "the slots read as before; the sequence is not read" } end
-          return { note = "nothing VPS Avenger shows changed" }
-        end
-        -- What changed: the slots read both times whose names differ; one read only after is not
-        -- said to have changed.
-        local changed = {}
-        if namesRead(va) and namesRead(vb) then
-          for i = 1, #D.PART_LABELS do
-            local n, was = va.kitNames[i], vb.kitNames[i]
-            if n and was and n ~= was then changed[#changed + 1] = D.PART_LABELS[i] .. " reads " .. n end
-          end
-        end
-        if #changed == 0 then return { said = "VPS Avenger redrew the drumkit" } end
-        local shown = {}
-        for j = 1, math.min(3, #changed) do shown[j] = changed[j] end
-        return { said = table.concat(shown, ", ") .. (#changed > 3 and (", and " .. (#changed - 3) .. " more") or "") }
+      watch = function() return { SAMPLES, MODE_BAND, box(D.PATTERN, D.PATTERN_STATE), box(D.MODE_LOCK, D.LOCK_STATE) } end,
+      answer = function(vb, _, how)
+        local what = (vb.drumMode == "sq" and not vb.drumLock) and "sequence" or "drumkit"
+        return sent(dir .. " " .. what .. " sent", how)
       end,
     }
   end
 end
-A.previous_drumkit = kitStep(D.KIT_BACK)
-A.next_drumkit = kitStep(D.KIT_NEXT)
+A.previous_drumkit = kitStep(D.KIT_BACK, "Previous")
+A.next_drumkit = kitStep(D.KIT_NEXT, "Next")
 
 function A.select_drumkit_part(args, label, known)
   local i = slotArg(args.index)
@@ -350,14 +347,11 @@ function A.drumkit_menu_item(args, label, known)
   end
   local locks = item == "lock_all" or item == "unlock_all"
   local save = item == "save_drumkit_as"
-  local names = not (locks or save)
   local withSettings = item == "copy_slot_to" or item == "swap_slot_with"
   local focus = "drumkit-menu-" .. i
   return {
     label = label,
     part = "drums",
-    text = names,
-    textAfter = names,
     decide = function(vb)
       local why, f = A.refusal(vb)
       if why then return nil, why, f end
@@ -368,24 +362,26 @@ function A.drumkit_menu_item(args, label, known)
         submenu = t and { x = t[1], below = t[2], row = at[2], first = D.SUBMENU_FIRST_ROW } or nil,
       } }
     end,
+    -- The rows the item changes, right of their names (D.sampleRect: the name column flashes while a
+    -- sequence plays, and holds a fixed role).
     watch = function()
       if locks then return { D.columnRect("lock", D.BUTTON_STATE[1]) } end
-      if sub then return { D.rowRect(i), D.rowRect(target) } end
-      return { D.rowRect(i) }
+      if sub then return { D.sampleRect(i), D.sampleRect(target) } end
+      return { D.sampleRect(i) }
     end,
-    -- The locks, or the names (and with a slot's settings the LEDs) of the rows the item changes,
-    -- each as kitStep compares the names (`compared`): any of them that differs is a change, one
-    -- read only once or not at all leaves it to the change wait.
+    -- The locks, or with a slot's settings the LEDs of the rows the item changes (`compared`): any
+    -- of them that differs is a change; one read only once, or not at all, leaves it to the change
+    -- wait — and so does every item that changes a sample alone, which nothing reads (no slot's name
+    -- is read: read/drums.luau, THE NAMES).
     same = function(vb, va)
       if locks then return verdict({ compared(vb.kitLock, va.kitLock, 1, #D.PART_LABELS) }) end
-      local seen = {}
-      for _, r in ipairs(sub and { i, target } or { i }) do
-        seen[#seen + 1] = compared(vb.kitNames, va.kitNames, r, r)
-        if withSettings then
-          for _, k in ipairs(LED_KEYS) do seen[#seen + 1] = compared(vb[k], va[k], r, r) end
+      if not withSettings then return nil end
+      for _, r in ipairs({ i, target }) do
+        for _, k in ipairs(LED_KEYS) do
+          if compared(vb[k], va[k], r, r) == "differ" then return false end
         end
       end
-      return verdict(seen)
+      return nil
     end,
     answer = function(_, va, how)
       if save then
@@ -407,20 +403,12 @@ function A.drumkit_menu_item(args, label, known)
         return { said = n .. " of 12 slots locked" .. (read < 12 and (", " .. (12 - read) .. " not read") or ""),
           focus = focus }
       end
-      local function reads(r)
-        local n = va.kitNames and va.kitNames[r]
-        return n and (D.PART_LABELS[r] .. " reads " .. n) or nil
-      end
       if item == "remove_sample" then
-        return { said = reads(i) or "Remove Sample chosen; VPS Avenger redrew the slot", focus = focus }
+        return { said = "Remove Sample chosen; VPS Avenger redrew " .. D.PART_LABELS[i] .. "'s row", focus = focus }
       end
       if item == "copy_sample_to" or item == "copy_slot_to" then
-        local r = reads(target)
-        return { said = words .. " chosen" .. (r and (": " .. r) or ("; VPS Avenger redrew " .. D.PART_LABELS[target] .. "'s row")),
-          focus = focus }
+        return { said = words .. " chosen; VPS Avenger redrew " .. D.PART_LABELS[target] .. "'s row", focus = focus }
       end
-      local a, b = reads(i), reads(target)
-      if a and b then return { said = a .. ", " .. b, focus = focus } end
       return { said = words .. " chosen; VPS Avenger redrew both rows", focus = focus }
     end,
   }
@@ -466,24 +454,19 @@ function A.drumkit_column(args, label, known)
       end,
     }
   end
-  -- Back and Next: the slot's name read before and after.
+  -- Back and Next: ONE click, said as sent — "Bassdrum: next sample sent" — then one change wait on
+  -- the slot's row right of its name (D.sampleRect), and the drumkit's switches read after it, as
+  -- the drumkit's own Back and Next (kitStep, above): the slot's name is a fixed role, and until 0.16
+  -- comparing it said "unchanged, Bassdrum reads BD" of every step (mt-verified, finding 5). The
+  -- original just clicks (actions.py, action_drumkit_column).
   return {
     label = label,
     part = "drums",
-    text = true,
-    textAfter = true,
+    sentAnyway = true,
     decide = onDrums(at),
-    watch = function() return { D.nameRect(i) } end,
-    same = function(vb, va) return verdict({ compared(vb.kitNames, va.kitNames, i, i) }) end,
-    answer = function(_, va, how)
-      local role = D.PART_LABELS[i]
-      local n = va and va.kitNames and va.kitNames[i]
-      if not n then
-        if how == "changed" then return { said = "VPS Avenger redrew " .. role .. "'s name", focus = focus } end
-        if how == "unchanged" then return { note = "nothing VPS Avenger shows changed" } end
-        return { error = role .. "'s name cannot be read now" }
-      end
-      return told(role .. " reads " .. n, how, focus)
+    watch = function() return { D.sampleRect(i) } end,
+    answer = function(_, _, how)
+      return sent(D.PART_LABELS[i] .. ": " .. (column == "back" and "previous" or "next") .. " sample sent", how, focus)
     end,
   }
 end

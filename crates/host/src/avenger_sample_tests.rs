@@ -118,11 +118,11 @@ fn the_page_key_reads_the_sample_editor_on_the_drums_tab_with_editor() {
     "##));
 }
 
-/// Slot 12 selected with Amp ON, and only slots 1, 2 and 12 named in the words: JSON cannot carry
-/// lists so sparse, so the state keys them by the slot's number as text — Amp's switch at "12", the
-/// three names at theirs — while every slot's Mute, all read, stays a list; the page opens with it,
-/// and the state is written as the host writes it. A message page:post refuses is logged and the
-/// page is shown all the same.
+/// Slot 12 selected with Amp ON: JSON cannot carry a list so sparse, so the state keys it by the
+/// slot's number as text — Amp's switch at "12" — while every slot's Mute, all read, stays a list; the
+/// page opens with it, and the state is written as the host writes it. No slot's name is read or
+/// posted (the twelve fixed roles: the maintainer's decision of 2026-10-31). A message page:post
+/// refuses is logged and the page is shown all the same.
 #[test]
 fn slot_twelve_and_a_few_names_read_are_posted_keyed_by_the_slot() {
     run_mac(&scenario(r##"
@@ -133,12 +133,11 @@ fn slot_twelve_and_a_few_names_read_are_posted_keyed_by_the_slot() {
         local o = st.osc_panel
         T.ok(o.drumkit_part_selected == "12" and o.sample_editor_amp_states["12"] == true
           and o.sample_editor_amp_states[12] == nil, "Amp's switch keyed by the slot: " .. T.jsonEncode(o.sample_editor_amp_states))
-        T.ok(o.drumkit_part_labels["12"] == "BD 909" and o.drumkit_part_labels["1"] == "CR Wide"
-          and o.drumkit_part_labels["3"] == nil and o.drumkit_part_labels[1] == nil, T.jsonEncode(o.drumkit_part_labels))
+        T.ok(o.drumkit_part_labels == nil, "no slot's name posted")
         T.ok(o.drumkit_mute_states[12] == false and o.drumkit_mute_states[1] == false, "every Mute read: a list")
         local text = T.jsonEncode(st)
         T.ok(string.find(text, '"sample_editor_amp_states":{"12":true}', 1, true) ~= nil
-          and string.find(text, '"drumkit_part_labels":{"1":"CR Wide","12":"BD 909","2":"HH Open"}', 1, true) ~= nil, text)
+          and string.find(text, "drumkit_part_labels", 1, true) == nil, text)
         -- Slot 3 with every name read, Amp ON: lists again.
         T.back(W)
         T.paintAvenger(98, 84, 1.6, T.drums({ sampleTab = "amp", sampleOn = true, slots = { selected = 3 } }))
@@ -146,7 +145,7 @@ fn slot_twelve_and_a_few_names_read_are_posted_keyed_by_the_slot() {
         T.openPage()
         T.event()
         o = T.lastPost("state").state.osc_panel
-        T.ok(o.sample_editor_amp_states[3] == true and o.drumkit_part_labels[12] == "KIT 12", "lists where JSON has them")
+        T.ok(o.sample_editor_amp_states[3] == true and o.drumkit_mute_states[12] == false, "lists where JSON has them")
         -- A message page:post refuses.
         T.back(W)
         S.postsMayFail = true
@@ -654,41 +653,38 @@ fn the_envelopes_menu_and_preset_hand_the_keyboard_to_avenger() {
     "##));
 }
 
-/// A row of the sample browser: the browser read as shown and slot 3 as selected, the slot's name
-/// pictured and held, the keyboard handed over with Return alone, the row clicked at (294, 297) —
-/// (568, 559) — and the tool's sentence #13 behind the screen reader; slot 3's name not read
-/// meanwhile. Return through: the slot's new name read and said, and the view as read then, the page
-/// back on the row. The same name: unchanged. A fourteenth row: refused with no trip.
+/// A row of the sample browser: the browser read as shown and slot 3 as selected, the slot's row right
+/// of its name pictured and held, the keyboard handed over with Return alone, the row clicked at (294,
+/// 297) — (568, 559) — and the tool's sentence #13 behind the screen reader. Return through: what the
+/// change wait on the slot's row saw said — no name read (the twelve fixed roles: the maintainer's
+/// decision of 2026-10-31) — and the view as read then, the page back on the row. Nothing redrawn:
+/// unchanged. A fourteenth row: refused with no trip.
 #[test]
 fn a_sample_browser_row_is_clicked_with_the_keyboard_handed_over() {
     run_mac(&scenario(r##"
-        local words = T.slotWords("KIT", { ["slot 3"] = "RD Ride 1", browser = "Crash Open Hi-Hat Ride" })
+        local words = { browser = "Crash Open Hi-Hat Ride" }
         local _, _, W = T.pageOn(T.drums({ slots = { selected = 3 } }), words)
         T.ok(T.lastPost("state").state.osc_panel.sample_editor_view == "browser", "the browser read at the key")
-        local function row(before, after)
+        local function row(redraw)
           T.event()
           T.tripFrom({ action = "sample_browser_focus", args = { index = 3, name = "Ride" }, focused = true }, W)
           T.ok(T.clickAt() == "568,559" and S.holding["Return"] and not S.holding["Escape"], "row 3: " .. T.clickAt())
           T.ok(T.lastSaid() == "Use the Avenger browser. To return to Avenger Control, press Return."
             and S.speech[#S.speech].interrupt == false, tostring(T.lastSaid()))
-          T.ok(T.values(W).kitNames[3] == nil, "slot 3's name not read meanwhile")
-          local r = T.lastRead("vps-avenger browse slot")
-          T.answer(r, { status = "text", text = before, words = {}, lines = {} })
-          T.words(T.slotWords("KIT", { ["slot 3"] = after, browser = "Crash Open Hi-Hat Ride" }))
-          T.repaint(T.drums({ slots = { selected = 3 } }))
+          if redraw then T.repaint(T.drums({ slots = { selected = 3, loop = { [3] = true } } })) end
           T.ok(T.typed("Return") == "passed", "Return through")
           T.tick()
           T.runDue()
-          T.settle()
+          T.tick(16)
         end
-        row("RD Ride 1", "RD Jazz")
+        row(true)
         T.ok(T.lastPost().id == "sample-browser-item-3" and T.lastPost("error").text == ""
-          and T.lastPost("state").state.osc_panel.drumkit_part_labels[3] == "RD Jazz", tostring(T.lastPost().id))
+          and T.lastPost("state").state.osc_panel.drumkit_loop_states[3] == true, tostring(T.lastPost().id))
         T.ok(T.lastPost("state").state.osc_panel.sample_editor_view == "browser", "the view read after Return")
-        T.ok(T.count("[avenger] [browse] 'sample browser row 3': after Return — 'RD Jazz', changed by the names (before: "
-          .. "'RD Ride 1')") == 1, T.dump())
-        row("RD Jazz", "RD Jazz")
-        T.ok(T.lastPost("error").text == "The sample browser: unchanged, Ride reads RD Jazz", T.lastPost("error").text)
+        T.ok(T.count("[avenger] [browse] 'sample browser row 3': after Return — the slot's row changed") == 1, T.dump())
+        row(false)
+        T.ok(T.lastPost("error").text == "The sample browser: unchanged: VPS Avenger drew no change at Ride's row",
+          T.lastPost("error").text)
         T.event()
         local clicks, from = #S.clicks, #S.pageOrder
         T.pageMsg({ action = "sample_browser_focus", args = { index = 14, name = "x" }, focused = true })
@@ -703,7 +699,7 @@ fn a_sample_browser_row_is_clicked_with_the_keyboard_handed_over() {
 // ---------------------------------------------------------------------------------------------
 
 /// Volume of the sample editor: pressed at (307, 407) — (589, 735) — with the left button and held,
-/// the tool's sentence #10 with the slot read as selected by its name as read at the key; one PageUp
+/// the tool's sentence #10 with the slot read as selected by its role in the kit; one PageUp
 /// is one move of one point times the factor; Return lets go once and reads nothing, the page back on
 /// Volume. With DRUM SQ as the central tab nothing is pressed.
 #[test]
@@ -714,7 +710,7 @@ fn a_sample_knob_is_pressed_held_and_released_through_the_keys() {
         T.tripFrom({ action = "sample_editor_control", args = { control = "volume" }, focused = true }, W)
         local downs = T.inputs("down")
         T.ok(#downs == 1 and T.xy(downs[1]) == "589,735" and downs[1].button == "left", "the press: " .. T.xy(downs[1]))
-        T.ok(T.lastSaid() == "Please press Page Up or Down to set Volume for SD Tight. To Confirm, press Return."
+        T.ok(T.lastSaid() == "Please press Page Up or Down to set Volume for Ride. To Confirm, press Return."
           and S.speech[#S.speech].interrupt == false, tostring(T.lastSaid()))
         T.key("PageUp")
         local moves = T.inputs("move")

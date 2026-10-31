@@ -76,11 +76,13 @@ local H = {}
 --
 -- The display factor is 1 on a DAW's plug-in panel — a coordinate there is a point of the DAW's
 -- window (docs/api/overlay.md, attachEmbedded on macOS), and the zoom alone is the whole factor,
--- Retina or not. On Avenger's own child window (Windows) it is not known: a coordinate there is a
--- physical pixel, Avenger is drawn 1.25 or 1.5 times as large at 125 or 150 % display scaling, and
--- nothing in the host says which scaling a window is drawn at (docs/api/overlay.md, O:scale,
--- Windows). There it is the ratio between the factor MENU and UNDO are read at and the one the
--- zoom alone gives, rounded to a quarter and never under 1. The read header then has to FIT:
+-- Retina or not. On Avenger's own child window (Windows) a coordinate is a physical pixel, Avenger
+-- is drawn 1.25 or 1.5 times as large at 125 or 150 % display scaling, and nothing in the host says
+-- which scaling a given window is drawn at (docs/api/overlay.md, O:scale, Windows): the display
+-- factor is 1 there only where nothing on the desktop is scaled, the window's monitor at 100 % and
+-- the system's DPI 96 (host.screen.scaling, since 0.16: knownDisplay below). Elsewhere it is the
+-- ratio between the factor MENU and UNDO are read at and the one the zoom alone gives, rounded to a
+-- quarter and never under 1. The read header then has to FIT:
 -- MENU and UNDO within FIT_TOL of where the factor puts them, and nearer that zoom's step than any
 -- other, or there is no factor — a zoom field misread as another step, a DAW origin far off, a
 -- display scaled to 110 % (a quarter from anything standard) all end there, said in the log,
@@ -95,12 +97,13 @@ local H = {}
 -- 1.8 against 1.75, 2.9 % — which the step check does not catch either: that residue is in TODO.md.
 --
 -- A zoom field that cannot be read (the project's recogniser mangled small text at 50 %) leaves
--- the header's own size. On a panel, where the display factor is 1, the zoom is the step the size
--- lands within SEEN_TOL of — taken as seen rather than read — and there is none when it lands
--- near no step: SEEN_TOL is under half the smallest gap between two steps (5.3 %), so at most one
--- is that near. On Windows the size alone cannot tell 80 % at a display of 125 % from 100 % at 100
--- %: the factor is the header's size, and the zoom is NOT known — the Zoom control says it cannot
--- be read and opens nothing, rather than choosing a row of the list for a zoom it guessed.
+-- the header's own size. Where the display factor is 1 — a panel, and Avenger's own window on a
+-- desktop scaled nowhere — the zoom is the step the size lands within SEEN_TOL of — taken as seen
+-- rather than read — and there is none when it lands near no step: SEEN_TOL is under half the
+-- smallest gap between two steps (5.3 %), so at most one is that near. Elsewhere on Windows the
+-- size alone cannot tell 80 % at a display of 125 % from 100 % at 100 %: the factor is the header's
+-- size, and the zoom is NOT known — the Zoom control says it cannot be read and opens nothing,
+-- rather than choosing a row of the list for a zoom it guessed.
 local RATIO_TOL = 0.06
 local FIT_TOL = 0.03
 local SEEN_TOL = 0.015
@@ -418,18 +421,33 @@ local function nearestStep(k)
   return best.z, best.off
 end
 
--- The display factor of `ctrl` where it is known without reading: 1 on a DAW's plug-in panel
--- (see "The factor"), nil on Avenger's own window.
+-- The display factor of `ctrl` where it is known without reading, and the words for the log: 1 on a
+-- DAW's plug-in panel (see "The factor"); on Avenger's own window (Windows) 1 only where nothing on
+-- the desktop is scaled — the monitor the window is on at 100 % and the system's DPI 96
+-- (host.screen.scaling, both 1; the maintainer's decision of 2026-10-31, avw2-verified B2(a)) — and
+-- nil anywhere else, as before. Only both: a window drawn at the system's DPI by a program that is
+-- not per-monitor aware is drawn at another factor on a monitor scaled otherwise, and neither value
+-- says which a given window is (docs/api/screen.md, host.screen.scaling, Windows). With 1 the zoom
+-- is the step the header's size lands near, as on a panel: the second Windows session (2026-10-31)
+-- read MENU and UNDO where 1.5893 puts them, 0.67 % from 80 %'s 1.6, never read the zoom field, and
+-- left the Zoom control dead — "80 % (seen)" and 1.6000 now. One call per answer of the header's
+-- read; no picture.
 local function knownDisplay(ctrl)
-  if not ownWindow(ctrl) then return 1 end
-  return nil
+  if not ownWindow(ctrl) then return 1, nil end
+  -- Guarded: a host without the call (an older one) or an answer of nil and why leaves it unknown.
+  local ok, s = pcall(function() return host.screen.scaling(ctrl) end)
+  if not (ok and type(s) == "table" and type(s.scale) == "number" and type(s.system) == "number") then return nil, nil end
+  local words = string.format("the display's scaling %.2f, the system's %.2f", s.scale, s.system)
+  if s.scale == 1 and s.system == 1 then return 1, words end
+  return nil, words
 end
 
 -- The factor for header `h` in `ctrl` (see "The factor" above): k, zoom (nil when it is not
--- known), how ("read" or "seen"), the display factor (nil when it is not known) — or nil and why
--- not.
+-- known), how ("read" or "seen"), the display factor (nil when it is not known), and what the
+-- display's scaling said on Avenger's own window (knownDisplay; nil where it was not asked or could
+-- not be) — or nil and why not.
 local function factorOf(h, ctrl)
-  local fixed = knownDisplay(ctrl)
+  local fixed, scaling = knownDisplay(ctrl)
   if h.zoom then
     local k0 = h.zoom / G.AUTHORED_ZOOM
     local q = fixed or math.max(1, math.floor(h.kx / k0 * 4 + 0.5) / 4)
@@ -447,20 +465,20 @@ local function factorOf(h, ctrl)
       return nil, string.format("the zoom field reads %d %%, but MENU and UNDO sit where %d %% puts them "
         .. "at a display factor of %.2f", h.zoom, seen, q)
     end
-    return k, h.zoom, "read", q
+    return k, h.zoom, "read", q, scaling
   end
   if fixed then
     local z, off = nearestStep(h.kx / fixed)
     if off <= SEEN_TOL then
-      return z / G.AUTHORED_ZOOM * fixed, z, "seen", fixed
+      return z / G.AUTHORED_ZOOM * fixed, z, "seen", fixed, scaling
     end
     return nil, string.format("the zoom field could not be read, and MENU and UNDO are read where a "
       .. "factor of %.3f puts them, %.1f %% from %d %%, the nearest step of Avenger's zoom", h.kx,
       off * 100, z)
   end
-  -- Avenger's own window, its display's scaling not known, its zoom not read: the size is the
-  -- factor, and the zoom is not known.
-  return h.kx, nil, "seen", nil
+  -- Avenger's own window, its display's scaling not known or not 100 %, its zoom not read: the size
+  -- is the factor, and the zoom is not known.
+  return h.kx, nil, "seen", nil, scaling
 end
 
 -- In a calibrating run, one picture per zoom and window size: the header band, with a crosshair
@@ -657,9 +675,27 @@ local function answered(ctrl, st, token, band, cx, cy, title, r)
   end
   st.misses = 0
   -- The factor and the zoom — or nil and, in the zoom's place, why there is no factor.
-  local k, zoom, how, q = factorOf(h, ctrl)
+  local k, zoom, how, q, scaling = factorOf(h, ctrl)
   local line = measured(ctrl, h, k or h.kx, cx, cy)
   local field = h.zoomWord and string.format("the zoom field reads %d %%", h.zoom) or "the zoom field was not read"
+  -- The zoom field not read with the header found: what the band read left of where the preset's
+  -- name begins, said once per state — every word there with its centre, its box and whether the
+  -- recogniser only guessed it, or nothing. The second Windows session (2026-10-31) read the header
+  -- whole and never the zoom, and its log could not tell whether the "%" was lost, a glyph glued
+  -- on, or nothing read at the field (avw2-verified, A3's 1a): this line tells the next one.
+  if not h.zoomWord then
+    local left = cx + G.NAME_REGION[1] * h.kx
+    local seen = {}
+    for _, w in ipairs(r.words or {}) do
+      local wx, wy = centre(w)
+      if wx < left then
+        seen[#seen + 1] = string.format("\"%s\" at %.0f,%.0f (%.0fx%.0f%s)", forLog(w.text), wx, wy, w.w or 0, w.h or 0,
+          w.approx and ", guessed" or "")
+      end
+    end
+    sayOnce("zoomwords", st.key, "[avenger] %s: the zoom field was not read — left of the preset's name the band "
+      .. "reads %s", where, #seen > 0 and table.concat(seen, ", ") or "nothing")
+  end
   if not k then
     local noFactor = zoom
     takeZoom(st, nil, nil, nil)
@@ -685,8 +721,12 @@ local function answered(ctrl, st, token, band, cx, cy, title, r)
   if takeZoom(st, k, zoom, how) then
     local what
     if zoom then
-      what = string.format("zoom %d %% (%s), factor %.4f, display factor %.2f", zoom,
-        how == "read" and "read" or "seen from the header's size, not read", k, q)
+      what = string.format("zoom %d %% (%s), factor %.4f, display factor %.2f%s", zoom,
+        how == "read" and "read" or "seen from the header's size, not read", k, q,
+        scaling and (" (" .. scaling .. ")") or "")
+    elseif scaling then
+      what = string.format("zoom not known (the display factor is not known — %s, not both 1 — and the zoom "
+        .. "field was not read), factor %.4f from the header's size", scaling, k)
     else
       what = string.format("zoom not known (the display's scaling is not known, and the zoom field "
         .. "was not read), factor %.4f from the header's size", k)

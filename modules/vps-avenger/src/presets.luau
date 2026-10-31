@@ -447,7 +447,7 @@ end
 -- The preset may have changed in a way this module does not read: the anchor goes. `own`: true
 -- when Avenger most likely shows the user's own file now (Load preset, Save preset as — SNAPPING),
 -- false when it does not (Initialize preset), nil to leave that as it was (Undo, the redo list,
--- the overlay leaving the front, Save preset, which keeps the name).
+-- the overlay leaving the front).
 function DB.forget(why, own)
   if anchor and cat then
     host.log.info(string.format("[avenger] the database's position (%s) is forgotten: %s", where(anchor), tostring(why)))

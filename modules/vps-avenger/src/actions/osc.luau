@@ -89,15 +89,17 @@ end
 -- OSC tab `i` in words, from the values `...` in turn — reads of this moment: an action's read
 -- after its click and the one before it, or what the ring read in its stay, never a window's values
 -- kept from earlier (state.luau: a step replaces only the name) — as the page names its tabs: the
--- name one of them read off the screen (`oscNames`, in the database's spelling where the read was
--- close to it), else a read's words for the tab (`oscWords`, read/open.luau's wordsFor: a name the
--- window keeps from a read under the same preset's name and count, else the preset database's for
--- the preset shown), else Avenger's own "OSC i". The ring reads no text of the strip on a step
--- (ring.luau), so there the names kept and the database's are what the avenger_control developer
--- asked for (his report of 2026-10-26: the Oscillator stepper said only "OSC 1", "OSC 2" where the
--- page shows the names). Said as it is, with no "from the database": the maintainer's decision of
--- 2026-10-26, first for these names and the same day for everything the database gives — that is
--- what the database is there for — in place of the mark of 2026-09-28 (src/presets.luau).
+-- names one of them took (`oscNames`: since 0.16 the preset database's where it has the preset,
+-- read only at the page key as their check — THE DATABASE FIRST, read/open.luau, the maintainer's
+-- decision of 2026-10-31 — elsewhere read off the screen, in the database's spelling where the read
+-- was close to it), else a read's words for the tab (`oscWords`, read/open.luau's wordsFor: the
+-- database's first, as the page key checked them, where it has the preset — the reverse of 0.14's
+-- order, which named a tab by the screen's read first — else a name the window keeps from a read
+-- under the same preset's name and count), else Avenger's own "OSC i". The ring reads no text of
+-- the strip on a step (ring.luau), so there the database's and the names kept are what the
+-- avenger_control developer asked for (his report of 2026-10-26: the Oscillator stepper said only
+-- "OSC 1", "OSC 2" where the page shows the names). Said as it is, with "from the database" only
+-- where the page key's read disagreed with the database's name (src/presets.luau, WHAT IT MAY DO).
 local function oscName(i, ...)
   for k = 1, select("#", ...) do
     local v = select(k, ...)
@@ -126,12 +128,28 @@ local function sameSelection(vb, va)
   return va.selectedType ~= nil and va.selectedType == vb.selectedType and va.selectedIndex == vb.selectedIndex
 end
 
--- What a choice of tab says: the tab read as selected after it.
-local function selectedAnswer(vb, va, how)
-  local tab = tabWords(va, vb)
-  if not tab then return { error = "the selected tab cannot be read now" } end
-  if how == "unchanged" then return { note = "unchanged, " .. tab .. " is selected", said = tab .. " is selected, unchanged" } end
-  return { said = tab .. " selected" }
+-- A choice of tab's read after the click holds only where it DECIDED a tab (`selectionState`
+-- "read", read/strip.luau): an undecided one — no tab stood out, the strip covered — is looked on
+-- from within the bound, as a drum action's is, and at the bound the read before is kept, said as
+-- not read (src/act.luau, `holds`, `unheld`). Until 0.16 it was taken for a change and its nil
+-- selection posted, which hid the page's Drums section (the developer's Mac test of 2026-10-31,
+-- mt-verified finding 4C).
+local function decided(va) return va.selectionState == "read" end
+local UNDECIDED = "the selected tab cannot be read now"
+
+-- What a choice of tab says: the tab read as selected after it — and where it is not the one
+-- clicked (`clicked`, its words), that it was clicked and which reads selected.
+local function selectedAnswer(clicked)
+  return function(vb, va, how)
+    local tab = tabWords(va, vb)
+    if not tab then return { error = UNDECIDED } end
+    if how == "unchanged" then return { note = "unchanged, " .. tab .. " is selected", said = tab .. " is selected, unchanged" } end
+    local want = clicked and clicked(va, vb)
+    if want and want ~= tab then
+      return { said = tab .. " selected", note = want .. " was clicked; " .. tab .. " reads selected" }
+    end
+    return { said = tab .. " selected" }
+  end
 end
 
 function A.select_osc_tab(args, label)
@@ -147,27 +165,30 @@ function A.select_osc_tab(args, label)
     end,
     watch = function() return { TABS_ROW, KNOBS } end,
     same = sameSelection,
-    answer = selectedAnswer,
+    holds = decided,
+    unheld = UNDECIDED,
+    answer = selectedAnswer(function(va, vb) return oscName(i, va, vb) end),
   }
 end
 
--- Drums or Trig, at its tab's point; with `names`, the part's text read after the click — the Drums
--- tab's slots' names, which the page shows (the ring leaves them off: ring.luau).
-local function fixedTab(x, names)
+-- Drums or Trig, at its tab's point. The Drums tab's slots' names are not read after it: they are
+-- Avenger's fixed roles (read/drums.luau, THE NAMES).
+local function fixedTab(x, words)
   return function(_, label)
     return {
       label = label,
       part = "tab",
-      textAfter = names,
       decide = function() return { at = { x, T.TAB_Y } } end,
       watch = function() return { TABS_ROW, KNOBS } end,
       same = sameSelection,
-      answer = selectedAnswer,
+      holds = decided,
+      unheld = UNDECIDED,
+      answer = selectedAnswer(function() return words end),
     }
   end
 end
-A.select_drums_tab = fixedTab(T.DRUMS_TAB_X, true)
-A.select_trig_tab = fixedTab(T.TRIG_TAB_X)
+A.select_drums_tab = fixedTab(T.DRUMS_TAB_X, "Drums")
+A.select_trig_tab = fixedTab(T.TRIG_TAB_X, "Trig")
 
 function A.add_osc(_, label)
   return {
@@ -205,6 +226,10 @@ local function toggle(label, key, index, title, point, kind)
   return {
     label = label,
     part = "strip",
+    -- A Mute or a Solo changes no tab's selection, and its read after the click may decide none —
+    -- the level meter lights with an un-muted oscillator's sound — which, posted, would wipe the
+    -- ring's tab (avw2-verified, X-F7 and A8): the read's selection is not posted.
+    leaves = { "selectedType", "selectedIndex", "selectionState" },
     decide = function(vb)
       local p, why = point(vb)
       if not p then return nil, why end
@@ -268,10 +293,13 @@ function A.osc_menu_item(args, label)
   return {
     label = label,
     part = "tab",
-    -- Copy keeps the name it copied, read before; Paste and Initialize compare the names before
-    -- with the names after; Delete counts the dots.
+    -- Copy keeps the name it copied, read before — the preset database's where it has the preset
+    -- (read/open.luau, THE DATABASE FIRST); Paste and Initialize compare the names before with the
+    -- names after, both read off the screen (`screenNames`): the database's are the file's, which
+    -- the edit leaves behind; Delete counts the dots.
     text = item ~= "Delete",
     textAfter = item ~= "Copy",
+    screenNames = item ~= "Copy",
     decide = function(vb)
       local n, why = counted(vb, i)
       if not n then return nil, why end

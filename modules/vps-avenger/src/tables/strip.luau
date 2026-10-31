@@ -11,13 +11,22 @@
 
 local T = {}
 
--- The OSC tabs begin at x 244. Their names are read between y 28 and 42, up to x 536 — or 548
--- with eight oscillators, where no "Add OSC" tab is left right of them.
+-- The OSC tabs begin at x 244. Their names are read between y 32 and 38.3, up to x 536 — or 548
+-- with eight oscillators, where no "Add OSC" tab is left right of them. Until 0.16 from 28 to 42,
+-- which held the tab's coloured rule above the name (30.6 to 31.9) and the level meter below it
+-- (38.55 to 39.15, read/strip.luau, THE SELECTED TAB): every misread name of the developer's Mac
+-- test of 2026-10-31 ('Penc' and 'Parc' for Perc) was read with the meter lit, and the rule kept the
+-- crop from tightening ('diy' for Arp; mt-verified, finding 11). The glyphs lie from 33.75 to 37.95
+-- (the descender of "Arp"). With G.place rounding half up, a bottom that keeps them and leaves the
+-- meter out lies in [37.5, 38.5) at 50 %, [37.8, 39.06] at 80 %, [37.75, 38.75) at 100 % and
+-- [37.875, 38.625) at 200 %: 38.3 fits all four, and the tests place it at factors 1 to 4 with
+-- Avenger's corner half a pixel either way. The project's OSC_TAB_NAME_OCR_TOP and _BOTTOM are 28
+-- and 42: this module's own departure from them.
 T.PANEL_LEFT = 244
 T.NAME_RIGHT = 536
 T.NAME_RIGHT_WITH_ADD = 548
-T.NAME_TOP = 28
-T.NAME_BOTTOM = 42
+T.NAME_TOP = 32
+T.NAME_BOTTOM = 38.3
 
 -- Where a tab's selection shows: y 30 to 40, across the tab — the OSC tabs as the count shares
 -- the strip out, Drums from 551 to 601 and Trig from 602 to 631.

@@ -7,9 +7,12 @@
 --   prev_preset, next_preset   ◀ or ▶, then the name watched until it changes (O:watch), and
 --                              "unchanged" said when it has not by the watch's bound; on Init
 --                              Preset nothing is sent, and the error region says why
---   pick_load_preset,          MENU's item chosen in Avenger's own menu (O:chooseMenuItem), then
---   pick_save_preset_as        the file dialog that comes next: the trip waits for it, and for
---                              Avenger in front again (trip:afterDialog), then watches the name
+--   pick_load_preset,          MENU, and 0.18 s later its item at the project's fixed point, as the
+--   pick_save_preset_as        ring clicks them (main.luau, "Load preset and Save preset as": the
+--                              maintainer's documented exception to the rule against timers); then
+--                              the file dialog that comes next: the trip waits for it, and for
+--                              Avenger in front again (trip:afterDialog), then watches the name —
+--                              "unchanged" where it did not change, the dialog cancelled
 --   pick_initialize_preset     MENU's Initialize, then Avenger's warning box READ and YES clicked
 --                              where it was read (dialog.luau, D.answer), then everything read
 --                              again, as at the key (read/open.luau)
@@ -141,7 +144,21 @@ local notChosen = Act.notChosen
 -- `result`: { set = { key -> value }?, values = all of them?, part = { keys, values }? (a part read
 -- again, src/act.luau), facts = { key -> value }? (state.luau's), error = a reason?, sentence = a
 -- whole sentence?, note = a reason?, focus = an element's id?, said = what was read, in words? }.
+-- What the page is told of a trip's end, in one log line — the second Windows session (2026-10-31)
+-- left no trace of what the trips told the tester (avw2-verified, A7): the sentence, error or note
+-- in the error region, the words said where the page does not come back, the focus; or nothing.
+local function answeredLine(label, result)
+  local told = {}
+  if result.sentence then told[#told + 1] = string.format("sentence '%s'", result.sentence) end
+  if result.error then told[#told + 1] = string.format("error '%s'", result.error) end
+  if result.note then told[#told + 1] = string.format("note '%s'", result.note) end
+  if result.said then told[#told + 1] = string.format("said '%s'", result.said) end
+  if result.focus then told[#told + 1] = "focus " .. tostring(result.focus) end
+  log(string.format("'%s': answered — %s", tostring(label), #told > 0 and table.concat(told, ", ") or "nothing said"))
+end
+
 local function report(label, result)
+  answeredLine(label, result)
   local w = E.plugin()
   local id = w and w.id
   if id and result.values then S.read(id, result.values) end
@@ -150,7 +167,7 @@ local function report(label, result)
   if id and result.facts then
     for k, v in pairs(result.facts) do S.note(id, k, v) end
   end
-  E.postState(id)
+  E.postState(id, "trip '" .. label .. "'")
   local text = result.sentence
     or (result.error and (label .. ": " .. result.error))
     or (result.note and (label .. ": " .. result.note))
@@ -177,37 +194,94 @@ local function report(label, result)
   return name and (label .. ": " .. name) or nil
 end
 
--- The name read after a step, with where the preset database has it (the page's heading shows it
--- beside the name, as it is), or the expansion cleared where it does not.
-local function named(name)
-  local expansion = false
+-- The browser's values a read of it says (src/actions/browser.luau's KEYS): what a step into another
+-- expansion posts as not read (named, below).
+local BROWSER_KEYS = { "expansionView", "expansionViewFrom", "expansionOpen", "selectedExpansion", "lists",
+  "favoriteView", "favoriteStates", "pageCategory" }
+
+-- The name read after a click, with where the preset database has it (the page's heading shows it
+-- beside the name, as it is), or the expansion cleared where it does not — and with them the loaded
+-- preset's row in the expansion the page has open (`loadedIndex`, the page's SELECTED row): the
+-- place's, where its expansion is the open one, else posted as not read. A step never moved it
+-- (the developer's Mac test of 2026-10-31, mt-verified finding 3): after ◀ the page still marked the
+-- preset before, and after ▶ into another expansion a row of the one the page had open. The tool
+-- derives it from its anchor in every snapshot, -1 outside the open expansion (dispatcher.py). And
+-- the name read before, kept where a click's name was not read (`presetBefore`, back below), is
+-- forgotten with it. `step`: ◀ or ▶ — where its preset lies in ANOTHER expansion than the one the
+-- page has open, the browser's values are posted as not read until the page key or a browser action
+-- reads them again (the maintainer's decision of 2026-10-31, B7): the same test's Avenger had its
+-- browser follow the step into the other expansion (its log, 16395), where the tool kept showing the
+-- one open. Undo, the redo list and a file loaded say nothing of the browser: unmeasured.
+local function named(name, step)
+  local expansion, place = false, nil
   if name and E.DB.present then
     local ok, p = pcall(E.DB.place, name)
-    if ok and p then expansion = p.expansion elseif not ok then log("the preset database failed: " .. tostring(p)) end
+    if ok and p then
+      expansion, place = p.expansion, p
+    elseif not ok then
+      log("the preset database failed: " .. tostring(p))
+    end
   end
-  return { preset = name or false, expansion = expansion }
+  local set = { preset = name or false, expansion = expansion, loadedIndex = false, presetBefore = false }
+  local w = E.plugin()
+  local v = w and S.values(w.id)
+  local open = v and v.expansionOpen == true and v.selectedExpansion ~= "" and v.selectedExpansion or nil
+  if place and open and place.expansion == open then set.loadedIndex = place.index - 1 end
+  if step and place and open and place.expansion ~= open then
+    for _, k in ipairs(BROWSER_KEYS) do set[k] = false end
+    S.forgetBrowserAt(w.id, "a step loaded a preset of another expansion, " .. place.expansion)
+    log(string.format("the step loaded %s, of %s, where the page had %s open — the browser posted as not read", name,
+      place.expansion, open))
+  end
+  return set
+end
+
+-- What the heading says of a click whose name was not read: its words, the action's label without a
+-- trailing " preset" ("Next", "Load"), as the maintainer's decision of 2026-10-31 (B6) words it.
+local function afterWords(label)
+  return (string.gsub(label, " preset$", ""))
 end
 
 -- Action `action` as a trip from overlay `o`: `act(o, trip, forget)` in Avenger,
--- `trip:done(result)` its end (`report`'s result). `forget(why, own)` where the trip's click or
+-- `trip:done(result)` its end (`report`'s result). `forget(why, own, was)` where the trip's click or
 -- choice may have changed the preset: the database's position is forgotten (DB.forget's `why` and
 -- `own`), and the ring's latest name read (main.luau, "◀ and ▶ on Init Preset"); and from then on
 -- a trip that ends without the name read after it — a watch that read nothing, a give-up — posts
--- the preset as not read, so the page claims nothing of a preset it has not seen since.
+-- the preset as not read, so the page claims nothing of a preset it has not seen since. What it
+-- does say is the name before the click — `was`, the name read just before it, else the one the
+-- page had when the trip began — and its expansion, as that, never as the preset now: "Preset name
+-- not read after Next; before it: …" (the maintainer's decision of 2026-10-31, B6; the developer
+-- asked for the last name "not confirmed now", mt-verified finding 3). One log line says why the
+-- preset was posted as not read.
 local function go(o, action, act)
   local label = E.LABELS[action]
   local touched = false
-  local function forget(why, own)
+  local wasAtStart = nil
+  do
+    local w = E.plugin()
+    local v = w and S.values(w.id)
+    wasAtStart = v and v.preset or nil
+  end
+  local before = nil
+  local function forget(why, own, was)
     touched = true
+    before = was or before
     E.DB.forget(why, own)
     R.unseen()
   end
   -- Whatever the trip does, the ring's reads of this stay are not Avenger's any more (ring.luau).
   R.forgetRing()
-  local function back(result)
+  local function back(result, givenUp)
     if touched and not result.values and not (result.set and result.set.preset ~= nil) then
       result.set = result.set or {}
-      result.set.preset, result.set.expansion = false, false
+      result.set.preset, result.set.expansion, result.set.loadedIndex = false, false, false
+      local name = before or wasAtStart
+      local exp = name and named(name).expansion or false
+      result.set.presetBefore = name and { name = name, expansion = exp ~= false and exp or nil, after = afterWords(label) }
+        or false
+      log(string.format("'%s': the preset posted as not read — %s%s", label, givenUp and ("given up: " .. givenUp)
+        or (result.error or result.sentence or result.note or "no name was read after it"),
+        name and string.format("; the name before it, '%s', said as that", name) or ""))
     end
     return report(label, result)
   end
@@ -216,8 +290,9 @@ local function go(o, action, act)
     act = function(w, trip) return act(w, trip, forget) end,
     after = function(_, result) return back(result) end,
     onGiveUp = function(_, gaveUp)
-      if gaveUp.code == O.errors.GONE then return back({ sentence = E.closedWords() }) end
-      return back({ error = GIVEN_UP[gaveUp.code] or ("nothing more was done (" .. tostring(gaveUp) .. ")") })
+      if gaveUp.code == O.errors.GONE then return back({ sentence = E.closedWords() }, tostring(gaveUp.code)) end
+      return back({ error = GIVEN_UP[gaveUp.code] or ("nothing more was done (" .. tostring(gaveUp) .. ")") },
+        tostring(gaveUp.code))
     end,
   })
   -- `busy` and `not_in_front` are the runtime's to log: a message while a trip is out, or one that
@@ -240,13 +315,13 @@ end
 -- The name watched after a click, then the trip done with it: `unchanged` says a name that has not
 -- changed by the watch's bound ("unchanged" in the page), as ◀ and ▶ say it. A name that changed
 -- counts once it has settled (main.luau, watchName): one that never did is "cannot be read now",
--- never posted as the preset.
-local function thenName(o, trip, was, unchanged, label)
+-- never posted as the preset. `step`: ◀ or ▶ (named's).
+local function thenName(o, trip, was, unchanged, label, step)
   R.watchName(o, was, function(now, before, changed)
     if now == nil then return trip:done({ error = "the preset name cannot be read now" }) end
     local note = nil
     if unchanged and not changed and before ~= nil and now == before then note = "unchanged, " .. now end
-    trip:done({ set = named(now), note = note })
+    trip:done({ set = named(now, step), note = note })
   end, label)
 end
 
@@ -276,19 +351,17 @@ local function click(action, ringLabel, at, unchanged, steps)
       local ok, said = R.clickAt(w, ringLabel, at, nil, true)
       if not ok then return trip:done({ sentence = said }) end
       -- A step or an undo the database's position does not follow from the page.
-      forget("the page's " .. ringLabel)
-      thenName(w, trip, was, unchanged, ringLabel)
+      forget("the page's " .. ringLabel, nil, was)
+      thenName(w, trip, was, unchanged, ringLabel, steps)
     end)
   end
 end
 
--- MENU's item `item` (`ringLabel` as the ring names it), then `andThen(o, trip, was)` once the
--- choice has been taken, `forget` (go) told first; the popup closed again when a choice was given
--- up with it left open. Asked of the header alone: on the warning box nothing is (Act.menuHere).
--- `retries`: O:chooseMenuItem's, nil for its default — 0 for an item that opens a file dialog,
--- clicked once as the ring's are (main.luau, ONE_CLICK): Avenger's popup stays drawn, frozen, while
--- the dialog opens, and a click again lands in the dialog.
-local function menuChoice(w, trip, forget, ringLabel, item, andThen, retries)
+-- MENU's item `item` (`ringLabel` as the ring names it) chosen in the popup seen — Initialize —
+-- then `andThen(o, trip, was)` once the choice has been taken, `forget` (go) told first; the popup
+-- closed again when a choice was given up with it left open. Asked of the header alone: on the
+-- warning box nothing is (Act.menuHere).
+local function menuChoice(w, trip, forget, ringLabel, item, andThen)
   if not Act.menuHere(w) then return trip:done({ error = Act.NO_MENU_HERE }) end
   local was = nameBefore(w)
   if not trip:inFront() then return end
@@ -297,14 +370,13 @@ local function menuChoice(w, trip, forget, ringLabel, item, andThen, retries)
     label = ringLabel,
     at = G.MENU,
     menuItem = R.menuItemAt(ringLabel, item, pick),
-    retries = retries,
     onDone = function(m, chosen, err)
       if not chosen then
         R.closeLeftOpen(m, pick, err, ringLabel, G.MENU)
         return trip:done({ error = notChosen(err) })
       end
       -- Every item may load, rename or blank the preset: the database's position is not Avenger's.
-      forget(ringLabel .. " chosen from the page", R.OWN_NAME[ringLabel])
+      forget(ringLabel .. " chosen from the page", R.OWN_NAME[ringLabel], was)
       andThen(m, trip, was)
     end,
   })
@@ -315,21 +387,46 @@ local function menuChoice(w, trip, forget, ringLabel, item, andThen, retries)
   end
 end
 
--- Load and Save as: their item clicked once (menuChoice); the file dialog Avenger opens is the
--- user's; the trip waits for it and for Avenger in front again, then watches the name. No dialog
--- within the runtime's bound is said, and the name read all the same.
+-- Load and Save as: MENU, and its item at the project's point once MENU_OPEN_DELAY has passed, as
+-- the ring clicks them (main.luau, pickFileItem: the maintainer's documented exception to the rule
+-- against timers, 2026-10-31) — the trip's own check, trip:inFront(), before the item; the file
+-- dialog Avenger opens is the user's; the trip waits for it and for Avenger in front again, then
+-- watches the name: "unchanged, <name>" where it did not change by the watch's bound, the dialog
+-- cancelled (mt-verified, finding 8). No dialog within the runtime's bound is said, and the name
+-- read all the same. Asked of the header alone, as a choice is (Act.menuHere).
 local function fileItem(action, ringLabel, item)
   return function(o)
     go(o, action, function(w, trip, forget)
-      menuChoice(w, trip, forget, ringLabel, item, function(m, t, was)
-        t:afterDialog(function(o2, t2, seen)
-          if not seen then log(string.format("'%s': no file dialog came within the bound", ringLabel)) end
-          R.watchName(o2, was, function(now)
-            if now == nil then return t2:done({ error = "the preset name cannot be read now" }) end
-            t2:done({ set = named(now), note = (not seen) and "no file dialog was seen" or nil })
-          end, ringLabel)
+      if not Act.menuHere(w) then return trip:done({ error = Act.NO_MENU_HERE }) end
+      local was = nameBefore(w)
+      if not trip:inFront() then return end
+      local clicked, said = R.pickFileItem(w, ringLabel, item, true, function() return trip:inFront() end,
+        function(_, ok, why)
+          -- Not clicked: refused, said; or the trip's own check ended it, and its give-up says the rest.
+          if not ok then
+            if why then trip:done({ sentence = why }) end
+            return
+          end
+          -- The item may load or save another preset: the database's position is not Avenger's.
+          forget(ringLabel .. " chosen from the page", R.OWN_NAME[ringLabel], was)
+          trip:afterDialog(function(o2, t2, seen)
+            if not seen then log(string.format("'%s': no file dialog came within the bound", ringLabel)) end
+            R.watchName(o2, was, function(now, before, changed)
+              if now == nil then return t2:done({ error = "the preset name cannot be read now" }) end
+              local notes = {}
+              if not changed and before ~= nil and now == before then notes[#notes + 1] = "unchanged, " .. now end
+              if not seen then notes[#notes + 1] = "no file dialog was seen" end
+              t2:done({ set = named(now), note = #notes > 0 and table.concat(notes, "; ") or nil })
+            end, ringLabel)
+          end)
         end)
-      end, 0)
+      if clicked then
+        H.popup(w:origin())
+      elseif said then
+        trip:done({ sentence = said })
+      elseif trip.live then
+        trip:done({ error = "MENU cannot be opened now" })
+      end
     end)
   end
 end
@@ -390,7 +487,7 @@ A.HANDLERS.redo_menu = function(o)
     if not clicked then return trip:done({ sentence = said }) end
     H.popup(w:origin())
     -- What the list redoes is chosen in the list.
-    forget("the redo list opened from the page")
+    forget("the redo list opened from the page", nil, was)
   end)
 end
 
@@ -685,7 +782,7 @@ A.HANDLERS.confirm_expansion_view = function(_, args)
   if not part then return refuse("confirm_expansion_view", why) end
   S.part(id, part.keys, part.values)
   log("Confirm Expansion View: " .. part.values.expansionView)
-  E.postState(id)
+  E.postState(id, "Confirm Expansion View")
   E.post({ kind = "error", text = "" })
   E.post({ kind = "restoreFocus" })
 end
@@ -710,7 +807,7 @@ A.HANDLERS.confirm_osc_count = function(_, args)
   if not read then S.set(id, { oscCount = n, oscCountFrom = "confirmed" }) end
   log(string.format("Confirm OSC Count: %d for '%s'%s", n, v.preset,
     read and string.format(" — the dots read %d, which is taken", v.oscCount) or ""))
-  E.postState(id)
+  E.postState(id, "Confirm OSC Count")
   E.post({ kind = "error", text = (read and v.oscCount ~= n)
     and string.format("%s: the dots read %d oscillators, and that count is taken", E.LABELS.confirm_osc_count, v.oscCount)
     or "" })
@@ -725,7 +822,7 @@ A.HANDLERS.go_to_loaded_preset_category = function()
   local set, why = Bw.goToCategory(S.values(id))
   if not set then return refuse("go_to_loaded_preset_category", why) end
   if id then S.set(id, set) end
-  E.postState(id)
+  E.postState(id, "Go to Category")
   E.post({ kind = "error", text = "" })
   E.post({ kind = "focus", id = "open-expansion-categories" })
 end
