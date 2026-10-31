@@ -148,6 +148,11 @@ Open:
       (avw2-verified B2(b)): the 110 % display test flips then.
 - [ ] **The pump blocked 1002 ms by `window.focusChain()`** (host) while Logic did not answer
       accessibility (the developer's Mac test, around the Load Preset panel).
+- [ ] **D1's wait dropped with a disabled module** (the review of 2026-10-31): unticked during the
+      0.2-0.7 s between MENU's click and its item, the host drops the module's timer and callbacks,
+      so the busy flag stays and later Load / Save as presses are refused with a log line only, until
+      a reload. 0.15.1's timer had the same gap. A flag kept per epoch or cleared at activation would
+      close it; a headless test that drops the timer and presses again.
 - [ ] **Unmeasured**: a KalliGui popup as a window of its own (D1's guard logs what it decided);
       the loading bar on Windows; a popup that takes the front; the meter at 50 %, 100 % and 200 %;
       Avenger's first picture after an Open on Windows; whether a state of Avenger draws OSC 1 with
