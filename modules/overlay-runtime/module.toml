@@ -119,7 +119,14 @@ name = "Overlay runtime"
 # 0.16.2 hands an OCR button's `value` hook the reading itself after its text, whose words say which
 # boxes the recogniser only guessed (`approx`): VPS Avenger says no name read that way. A module
 # that uses it depends on "com.platform.overlay >= 0.16.2".
-version = "0.16.2"
+# 0.16.3 (the third Windows session of VPS Avenger, 2026-11-01): a page that does not come back
+# after a trip says `after`'s or `onGiveUp`'s words first, then "The page did not come back; <the
+# page key> brings it." where the host hid it again — declined over the plug-in's window — and
+# "…; if it does not come by itself, <the page key> brings it." where it is still shown, the key
+# in the platform's words; at the key the same, "did not come to the front"; what was said is
+# logged; and a page hidden again keeps no place for a late grant, which cannot come. Nothing a
+# module calls is new; a module that relies on it depends on "com.platform.overlay >= 0.16.3".
+version = "0.16.3"
 # Loaded into the VM of every module that depends on it, so its functions
 # (O.new, O.container, the Overlay methods) are reachable via host.require.
 code_module = true

@@ -249,7 +249,11 @@ Then the page beside Notepad, on the key — `notShown` and `showBeside` after `
 ```luau
 local function notShown(err)
   if err.code == host.errors.REFUSED then
-    return "Windows did not bring the page to the front; if it does not come by itself, the key brings it."
+    local key = host.keys.describe(KEY) or KEY
+    if not page:isShown() then
+      return "Windows did not bring the page to the front; " .. key .. " brings it."
+    end
+    return "Windows did not bring the page to the front; if it does not come by itself, " .. key .. " brings it."
   end
   return "The page did not come to the front: " .. err .. "."
 end
@@ -281,7 +285,7 @@ end)
 
 **Where it goes.** The page is 520 by 640 at 100 % display scaling. With `avoid`, it goes to the right of the rectangle, then the left, then below, then above, on the monitor the rectangle is mostly on — then to another monitor with room, then smaller, down to 320 by 360. Where there is no room anywhere — a maximised Notepad, a full-screen plug-in — a `show` with `focus` puts the page **over part of** the rectangle, in the corner where it covers the least, and answers `true` with an error value beside it — `too_large`, `over the rectangle to avoid` — a [partial answer](api/errors.md#partial-answers): the page is there and in front, and the error says what was not done. A page that cannot be shown cannot be reached, so it is shown all the same; test `ok` for whether the page is there, and `err` for whether it is beside the window. From then on, every click into the window and every read of it has to bring the window in front of the page first, which is what [Step 5](#step-5) does anyway. The full rules are under [`page:show`](api/gui.md#page-show).
 
-**The answers.** `show` answers `true`, or `false` and an error value, and the module compares its code and says its message: `not_supported` (`headless`: no window system), `unavailable` (`WebView2 runtime not installed`), `not_ready` (`not ready yet`), `failed` (`could not be built`; the log says why, and so does `err.detail`), `too_large` (`no room beside the rectangle to avoid`, only without `focus`), `gone` (the page object is from before the module was reloaded), and `refused` (`declined by the system`) — Windows refused to bring the page to the front, and it is shown and raised without the keyboard, or hidden again where it would be over the rectangle. That last one is not "the page is not there": Windows has been seen to bring a declined page to the front all the same a moment later ([Windows](api/gui.md#page-show-windows)). So `notShown` says it in words of its own — Windows kept the keyboard where it was, the page may still come, and the key brings it — and every other code as the page not coming, with its message. Compare the code, never the message: the message is the log's, and [`page:show`](api/gui.md#page-show) lists every code with its message.
+**The answers.** `show` answers `true`, or `false` and an error value, and the module compares its code and says its message: `not_supported` (`headless`: no window system), `unavailable` (`WebView2 runtime not installed`), `not_ready` (`not ready yet`), `failed` (`could not be built`; the log says why, and so does `err.detail`), `too_large` (`no room beside the rectangle to avoid`, only without `focus`), `gone` (the page object is from before the module was reloaded), and `refused` (`declined by the system`) — Windows refused to bring the page to the front, and it is shown and raised without the keyboard, or hidden again where it would be over the rectangle. A page still shown is not "the page is not there": Windows has been seen to bring a declined page to the front all the same a moment later ([Windows](api/gui.md#page-show-windows)). A page hidden again cannot come that way, since a hidden window is no candidate for the front; only the key brings it. So `notShown` says a decline in words of its own — Windows kept the keyboard where it was, then, by [`page:isShown()`](api/gui.md#page-isshown), that the page may still come and the key brings it, or that the key brings it — with the key named as this platform says it ([`host.keys.describe`](api/keys.md#host-keys-describe), which needs no capability), and every other code as the page not coming, with its message. Compare the code, never the message: the message is the log's, and [`page:show`](api/gui.md#page-show) lists every code with its message.
 
 **A page that loads late is not pushed at the user.** The first build takes seconds, and the user may have gone elsewhere meanwhile. So `onReady` shows the page only if it was asked for and its window is still the one in front. This replaces Step 1's `onPageReady`:
 
@@ -387,7 +391,7 @@ local function lineWords(r, y)
 end
 ```
 
-The trip's two ends. `giveUp` is for another window, said with `interrupt = false` ([Step 3](#step-3)); `comeBack` posts the result and then brings the page back, and when the page does not come, says so with the result, and logs it; `arrived` is Notepad in front — checked once more, since its event may have waited — the click, and the read whose answer brings the page back:
+The trip's two ends. `giveUp` is for another window, said with `interrupt = false` ([Step 3](#step-3)); `comeBack` posts the result and then brings the page back, and when the page does not come, says the result — what the user waited for, so first — and then that the page did not come, and logs it; `arrived` is Notepad in front — checked once more, since its event may have waited — the click, and the read whose answer brings the page back:
 
 ```luau
 local function giveUp()
@@ -406,7 +410,8 @@ local function comeBack(w, text)
   local ok, err = page:show({ focus = true, avoid = w.bounds })
   if not ok then
     host.log.info("Page demo: the page did not come back (" .. err .. "); the result waits on it: " .. text)
-    host.speech.output(notShown(err) .. " " .. text, { interrupt = true })
+    local said = string.find(text, "[.!?]$") and text or (text .. ".")
+    host.speech.output(said .. " " .. notShown(err), { interrupt = true })
   end
 end
 
@@ -516,7 +521,7 @@ window.platform.onmessage = (message) => {
 
 What to know about the trip:
 
-- **Windows decides whether the page may come back.** It lets a program bring its own window to the front only under conditions, and may refuse even then. Refused, `show` answers `false` and `refused` (`declined by the system`): the page is shown and raised, without the keyboard — or hidden again, where it would have been over the window — so the module says the result with [`host.speech`](api/speech.md), after `notShown`'s sentence, and writes it to the log. The page has it as well, focused: Windows has been seen to bring a declined page to the front all the same a moment later ([Windows](api/gui.md#page-show-windows)), and the page then comes back on it, as it does when the user brings it with the key.
+- **Windows decides whether the page may come back.** It lets a program bring its own window to the front only under conditions, and may refuse even then. Refused, `show` answers `false` and `refused` (`declined by the system`): the page is shown and raised, without the keyboard — or hidden again, where it would have been over the window — so the module says the result with [`host.speech`](api/speech.md), and then `notShown`'s sentence, and writes it to the log. The page has it as well, focused: Windows has been seen to bring a declined page that is still shown to the front all the same a moment later ([Windows](api/gui.md#page-show-windows)), and the page then comes back on it, as it does when the user brings it with the key — the only way a page hidden again comes.
 - **The page comes back after the read, not with the click.** The read's answer is the event that ends the trip, and the click has been made before its picture was taken. A value the click itself changes — a preset name after "next" — is drawn when the window gets round to it: wait for the change with [`host.screen.snapshot`'s change wait](api/screen.md#waiting-for-the-picture-to-change), given a callback, and read that snapshot.
 - **A click from a hotkey carries the hotkey's modifiers.** On Windows a synthesised click inherits whatever the user is still holding. The example clicks from a page message, where nothing is held; a module that starts a trip from its own key waits for [`host.keys.modifiersDown()`](api/keys.md#host-keys-modifiersdown) to answer `false` first (and declares `keys` for it).
 - **The trip is heard.** The module says nothing on a trip that goes well, but the screen reader follows the keyboard: as Notepad comes forward it says what it says for any window coming to the front — Notepad's title, its text field, the line at the caret — and as the page comes back, the page's title and the element with the focus: the result ([Step 3](#step-3)). In the example's first run with NVDA, the click came through, Notepad came forward and the page came back, and a result posted to the status line right after the `show` was not heard: the announcement of the page cut it off. Whether the result is heard now that the page comes back on it is what the next run listens for (TODO.md). With the HTML probe in REAPER, NVDA was heard announcing the focus leaving the page and coming back, and the page's focused element again. Acting in a plug-in without bringing its window to the front is being researched (TODO.md, "W3: acting in the plug-in without the round trip"); the round trip is the way that works everywhere. A module whose plug-in has an overlay does not write it by hand: the overlay runtime makes it ([Step 10](#step-10)).
@@ -712,7 +717,7 @@ Steps 4 to 6 built the round trip by hand, for a window no overlay lives on. A m
 - `describe(on)` describes the page, handing the runtime its three events: `onMessage = on.message`, `onReady = on.ready`, `onClose = on.close`. It is yours because the page's `file` is relative to your folder.
 - `open(o)` posts what the page shows, then where its focus goes — the order of Step 5: the state, then the error or the focus, then the show (the runtime shows after `open` returns). With `openLater = true` (runtime 0.14) `open(o, answer)` may ask its reads with callbacks and return at once; the page is shown when it calls `answer()` ([O:addPage](api/overlay.md#o-addpage), **A later answer**).
 - `onMessage(o, m)` is every message from the page. For an action in the plug-in it calls `o:inPlugin{ … }`; for "Back" it calls `o:pageBack()`.
-- A trip's `act(o, trip)` works in the plug-in as any handler of the overlay does — it reads, clicks, reads again — and asks `trip:inFront()` after every wait, before it clicks or reads. It ends with `trip:done(result)`. `after(o, result)` posts the result, and returns a sentence for when the page does not come back.
+- A trip's `act(o, trip)` works in the plug-in as any handler of the overlay does — it reads, clicks, reads again — and asks `trip:inFront()` after every wait, before it clicks or reads. It ends with `trip:done(result)`. `after(o, result)` posts the result, and returns a sentence for when the page does not come back: it is said first, then the runtime's — `"The page did not come back; <the page key> brings it."` for a page the system declined and the host hid again over the plug-in's window, with `if it does not come by itself, ` before the key for one still shown ([O:inPlugin](api/overlay.md#o-inplugin), **What is said**).
 
 The manifest depends on the runtime, and declares what the module's own code calls:
 

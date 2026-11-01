@@ -44,7 +44,9 @@ T.PAGE = { id = 4000, title = "Click helper", class = "wxWindowNR", own = true,
 -- host.gui.webview: the page, described once. `show` answers the page's `answers` in turn, and
 -- when they run out `not_ready` ("not ready yet") until the page has loaded (T.ready), true after;
 -- accepted with focus, the page is in front. Declined (`refused`), it is shown and the window in
--- front stays. A scenario's answers are what the host answers: `true`, `true, err` or `false, err`.
+-- front stays — or, with `hidden = true` beside the answer, hidden again, as the host hides a
+-- declined page where it would be over the rectangle to avoid (gui.md). A scenario's answers are
+-- what the host answers: `true`, `true, err` or `false, err`.
 S.pg = { shows = {}, hides = 0, posts = {}, answers = {}, shown = false, prepares = 0, ready = false,
   prepareAnswers = {} }
 rawset(T.host, "gui", T.strict("host.gui", {
@@ -57,7 +59,11 @@ rawset(T.host, "gui", T.strict("host.gui", {
       st.shows[#st.shows + 1] = { focus = o and o.focus, avoid = o and o.avoid }
       S.order[#S.order + 1] = "show"
       local a = table.remove(st.answers, 1) or (st.ready and { true } or { false, T.E("not_ready", "not ready yet") })
-      if a[1] or T.is(a[2], "refused") then
+      if a.hidden then
+        assert(not a[1] and T.is(a[2], "refused"), "only a declined show is hidden again")
+        st.shown = false
+        p.window = T.PAGE.id
+      elseif a[1] or T.is(a[2], "refused") then
         st.shown = true
         p.window = T.PAGE.id
       end
@@ -323,7 +329,8 @@ fn notepad_coming_forward_prepares_the_page_until_it_has_loaded() {
 /// The key outside Notepad says where to press it and shows nothing. In Notepad, the first press
 /// builds the page and says so; the page comes once it has loaded, beside Notepad, with the
 /// keyboard, and with Notepad's title posted to it. Pressed in the page, the key goes back:
-/// Notepad asked to the front FIRST, the page hidden after; declined, the page stays.
+/// Notepad asked to the front FIRST, the page hidden after; declined, the page stays. A show
+/// Windows declines names the key; one hidden again, over Notepad, is not said to come by itself.
 #[test]
 fn the_key_shows_the_page_beside_notepad_and_in_the_page_goes_back() {
     run(r##"
@@ -361,10 +368,16 @@ fn the_key_shows_the_page_beside_notepad_and_in_the_page_goes_back() {
         T.arrive(T.NOTEPAD)
         S.pg.answers = { { false, T.E("refused", "declined by the system") } }
         T.key()
-        T.ok(T.last() == "Windows did not bring the page to the front; if it does not come by itself, the key brings it.", T.last())
+        T.ok(T.last() == "Windows did not bring the page to the front; if it does not come by itself, Ctrl+Shift+Win+Alt+F12 "
+          .. "brings it.", T.last())
         S.pg.answers = { { false, T.E("failed", "could not be built") } }
         T.key()
         T.ok(T.last() == "The page did not come to the front: could not be built.", T.last())
+        -- Hidden again, over Notepad: it cannot come by itself, and only the key is named.
+        S.pg.answers = { { false, T.E("refused", "declined by the system"), hidden = true } }
+        T.key()
+        T.ok(not S.pg.shown and T.last() == "Windows did not bring the page to the front; Ctrl+Shift+Win+Alt+F12 brings it.",
+          T.last())
     "##);
 }
 
@@ -484,7 +497,7 @@ fn a_covered_point_a_declined_focus_or_another_window_clicks_nothing() {
 /// A press that reaches the module while the page is not in front — it waited while the user went
 /// elsewhere — is not acted on, whichever button sent it; a problem the page reports is logged all
 /// the same. A page Windows does not bring back after the click is said through the host's
-/// speech, with the result, and logged; the page has the result as well, for when it comes. The
+/// speech, the result first, and logged; the page has the result as well, for when it comes. The
 /// key pressed while the line is being read gives the round trip up: its reading changes
 /// nothing.
 #[test]
@@ -511,7 +524,8 @@ fn a_press_away_from_the_page_a_page_not_brought_back_and_a_trip_given_up() {
         T.answer({ { "hello", 403 } })
         T.ok(T.status() == "Clicked the middle. The line there: hello", T.status())
         T.ok(S.logs[#S.logs] == "Page demo: the page did not come back (declined by the system); the result waits on it: Clicked the middle. The line there: hello", S.logs[#S.logs])
-        T.ok(T.last() == "Windows did not bring the page to the front; if it does not come by itself, the key brings it. Clicked the middle. The line there: hello", T.last())
+        T.ok(T.last() == "Clicked the middle. The line there: hello. Windows did not bring the page to the front; if it does "
+          .. "not come by itself, Ctrl+Shift+Win+Alt+F12 brings it.", T.last())
         T.ok(T.lastInterrupts() == true, "said at once: the user is in Notepad")
         -- Any other reason is said as the page not coming; the result is on the page as well.
         T.arrive(T.NOTEPAD)
@@ -522,7 +536,8 @@ fn a_press_away_from_the_page_a_page_not_brought_back_and_a_trip_given_up() {
         S.pg.answers = { { false, T.E("failed", "could not be built") } }
         T.answer({ { "hello again", 403 } })
         T.ok(T.status() == "Clicked the middle. The line there: hello again", T.status())
-        T.ok(T.last() == "The page did not come to the front: could not be built. Clicked the middle. The line there: hello again", T.last())
+        T.ok(T.last() == "Clicked the middle. The line there: hello again. The page did not come to the front: could not be built.",
+          T.last())
         -- Given up: the key pressed in Notepad while the line is read shows the page; the
         -- reading's answer comes to nothing.
         T.key()

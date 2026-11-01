@@ -680,7 +680,8 @@ fn a_missed_page_event_is_recovered_at_the_pages_message() {
 
 /// A show Windows declines keeps the place asked for: granted a moment later — the page's window
 /// coming to the front all the same — the group goes away as for any show. Declined, the module's
-/// `onShown(false, why)` hears it; without one, the runtime says it in its own words.
+/// `onShown(false, why)` hears it; without one, the runtime says it in its own words, the page key
+/// named.
 #[test]
 fn a_show_declined_and_granted_later_still_holds_the_place() {
     run(r##"
@@ -706,8 +707,10 @@ fn a_show_declined_and_granted_later_still_holds_the_place() {
         S.pg.ready = true
         S.pg.answers = { { false, T.E("refused", "declined by the system") } }
         T.key()
-        T.ok(T.last() == "The page did not come to the front; if it does not come by itself, the page key brings it."
+        T.ok(T.last() == "The page did not come to the front; if it does not come by itself, Ctrl+Shift+Alt+F1 brings it."
           and T.lastInterrupts(), T.last())
+        T.ok(T.count("[page] 'Synth': the page at the key: not shown; said: 'The page did not come to the front; if it does "
+          .. "not come by itself, Ctrl+Shift+Alt+F1 brings it.'") == 1, T.dump())
         S.pg.answers = { { false, T.E("failed", "could not be built") } }
         T.key()
         T.ok(T.last() == "The page did not come to the front: could not be built.", T.last())
@@ -716,6 +719,42 @@ fn a_show_declined_and_granted_later_still_holds_the_place() {
         T.key()
         T.show(T.OTHER)
         T.ok(T.count("[page] 'Synth': the place asked for is let go — in front: 'Browser'") == 1, T.dump())
+    "##);
+}
+
+/// A show the host hid again at the key — declined where it would be over the plug-in's window,
+/// there being no room beside it — cannot come by itself: the runtime's sentence names the page key
+/// as the one way it comes, O:pageKey's key once it is changed; the key's line says it was hidden
+/// again, one line says what was said, and no place is held for a late grant. One still shown keeps
+/// "if it does not come by itself".
+#[test]
+fn a_show_declined_and_hidden_again_at_the_key_names_the_key_and_holds_no_place() {
+    run(r##"
+        local S = T.S
+        T.show(T.W, T.IN)
+        local ov = T.synth({ page = { onShown = false } })
+        S.pg.ready = true
+        S.pg.answers = { { false, T.E("refused", "declined by the system"), hidden = true } }
+        T.key()
+        T.ok(T.last() == "The page did not come to the front; Ctrl+Shift+Alt+F1 brings it." and T.lastInterrupts(), T.last())
+        T.ok(not S.pg.shown and S.front == T.W and ov.active and not ov.away, "hidden again, the plug-in keeps the keyboard")
+        T.ok(T.count(": false, declined by the system, hidden again") == 1, T.dump())
+        T.ok(T.count("[page] 'Synth': the page at the key: not shown; said: 'The page did not come to the front; "
+          .. "Ctrl+Shift+Alt+F1 brings it.'") == 1, T.dump())
+        -- Nothing held: another window has no place to let go.
+        T.show(T.OTHER)
+        T.ok(T.count("the place asked for is let go") == 0, T.dump())
+        -- The page key changed: the new one is named.
+        T.show(T.W, T.IN)
+        T.runDue()
+        T.ok(ov.active and ov:pageKey("Ctrl+Shift+Alt+F2") == true, "back in the plug-in, a new page key")
+        S.pg.answers = { { false, T.E("refused", "declined by the system"), hidden = true },
+          { false, T.E("refused", "declined by the system") } }
+        T.key("Ctrl+Shift+Alt+F2")
+        T.ok(T.last() == "The page did not come to the front; Ctrl+Shift+Alt+F2 brings it.", T.last())
+        T.key("Ctrl+Shift+Alt+F2")
+        T.ok(T.last() == "The page did not come to the front; if it does not come by itself, Ctrl+Shift+Alt+F2 brings it.",
+          T.last())
     "##);
 }
 
@@ -1712,9 +1751,9 @@ fn a_stuck_act_is_ended_by_the_page_key() {
 }
 
 /// The page does not come back after a trip (Windows declined) with the plug-in's window in front:
-/// the runtime's sentence and `after`'s words, interrupting; away ends with the keys back and no
-/// announcement; and a late grant — the page's window coming to the front all the same — begins away
-/// again.
+/// `after`'s words first, then the runtime's sentence with the page key named, interrupting, and one
+/// line saying what was said; away ends with the keys back and no announcement; and a late grant —
+/// the page's window coming to the front all the same — begins away again.
 #[test]
 fn a_show_that_does_not_bring_the_page_back_ends_away_with_keys_and_no_announcement() {
     run(r##"
@@ -1729,8 +1768,11 @@ fn a_show_that_does_not_bring_the_page_back_ends_away_with_keys_and_no_announcem
         S.pg.answers = { { false, T.E("refused", "declined by the system") } }
         T.runDue()
         T.runDue()
-        T.ok(T.last() == "The page did not come to the front; if it does not come by itself, the page key brings it. Preset Pad"
+        T.ok(T.last() == "Preset Pad. The page did not come back; if it does not come by itself, Ctrl+Shift+Alt+F1 brings it."
           and T.lastInterrupts(), T.last())
+        T.ok(T.count("the page back: not shown") == 1 and T.count("[page] 'Synth': the page back: not shown — declined by "
+          .. "the system; said: 'Preset Pad. The page did not come back; if it does not come by itself, Ctrl+Shift+Alt+F1 "
+          .. "brings it.'") == 1, T.dump())
         T.ok(not ov.away and ov.active and T.holds("Return"), "away ended, keys back")
         local said = #S.speech
         T.run(450)
@@ -1738,6 +1780,54 @@ fn a_show_that_does_not_bring_the_page_back_ends_away_with_keys_and_no_announcem
         S.front, S.chain = T.PAGE, { T.PAGE }
         T.event()
         T.ok(ov.away and not ov.active, "the late grant: away again")
+    "##);
+}
+
+/// A page the host hid again after a trip — declined over the plug-in's window, there being no room
+/// beside it, as in the third Windows session (2026-11-01) — cannot come by itself: `after`'s words
+/// first, then "The page did not come back" and the page key named as the one way it comes,
+/// interrupting; away ends with the keys back and nothing announced; one line says the page was
+/// hidden again and what was said; and no place is held for a grant that cannot come. Words that end
+/// in a full stop get no second one; with none, the runtime's sentence alone.
+#[test]
+fn a_declined_show_back_hidden_over_the_plugin_names_the_key() {
+    run(r##"
+        local S = T.S
+        T.show(T.W, T.IN)
+        local ov = T.synth()
+        T.run(400)
+        T.openPage()
+        S.afterWords = "Preset Pad"
+        T.trip()
+        T.land()
+        S.pg.answers = { { false, T.E("refused", "declined by the system"), hidden = true } }
+        T.runDue()
+        T.runDue()
+        T.ok(T.last() == "Preset Pad. The page did not come back; Ctrl+Shift+Alt+F1 brings it." and T.lastInterrupts(), T.last())
+        T.ok(not S.pg.shown and S.front == T.W, "hidden again, the plug-in in front")
+        T.ok(not ov.away and ov.active and T.holds("Return"), "away ended, keys back")
+        T.ok(T.count("the page back: not shown") == 1 and T.count("[page] 'Synth': the page back: not shown — declined by "
+          .. "the system, hidden again; said: 'Preset Pad. The page did not come back; Ctrl+Shift+Alt+F1 brings it.'") == 1,
+          T.dump())
+        local said = #S.speech
+        T.run(450)
+        T.ok(#S.speech == said, "no announcement: " .. T.saidSince(said))
+        T.show(T.OTHER)
+        T.ok(T.count("the place asked for is let go") == 0, "no place held: " .. T.dump())
+        -- Again from the page: words ending in a full stop, then none.
+        T.show(T.W, T.IN)
+        T.runDue()
+        for _, words in ipairs({ "Loaded Pad.", false }) do
+          T.openPage()
+          S.afterWords = words or nil
+          T.trip()
+          T.land()
+          S.pg.answers = { { false, T.E("refused", "declined by the system"), hidden = true } }
+          T.runDue()
+          T.runDue()
+          local want = (words and (words .. " ") or "") .. "The page did not come back; Ctrl+Shift+Alt+F1 brings it."
+          T.ok(T.last() == want, T.last())
+        end
     "##);
 }
 

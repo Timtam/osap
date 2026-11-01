@@ -10146,12 +10146,34 @@ function pg.wordsAfter(v)
   return ""
 end
 
--- What is said for a show that did not come to the front, `err` page:show's error value.
-function pg.notShownWords(err)
+-- Whether a show that answered `false, err` left the page hidden: declined (`refused`) and not shown
+-- now. The host hides a declined page again where it would be over the rectangle to avoid (gui.md),
+-- and a hidden window is no candidate for the front: no late grant brings it, only the page key.
+function pg.hiddenAfter(P, err)
+  return err ~= nil and err.code == host.errors.REFUSED and not pg.shownNow(P)
+end
+
+-- What is said for a show that did not come to the front, `err` page:show's error value: declined
+-- and `hidden` (pg.hiddenAfter), the page key named as the one way it comes; declined and still
+-- shown, that it may come by itself as well. `key` is the page key as this platform says it
+-- (spokenKey), `back` a page asked back after a trip. In the third Windows session (2026-11-01) the
+-- sentence said a page hidden again might "come by itself", and named no key.
+function pg.notShownWords(err, hidden, key, back)
   if err ~= nil and err.code == host.errors.REFUSED then
-    return "The page did not come to the front; if it does not come by itself, the page key brings it."
+    local missed = back and "The page did not come back" or "The page did not come to the front"
+    if hidden then return ("%s; %s brings it."):format(missed, key) end
+    return ("%s; if it does not come by itself, %s brings it."):format(missed, key)
   end
   return "The page did not come to the front: " .. tostring(err) .. "."
+end
+
+-- A hook's words (pg.wordsAfter's " <words>", or "") and then the runtime's `sentence`: the result
+-- first, which is what the user waited for, closed by a full stop unless it ends in one.
+function pg.wordsFirst(words, sentence)
+  if words == "" then return sentence end
+  local said = string.sub(words, 2)
+  if not string.find(said, "[%.!?]$") then said = said .. "." end
+  return said .. " " .. sentence
 end
 
 function pages.why(o)
@@ -10218,7 +10240,7 @@ end
 -- menu state applied, and with `announce` its arrival. The hooks are settled on the next turn, and
 -- every overlay of the group is looked at again then, so that the ordinary match decides for one
 -- that was in front through a held context. `keepAsked`: a show the system declined, still waiting
--- for a late grant (showBack).
+-- for a late grant (showBack) — never one the host hid again, which no grant can bring.
 function pg.endAway(P, announce, why, keepAsked)
   if not P.away then return end
   P.away, P.stage, P.held = false, nil, nil
@@ -10577,9 +10599,10 @@ function pg.outrankedSoon(P, t)
 end
 
 -- The page brought back after a trip: beside W's bounds now, the keyboard asked for. Answered as the
--- page key's show is, but in the runtime's sentence and the module's words (`words`, " …" or "")
--- when it does not come; with W in front then, away ends, the keys back and nothing announced — the
--- sentence said what happened — and the place stays asked for a late grant.
+-- page key's show is, but with the module's words (`words`, " …" or "") first and the runtime's
+-- sentence after them when it does not come, and what was said logged; with W in front then, away
+-- ends, the keys back and nothing announced — the sentence said what happened — and the place stays
+-- asked for a late grant, unless the host hid the page again (pg.hiddenAfter).
 function pg.showBack(P, words)
   local place = P.held
   if not place then return end
@@ -10597,11 +10620,13 @@ function pg.showBack(P, words)
     end
     return
   end
-  pg.plog(P, "the page back: not shown — %s", tostring(why))
-  pg.say(pg.notShownWords(why) .. words, true)
+  local hidden = pg.hiddenAfter(P, why)
+  local said = pg.wordsFirst(words, pg.notShownWords(why, hidden, spokenKey(P.key.spec), true))
+  pg.plog(P, "the page back: not shown — %s%s; said: '%s'", tostring(why), hidden and ", hidden again" or "", said)
+  pg.say(said, true)
   local f = pg.frontNow()
   if f and f.id == place.window.id then
-    pg.endAway(P, false, "the page did not come back, and the plug-in's window is in front", true)
+    pg.endAway(P, false, "the page did not come back, and the plug-in's window is in front", not hidden)
   end
 end
 
@@ -11479,8 +11504,9 @@ function pg.showAtKey(P, place)
   local o = P.owner
   P.asked = place
   local ok, err = P.page:show({ focus = true, avoid = pg.boundsNow(place.window) })
+  local hidden = not ok and pg.hiddenAfter(P, err)
   pg.plog(P, "shown at the key beside window id %s: %s", tostring(place.window.id),
-    ok and ("true" .. (err and (", " .. err) or "")) or ("false, " .. tostring(err)))
+    ok and ("true" .. (err and (", " .. err) or "")) or ("false, " .. tostring(err) .. (hidden and ", hidden again" or "")))
   if ok then
     P.covers = err ~= nil and place.window.id or false
     if P.away and pg.pageHasKeyboard(P) then
@@ -11496,12 +11522,15 @@ function pg.showAtKey(P, place)
     pg.say("Building the page.", true)
     return
   end
-  -- Windows may grant a declined show a moment later: the place stays asked for.
-  if not (err ~= nil and err.code == host.errors.REFUSED) then P.asked = nil end
+  -- Windows may grant a declined show a moment later: the place stays asked for — but not for a page
+  -- the host hid again, which no grant can bring.
+  if not (err ~= nil and err.code == host.errors.REFUSED) or hidden then P.asked = nil end
   if P.spec.onShown then
     pg.hookCall(P, "onShown", P.spec.onShown, o, false, handOn("o-addpage", "page-show", err))
   else
-    pg.say(pg.notShownWords(err), true)
+    local said = pg.notShownWords(err, hidden, spokenKey(P.key.spec), false)
+    pg.plog(P, "the page at the key: not shown; said: '%s'", said)
+    pg.say(said, true)
   end
 end
 

@@ -48,12 +48,17 @@ local function inFront(id)
 end
 
 -- What a `show` that answered false is said as, by its error value's code. Declined
--- (`refused`), Windows kept the keyboard where it was: the page is shown without it — or hidden,
--- where it would be over the window — and has been seen to come to the front by itself a moment
--- later, so the user is not told it is not there. Any other code: its message.
+-- (`refused`), Windows kept the keyboard where it was. A page still shown without it, beside the
+-- window, has been seen to come to the front by itself a moment later, so the user is not told it
+-- is not there; one hidden again, where it would be over the window, cannot come by itself, so
+-- only the key is named. Any other code: its message.
 local function notShown(err)
   if err.code == host.errors.REFUSED then
-    return "Windows did not bring the page to the front; if it does not come by itself, the key brings it."
+    local key = host.keys.describe(KEY) or KEY
+    if not page:isShown() then
+      return "Windows did not bring the page to the front; " .. key .. " brings it."
+    end
+    return "Windows did not bring the page to the front; if it does not come by itself, " .. key .. " brings it."
   end
   return "The page did not come to the front: " .. err .. "."
 end
@@ -166,15 +171,17 @@ end
 -- status line and the keyboard focus on it (ui/page.js), so that the page comes back on the
 -- result — a page coming to the front is announced, and the announcement cuts off a sentence
 -- said just before it. Windows may refuse the page the front; then the host's own speech says
--- so, and the result, which goes to the log as well. The page keeps it, focused, for when it
--- comes by itself or by the key.
+-- the result — what the user waited for, so first — and then that the page did not come; the
+-- result goes to the log as well. The page keeps it, focused, for when it comes by itself or by
+-- the key.
 local function comeBack(w, text)
   trip = nil
   page:post({ kind = "result", text = text })
   local ok, err = page:show({ focus = true, avoid = w.bounds })
   if not ok then
     host.log.info("Page demo: the page did not come back (" .. err .. "); the result waits on it: " .. text)
-    host.speech.output(notShown(err) .. " " .. text, { interrupt = true })
+    local said = string.find(text, "[.!?]$") and text or (text .. ".")
+    host.speech.output(said .. " " .. notShown(err), { interrupt = true })
   end
 end
 

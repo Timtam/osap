@@ -894,7 +894,8 @@ end
 -- host.hotkey.register, which keeps the page key's callback (S.pageKeys), and host.window.focus,
 -- noted in the page's order.
 S.pages = {}        -- every page described, in order: { opts, shows, hides, posts, prepares, closed, page }
-S.pageAnswers = {}  -- what the next shows answer, in turn: { ok, err }; then `not_ready` until loaded
+S.pageAnswers = {}  -- what the next shows answer, in turn: { ok, err } (`hidden = true`: declined and
+                    -- hidden again); then `not_ready` until loaded
 S.pageLoaded = false
 S.pageOrder = {}    -- "post <kind>", "show", "hide", "focus <id>", "sound <path>", in order
 S.postRaises = nil  -- a message: the next page:post raises it, as the host's does for what it cannot write
@@ -923,7 +924,12 @@ function T.pageHost(AH)
       st.shows[#st.shows + 1] = { focus = o and o.focus, avoid = o and o.avoid }
       S.pageOrder[#S.pageOrder + 1] = "show"
       local a = table.remove(S.pageAnswers, 1) or (S.pageLoaded and { true } or { false, T.E("not_ready", "not ready yet") })
-      if a[1] or T.is(a[2], "refused") then
+      if a.hidden then
+        -- Declined over the rectangle to avoid: the host hides it again (gui.md).
+        assert(not a[1] and T.is(a[2], "refused"), "only a declined show is hidden again")
+        st.shown = false
+        p.window = T.PAGE_WIN.id
+      elseif a[1] or T.is(a[2], "refused") then
         st.shown = true
         p.window = T.PAGE_WIN.id
       end
