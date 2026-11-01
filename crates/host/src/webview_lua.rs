@@ -690,6 +690,12 @@ fn show_built(sh: &Rc<Shared>, id: u64, label: &str, focus: bool, avoid: Option<
     // Over `avoid` and declined — raised without the keyboard: hidden again. Not an app page the
     // user has open, which was not moved.
     let unshown = over.is_some() && !open_app && webview::over_refused(focus, shown.is_err()).is_some();
+    // Both asked before the hide. A hidden window is nobody's answer for the point in its middle,
+    // which then names the window under it: the third Windows session (2026-11-01) logged a window
+    // of the plug-in's host "there" for a page declined and hidden, which nothing had been shown
+    // to cover. And the inputs before a decline, as soon as it is answered.
+    let centre = if native.on_top_at_centre() { "yes".to_string() } else { format!("NO, {} is there", native.covering_at_centre()) };
+    let inputs = if shown.is_err() { input_facts(sh.backend.input_times()) } else { String::new() };
     if unshown {
         native.hide();
     }
@@ -729,7 +735,7 @@ fn show_built(sh: &Rc<Shared>, id: u64, label: &str, focus: bool, avoid: Option<
     logging::line(
         "gui",
         &format!(
-            "{label}: {} in {ms} ms{place}; in front now: {}; on top at its centre: {}",
+            "{label}: {} in {ms} ms{place}; in front now: {}; on top at its centre{}: {centre}{inputs}",
             match (&shown, focus, unshown) {
                 (Ok(()), true, _) => words().front_taken.to_string(),
                 (Ok(()), false, _) => "shown without taking the front".to_string(),
@@ -745,7 +751,7 @@ fn show_built(sh: &Rc<Shared>, id: u64, label: &str, focus: bool, avoid: Option<
                 ),
             },
             front_words(sh, native.hwnd(), front),
-            if native.on_top_at_centre() { "yes".to_string() } else { format!("NO, {} is there", native.covering_at_centre()) },
+            if unshown { " before it was hidden again" } else { "" },
         ),
     );
     if explain {
@@ -786,6 +792,46 @@ fn over_share(covered: i64, area: i64) -> String {
     format!("{:.1}", covered as f64 * 100.0 / area.max(1) as f64)
 }
 
+/// One step of Windows' clock, which the times of [`input_facts`] are read on: two of them within it
+/// may be one input.
+#[cfg(any(windows, target_os = "macos", test))]
+const ONE_TICK_MS: u64 = 16;
+
+/// What the line of a decline says of the inputs before it ([`crate::backend::InputTimes`]), and
+/// which of them came last: Windows lets a program take the front when it "received the last input
+/// event", and one that came within [`ONE_TICK_MS`] of the last input event is taken for it — the
+/// user's key (a key to quiet the speech during a trip, say), the host's own input, or neither (a
+/// pointer event, a key in a window of this application's, or another program's injected input).
+/// Empty where the platform does not say (a Mac). Pure.
+#[cfg(any(windows, target_os = "macos", test))]
+fn input_facts(times: Option<crate::backend::InputTimes>) -> String {
+    let Some(t) = times else {
+        return String::new();
+    };
+    let at = |v: Option<u64>, none: &str| v.map_or_else(|| format!(": {none}"), |ms| format!(" {ms} ms before"));
+    let key_none = if t.keys_watched { "none since the start" } else { "not watched, no keyboard hook is in" };
+    let mut out = format!(
+        "; the last input event{} (GetLastInputInfo), the host's own last injected input{}, a key from the \
+         keyboard{}",
+        at(t.last, "not known"),
+        at(t.own, "none since the start"),
+        at(t.key, key_none)
+    );
+    if let Some(last) = t.last {
+        let with = |v: Option<u64>| v.is_some_and(|ms| ms.abs_diff(last) <= ONE_TICK_MS);
+        out.push_str(match (with(t.key), with(t.own)) {
+            (true, true) => " — a key from the keyboard and the host's own input came within a tick of the last",
+            (true, false) => " — a key from the keyboard came last",
+            (false, true) => " — the host's own input came last",
+            (false, false) => {
+                " — neither came last: a pointer event, a key in a window of this application's, or another \
+                 program's injected input"
+            }
+        });
+    }
+    out
+}
+
 /// The foreground window, for a log line: the page itself, or another window by its id.
 #[cfg(any(windows, target_os = "macos"))]
 fn front_words(_sh: &Shared, page: isize, front: Option<crate::backend::Foreground>) -> String {
@@ -820,11 +866,13 @@ fn focus(sh: &Rc<Shared>, id: u64) -> Result<(), HostError> {
         let accepted = native.focus();
         // Asked again rather than before: the window system says why it was refused.
         let shown = accepted || native.is_shown();
+        // The inputs before a decline, as `show`'s line has them.
+        let inputs = if !accepted && shown { input_facts(sh.backend.input_times()) } else { String::new() };
         let front = sh.backend.foreground_window();
         logging::line(
             "gui",
             &format!(
-                "{label}: focus {}; in front now: {}",
+                "{label}: focus {}; in front now: {}{inputs}",
                 if accepted {
                     words().focus_taken
                 } else if shown {
@@ -1533,6 +1581,63 @@ mod tests {
         assert_eq!(over_share(7, 0), "700.0", "an area of 0 taken as 1");
         let line = crate::ocr_wiring_tests::body(include_str!("webview_lua.rs"), "fn show_built(sh: &Rc<Shared>");
         assert!(line.contains("over_share(covered, i64::from(a.w) * i64::from(a.h)),"), "{line}");
+    }
+
+    /// A decline's line says when the inputs before it came, and which came last: one within a
+    /// tick of the last input event. A stamp never made, a hook not in and a system that would not
+    /// say are said as such, and a platform that says nothing adds nothing.
+    #[test]
+    fn a_declines_line_says_which_input_came_last() {
+        use crate::backend::InputTimes;
+        let facts = |last, own, key, keys_watched| input_facts(Some(InputTimes { last, own, key, keys_watched }));
+        // The third Windows session's guess (2026-11-01): a key pressed during the trip.
+        assert_eq!(
+            facts(Some(120), Some(4400), Some(120), true),
+            "; the last input event 120 ms before (GetLastInputInfo), the host's own last injected input 4400 ms \
+             before, a key from the keyboard 120 ms before — a key from the keyboard came last"
+        );
+        assert_eq!(
+            facts(Some(30_000), None, None, true),
+            "; the last input event 30000 ms before (GetLastInputInfo), the host's own last injected input: none \
+             since the start, a key from the keyboard: none since the start — neither came last: a pointer event, \
+             a key in a window of this application's, or another program's injected input"
+        );
+        // Within one tick of the clock, either side; one millisecond more is another input.
+        assert!(facts(Some(100), Some(5000), Some(116), true).ends_with(" — a key from the keyboard came last"));
+        assert!(facts(Some(116), Some(5000), Some(100), true).ends_with(" — a key from the keyboard came last"));
+        assert!(facts(Some(100), Some(5000), Some(117), true).ends_with(" — neither came last: a pointer event, a key in a window of this application's, or another program's injected input"));
+        assert!(facts(Some(300), Some(300), Some(9000), true).ends_with(" — the host's own input came last"));
+        assert!(facts(Some(50), Some(40), Some(60), true)
+            .ends_with(" — a key from the keyboard and the host's own input came within a tick of the last"));
+        let unwatched = facts(Some(300), Some(300), None, false);
+        assert!(unwatched.contains(", a key from the keyboard: not watched, no keyboard hook is in — the host's own input came last"), "{unwatched}");
+        // The system would not say: the three as they are, and no verdict.
+        assert_eq!(
+            facts(None, Some(10), Some(20), true),
+            "; the last input event: not known (GetLastInputInfo), the host's own last injected input 10 ms before, \
+             a key from the keyboard 20 ms before"
+        );
+        assert_eq!(input_facts(None), "", "a Mac says nothing of them");
+    }
+
+    /// The point in the middle of the page is probed before a page declined over `avoid` is hidden
+    /// again — after the hide it named the window under the page (the third Windows session,
+    /// 2026-11-01) — and its line says so; the inputs before a decline are asked there too, and
+    /// `focus`'s decline says them as well.
+    #[test]
+    fn the_centre_is_probed_before_a_declined_page_is_hidden_again() {
+        const SRC: &str = include_str!("webview_lua.rs");
+        let show = crate::ocr_wiring_tests::body(SRC, "fn show_built(sh: &Rc<Shared>");
+        let hide = show.find("if unshown {\n        native.hide();").expect("the hide of a declined page");
+        assert_eq!(show.matches("on_top_at_centre()").count(), 1, "probed once");
+        assert!(show.find("native.on_top_at_centre()").unwrap() < hide, "probed before the hide");
+        assert!(show.find("native.covering_at_centre()").unwrap() < hide);
+        assert!(show.find("if shown.is_err() { input_facts(sh.backend.input_times()) }").unwrap() < hide);
+        assert!(show.contains("on top at its centre{}: {centre}{inputs}"));
+        assert!(show.contains("if unshown { \" before it was hidden again\" } else { \"\" },"));
+        let focus = crate::ocr_wiring_tests::body(SRC, "fn focus(sh: &Rc<Shared>, id: u64)");
+        assert!(focus.contains("if !accepted && shown { input_facts(sh.backend.input_times()) }"));
+        assert!(focus.contains("\"{label}: focus {}; in front now: {}{inputs}\""));
     }
 
     #[test]

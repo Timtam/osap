@@ -463,6 +463,24 @@ pub struct Foreground {
     pub shown: bool,
 }
 
+/// When the inputs came that decide whether this application may take the front, in milliseconds
+/// before they were asked: for the log line of a page's `show` or `focus` the system declined
+/// ([`Backend::input_times`]). Times only — never which key, or where the pointer was.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct InputTimes {
+    /// The last input event of any source, as the system has it; `None` when it would not say.
+    pub last: Option<u64>,
+    /// The last input this application injected; `None` when it injected none since it started.
+    pub own: Option<u64>,
+    /// The last key from the keyboard, pressed or let go, that nothing injected, as the keyboard
+    /// hook saw it go by — so none pressed in a window of this application's own, where the hook
+    /// is out of the chain; `None` when the hook saw none.
+    pub key: Option<u64>,
+    /// Whether the keyboard hook was installed, so that `key` says anything: it is with the first
+    /// capture or granted hotkey, and stays.
+    pub keys_watched: bool,
+}
+
 /// macOS: where the ids of this application's own windows start.
 ///
 /// A window of another application gets its id from the accessibility handle table, a counter
@@ -1765,6 +1783,15 @@ pub trait Backend {
     /// A module made a `host.input` call: a landing of `host.window.focus` under way ends, so that
     /// it never moves the keyboard after something acted.
     fn input_made(&self) {}
+
+    /// When the inputs before now came — see [`InputTimes`] — for the line of a page the system
+    /// declined to bring to the front, so that the line says which input came last. Windows:
+    /// `GetLastInputInfo` and two stamps the host keeps, local calls and atomic loads, nothing
+    /// sent to any window. `None` elsewhere: the times answer a condition of `SetForegroundWindow`'s
+    /// ("the calling process received the last input event"), and are asked on Windows only.
+    fn input_times(&self) -> Option<InputTimes> {
+        None
+    }
 
     /// Is `hwnd`'s window the one lying under this screen point?
     ///

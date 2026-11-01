@@ -252,6 +252,16 @@ static HOTKEY_QUEUE: Mutex<Vec<(i32, Route, Through)>> = Mutex::new(Vec::new());
 /// pump's thread like the stop.
 static DROP_OS_UNTIL: AtomicU64 = AtomicU64::new(0);
 const DROP_ARMED: u64 = 1 << 32;
+/// When this application last injected input: the tick (`GetTickCount`) of its last `SendInput`
+/// Windows took any event of ([`note_sent`]), in the low 32 bits, [`STAMPED`] once there was one.
+/// Written wherever `SendInput` is called — the pump, the input threads, the hook.
+static LAST_SENT: AtomicU64 = AtomicU64::new(0);
+/// When the keyboard last sent a key event that nothing injected, pressed or let go, as the hook
+/// saw it go by: the event's own tick, [`STAMPED`] once there was one. Its time only, never which
+/// key: nothing the user typed reaches the log. Written by the hook's thread.
+static LAST_KEY: AtomicU64 = AtomicU64::new(0);
+/// The mark of a stamp in [`LAST_SENT`] and [`LAST_KEY`]: 0 is "none since the start".
+const STAMPED: u64 = 1 << 32;
 /// The hotkeys Windows GRANTED, matched in the hook as well as by `RegisterHotKey` — see
 /// `hotkey_hook` for why. `None` until the first grant, which is also the table's only
 /// allocation. Filed and removed by the pump; the hook looks combinations up and keeps its
@@ -1215,6 +1225,21 @@ fn cpu_line() -> String {
     crate::ocr::cost::cpu_text(cpu_brand().as_deref(), physical_cores(), threads, None)
 }
 
+/// The `[env]` line `foreground lock timeout`: for how long after the user's input Windows keeps a
+/// program that is not in front from forcing itself there (`SPI_GETFOREGROUNDLOCKTIMEOUT`) — one
+/// of the rules behind a page's `show` or `focus` it declines. Once at start, one system call.
+fn foreground_lock_timeout() -> String {
+    use windows_sys::Win32::UI::WindowsAndMessaging::SPI_GETFOREGROUNDLOCKTIMEOUT;
+    let mut ms: u32 = 0;
+    // SAFETY: the action's out-parameter is one DWORD, written by the call.
+    if unsafe { SystemParametersInfoW(SPI_GETFOREGROUNDLOCKTIMEOUT, 0, &mut ms as *mut u32 as *mut core::ffi::c_void, 0) } != 0 {
+        format!("{ms} ms")
+    } else {
+        // SAFETY: the calling thread's last error, read at once.
+        format!("not readable (error {})", unsafe { GetLastError() })
+    }
+}
+
 /// The processor's brand string, from CPUID's three brand leaves: what Task Manager shows.
 #[cfg(target_arch = "x86_64")]
 fn cpu_brand() -> Option<String> {
@@ -1280,6 +1305,7 @@ impl Backend for WindowsBackend {
         let mut out = self.display_environment();
         out.push(("common controls".to_string(), common_controls()));
         out.push(("cpu".to_string(), cpu_line()));
+        out.push(("foreground lock timeout".to_string(), foreground_lock_timeout()));
         // No "screen reader" line here any more. It asked whether `nvdaControllerClient64`
         // or `SAAPI64` was loaded in this process, which was a fair proxy only while Tolk
         // loaded them on demand — with speech going through prism nothing loads either, so
@@ -1418,6 +1444,19 @@ impl Backend for WindowsBackend {
     fn input_made(&self) {
         INPUT_CALLS.fetch_add(1, Ordering::Relaxed);
         landing_look();
+    }
+
+    /// `GetLastInputInfo`, then the two stamps, then the tick they are measured from — last, so
+    /// that nothing read is after it ([`times_at`]).
+    fn input_times(&self) -> Option<super::InputTimes> {
+        use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
+        let mut info = LASTINPUTINFO { cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32, dwTime: 0 };
+        // SAFETY: a struct of the size it says it is, filled in by the call.
+        let last = (unsafe { GetLastInputInfo(&mut info) } != 0).then_some(info.dwTime);
+        let (sent, key) = (LAST_SENT.load(Ordering::Relaxed), LAST_KEY.load(Ordering::Relaxed));
+        let watched = KEY_HOOK_INSTALLED.load(Ordering::Relaxed);
+        // SAFETY: no arguments.
+        Some(times_at(unsafe { GetTickCount() }, last, sent, key, watched))
     }
 
     /// Compared at the TOP LEVEL, because an overlay's origin is often a child.
@@ -3171,6 +3210,13 @@ unsafe extern "system" fn ll_keyboard_proc(code: i32, wparam: WPARAM, lparam: LP
         let is_down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
         let is_up = msg == WM_KEYUP || msg == WM_SYSKEYUP;
         if is_down || is_up {
+            // A key from the keyboard, pressed or let go — none that this application or any other
+            // injected: when it came, by the event's own tick, for the line of a front Windows
+            // declines (`input_times`). The release too, as `GetLastInputInfo` counts it: after a
+            // tap, the release is the last input. One relaxed store; never which key.
+            if kb.flags & LLKHF_INJECTED == 0 {
+                LAST_KEY.store(STAMPED | u64::from(kb.time), Ordering::Relaxed);
+            }
             // How late this call is. Nearly always 0: the thread does nothing else. When the
             // machine was too loaded to schedule it, the events queued meanwhile arrive in
             // order, late, and each is judged as of its own moment — see `hotkey_hook`.
@@ -3815,7 +3861,7 @@ unsafe fn send_mask_key() {
         input.Anonymous.ki.wVk = VK_MASK_KEY;
         input.Anonymous.ki.dwFlags = flags;
     }
-    SendInput(2, inputs.as_ptr(), std::mem::size_of::<INPUT>() as i32);
+    note_sent(SendInput(2, inputs.as_ptr(), std::mem::size_of::<INPUT>() as i32) as usize);
 }
 
 /// The pump's half: whether a hotkey press that reached the queue is dispatched — and then how
@@ -4636,6 +4682,28 @@ fn key_sent(sent: &Sent) -> super::KeySend {
     super::KeySend { answer: sent.answer().map_err(KeyRefusal::Answer), went_out: sent.taken > 0 }
 }
 
+/// A `SendInput` of this application's took `took` events: when it did any, its tick is the last
+/// injected input's ([`LAST_SENT`]). One relaxed store, after every `SendInput` of the host's.
+fn note_sent(took: usize) {
+    if took > 0 {
+        // SAFETY: no arguments.
+        LAST_SENT.store(STAMPED | u64::from(unsafe { GetTickCount() }), Ordering::Relaxed);
+    }
+}
+
+/// The inputs before `now` (`GetTickCount`), in milliseconds — see [`super::InputTimes`]: `last`
+/// is `GetLastInputInfo`'s tick, `sent` and `key` the stamps of [`LAST_SENT`] and [`LAST_KEY`].
+/// Ticks wrap after 49.7 days, as `GetLastInputInfo`'s own does; a stamp after `now` — one the
+/// hook wrote while this was asked — is 0 ms before it. Pure.
+fn times_at(now: u32, last: Option<u32>, sent: u64, key: u64, keys_watched: bool) -> super::InputTimes {
+    let ago = |t: u32| {
+        let d = now.wrapping_sub(t);
+        u64::from(if d > u32::MAX / 2 { 0 } else { d })
+    };
+    let stamp = |s: u64| (s & STAMPED != 0).then(|| ago(s as u32));
+    super::InputTimes { last: last.map(ago), own: stamp(sent), key: stamp(key), keys_watched }
+}
+
 /// `events` in one `SendInput`, each with what it holds — `held` were down before — through
 /// [`send_with`].
 fn send_inputs(events: &[(INPUT, Holds)], held: &[u32]) -> Sent {
@@ -4643,7 +4711,9 @@ fn send_inputs(events: &[(INPUT, Holds)], held: &[u32]) -> Sent {
         // SAFETY: `inputs` holds `inputs.len()` initialised INPUTs for the length of the call.
         let took = unsafe { SendInput(inputs.len() as u32, inputs.as_ptr(), std::mem::size_of::<INPUT>() as i32) } as usize;
         // SAFETY: the calling thread's last error, read at once.
-        (took, if took < inputs.len() { unsafe { GetLastError() } } else { 0 })
+        let error = if took < inputs.len() { unsafe { GetLastError() } } else { 0 };
+        note_sent(took);
+        (took, error)
     })
 }
 
@@ -4907,7 +4977,9 @@ fn send_marked(events: &[(u16, u16, u32)]) -> usize {
         })
         .collect();
     // SAFETY: `inputs` holds `inputs.len()` initialised INPUTs for the length of the call.
-    unsafe { SendInput(inputs.len() as u32, inputs.as_ptr(), std::mem::size_of::<INPUT>() as i32) as usize }
+    let took = unsafe { SendInput(inputs.len() as u32, inputs.as_ptr(), std::mem::size_of::<INPUT>() as i32) as usize };
+    note_sent(took);
+    took
 }
 
 /// One key event for `SendInput`, carrying `extra` in its `dwExtraInfo` — [`SEND_MARK`] for
@@ -5198,6 +5270,62 @@ mod cpu_line_tests {
         assert!(line.starts_with('"') && line.contains(" cores, ") && line.ends_with(" threads"), "{line}");
         #[cfg(target_arch = "x86_64")]
         assert!(cpu_brand().is_some_and(|b| !b.is_empty() && !b.contains('\0')), "{line}");
+    }
+
+    /// The `[env]` line of the foreground lock: Windows' setting, in milliseconds.
+    #[test]
+    fn the_foreground_lock_timeout_line_is_in_milliseconds() {
+        let line = foreground_lock_timeout();
+        assert!(line.ends_with(" ms") && line[..line.len() - 3].parse::<u32>().is_ok(), "{line}");
+        assert!(crate::ocr_wiring_tests::body(include_str!("windows.rs"), "fn environment(&self) -> Vec<(String, String)>")
+            .contains("out.push((\"foreground lock timeout\".to_string(), foreground_lock_timeout()));"));
+    }
+}
+
+/// When the inputs before a decline came (`Backend::input_times`): measured back from the tick
+/// they are asked at, and stamped wherever the host injects input and the hook sees a key.
+#[cfg(test)]
+mod input_times_tests {
+    use super::*;
+    use crate::backend::InputTimes;
+
+    #[test]
+    fn the_inputs_are_measured_back_from_now() {
+        let t = times_at(10_000, Some(9_880), STAMPED | 5_600, STAMPED | 9_880, true);
+        assert_eq!(t, InputTimes { last: Some(120), own: Some(4_400), key: Some(120), keys_watched: true });
+        // None since the start, and a system that would not say.
+        assert_eq!(times_at(10_000, None, 0, 0, false), InputTimes::default());
+        // The mark says there is one, not the tick: a stamp of tick 0 is one.
+        assert_eq!(times_at(30, Some(30), STAMPED, 0, true).own, Some(30));
+        // Across the wrap of the 32-bit tick, as GetLastInputInfo's own.
+        let wrapped = times_at(50, Some(u32::MAX - 49), STAMPED | u64::from(u32::MAX - 9), 0, true);
+        assert_eq!((wrapped.last, wrapped.own), (Some(100), Some(60)));
+        // A key the hook stamped after the tick was read is no time before it.
+        assert_eq!(times_at(10_000, Some(10_000), 0, STAMPED | 10_005, true).key, Some(0));
+    }
+
+    /// Every `SendInput` of the host's stamps the last injected input, and the hook stamps a key
+    /// from the keyboard — not one injected — first thing for every key event, before anything in
+    /// it can return.
+    #[test]
+    fn every_send_input_and_every_key_from_the_keyboard_is_stamped() {
+        const SRC: &str = include_str!("windows.rs");
+        let code = &SRC[..SRC.find("\n#[cfg(test)]\nmod ").unwrap()];
+        let lines: Vec<&str> = code.lines().collect();
+        let sites: Vec<usize> = (0..lines.len()).filter(|&i| lines[i].contains("SendInput(")).collect();
+        assert_eq!(sites.len(), 3);
+        for i in sites {
+            let next = lines[i + 1..i + 4].join("\n");
+            assert!(lines[i].contains("note_sent(SendInput(") || next.contains("note_sent(took);"), "{}", lines[i]);
+        }
+        let hook = crate::ocr_wiring_tests::body(SRC, "unsafe extern \"system\" fn ll_keyboard_proc(");
+        let stamp = hook
+            .find("if kb.flags & LLKHF_INJECTED == 0 {\n                LAST_KEY.store(STAMPED | u64::from(kb.time), Ordering::Relaxed);")
+            .expect("the hook stamps a key from the keyboard");
+        assert!(hook.find("if is_down || is_up {").unwrap() < stamp);
+        assert!(stamp < hook.find("let late = hotkey_hook::lateness(").unwrap());
+        assert_eq!(code.matches("LAST_KEY.store(").count(), 1);
+        assert_eq!(code.matches("LAST_SENT.store(").count(), 1, "only in note_sent");
     }
 }
 
