@@ -789,7 +789,9 @@ fn the_knob_reader_reads_one_knob_off_its_own_box_at_50_100_and_200_percent() {
           { name = "Mac 200 %", k = 4, zoom = 200 },
           { name = "Windows 150 %, 100 %", k = 3, zoom = 100 },
         }
-        local origin = { client = { x = 100, y = 100, w = 4000, h = 3000 }, class = "KalliGuiWin18360-000000000D72C850" }
+        -- Avenger's own window: Avenger drawn 2 left of and above the child's corner (geometry.luau,
+        -- G.OWN_WINDOW_DIFF), at (100, 100).
+        local origin = { client = { x = 102, y = 102, w = 4000, h = 3000 }, class = "KalliGuiWin18360-000000000D72C850" }
         for _, c in ipairs(cases) do
           local pl = P.placer(origin, c.k, c.zoom)
           local function read(spec, which)
@@ -842,6 +844,45 @@ fn the_knob_reader_reads_one_knob_off_its_own_box_at_50_100_and_200_percent() {
     "##));
 }
 
+/// B1 (the maintainer's decision of 2026-11-01): the third Windows session read Init Preset's Level
+/// 90 % and its macros 10 % where the Mac reads 100 % and 0 % (avw3-verified, N1), Avenger drawn 2
+/// pixels left of and above its child window's corner. At 80 %, rings drawn so: placed with the own
+/// window's (-2, -2) they read 100 % and 0 %; placed from the child's corner itself, as before, the
+/// Level reads 90 %, as that session read it, and the macro's pointer twice as far round from 0 —
+/// 10° here, still within its step, where the session's 13.7° rounded up to 10 %.
+#[test]
+fn a_ring_drawn_two_pixels_left_of_and_above_its_window_reads_true_on_avengers_own_window() {
+    run_mac(&scenario(r##"
+        T.avengerAt80("Init Preset")
+        local K = S.included["modules/vps-avenger/src/read/knob.luau"][1]
+        local P = S.included["modules/vps-avenger/src/read/picture.luau"][1]
+        local own = { client = { x = 102, y = 102, w = 4000, h = 3000 }, class = "KalliGuiWin18360-000000000D72C850" }
+        local bare = { client = { x = 102, y = 102, w = 4000, h = 3000 }, class = "Unmatched" }
+        local function read(origin, spec, which)
+          local pl = P.placer(origin, 1.6, 80)
+          T.paintAvenger(100, 100, 1.6, spec)
+          local _, box = K.place(which)
+          local snap = T.snap(pl:rect(box))
+          snap.picture = S.picture
+          local fields, words = T.handled(K.read, pl, snap, which, {})
+          snap:release()
+          return fields, words
+        end
+        local f, w = read(own, { volume = 100 }, "volume")
+        T.ok(f.volume == 100, "Level with B1: " .. tostring(f.volume) .. " " .. w)
+        f, w = read(own, { amounts = { 0, 0, 0 } }, "macro1")
+        T.ok(f.amount == 0, "a macro with B1: " .. tostring(f.amount) .. " " .. w)
+        local round = tonumber(string.match(w, "([%d.]+)° round"))
+        local fb, wb = read(bare, { volume = 100 }, "volume")
+        T.ok(fb.volume == 90, "Level without B1, as the session read it: " .. tostring(fb.volume) .. " " .. wb)
+        local _, wm = read(bare, { amounts = { 0, 0, 0 } }, "macro1")
+        local roundBare = tonumber(string.match(wm, "([%d.]+)° round"))
+        T.ok(round and roundBare and roundBare >= 2 * round and roundBare > 9, string.format("the macro's pointer %s° round "
+          .. "with B1, %s° without: %s", tostring(round), tostring(roundBare), wm))
+        T.ok(T.held() == 0, "every picture released")
+    "##));
+}
+
 /// The knob reader on rings with the counts measured on the second Mac test's `Sliders/…` pictures
 /// at 100 % (s = 2, one pixel per point), every pixel painted where it lies from the knob's middle,
 /// as the project measures it from the pixel's corner: a bare upright pointer is the 50 bright
@@ -858,7 +899,8 @@ fn the_knob_reader_reads_the_projects_counts_pixel_for_pixel() {
         T.avengerAt80("Init Preset")
         local K = S.included["modules/vps-avenger/src/read/knob.luau"][1]
         local P = S.included["modules/vps-avenger/src/read/picture.luau"][1]
-        local origin = { client = { x = 100, y = 100, w = 4000, h = 3000 }, class = "KalliGuiWin18360-000000000D72C850" }
+        -- Avenger drawn at (100, 100), 2 left of and above its own window's corner (G.OWN_WINDOW_DIFF).
+        local origin = { client = { x = 102, y = 102, w = 4000, h = 3000 }, class = "KalliGuiWin18360-000000000D72C850" }
         local pl = P.placer(origin, 2, 100)
         -- The knob's middle on screen, a whole pixel here: (100 + 2 x, 100 + 2 y).
         local function read(which, pixels)

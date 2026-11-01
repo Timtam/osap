@@ -372,10 +372,10 @@ fn add_osc_reads_the_new_count_and_none_is_added_at_eight() {
         T.settle(2)
         T.ok(#S.clicks == clicks and T.lastPost("error").text == "Add OSC: VPS Avenger has 8 oscillators, the most it takes",
           T.lastPost("error").text)
-        -- At the limit the focus goes where the tool puts it, and the sentence is said beside it.
+        -- At the limit the focus goes where the tool puts it, and the sentence is its description.
         local posts = T.page().posts
-        T.ok(posts[#posts - 1].kind == "focus" and posts[#posts - 1].id == "osc-tab-8" and posts[#posts].focus ~= true,
-          tostring(posts[#posts - 1].id))
+        T.ok(posts[#posts - 1].kind == "focus" and posts[#posts - 1].id == "osc-tab-8"
+          and posts[#posts - 1].described == true and posts[#posts].focus ~= true, tostring(posts[#posts - 1].id))
         T.ok(T.held() == 0, "every picture released: " .. T.held())
     "##));
 }

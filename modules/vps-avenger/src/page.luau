@@ -390,10 +390,26 @@ local function postState(id, why)
   given = S.at(id)
 end
 
--- page:show's error value (docs/api/gui.md), in the page's words.
+-- Whether the page is shown now (page:isShown, docs/api/gui.md), false where it cannot be told.
+local function pageShown()
+  local page = E.header.page
+  if not page then return false end
+  local ok, shown = pcall(function() return page:isShown() end)
+  return ok and shown == true
+end
+
+-- page:show's error value (docs/api/gui.md), in the page's words, with the page key named. A
+-- declined show over Avenger's window is hidden again by the host (docs/api/gui.md, show), and a
+-- hidden page cannot come by itself: the third Windows session's (2026-11-01) was hidden at every
+-- show, and its sentence promised a page that might come (avw3-verified, P4). The key is said in
+-- this platform's words, as the page key's setting says it.
 local function notShown(err)
   if err ~= nil and err.code == host.errors.REFUSED then
-    return "The system did not bring the page to the front; if it does not come by itself, the key brings it."
+    if not pageShown() then
+      return "The system did not bring the page to the front; " .. keyWords() .. " brings it."
+    end
+    return "The system did not bring the page to the front; if it does not come by itself, " .. keyWords()
+      .. " brings it."
   end
   return "The page did not come to the front: " .. tostring(err) .. "."
 end
@@ -482,8 +498,10 @@ local function onShown(_, ok, err)
       tostring(plugin and plugin.title), host.now() - (keyAt or host.now()), err and (" (" .. err .. ")") or ""))
     return
   end
-  host.log.info("[avenger] [page] not shown: " .. tostring(err))
-  say(notShown(err))
+  local words = notShown(err)
+  host.log.info(string.format("[avenger] [page] not shown: %s%s; said: '%s'", tostring(err),
+    (err ~= nil and err.code == host.errors.REFUSED and not pageShown()) and ", hidden again" or "", words))
+  say(words)
 end
 
 -- The way back (the key in the page, the runtime's): Avenger's window asked forward first, the page

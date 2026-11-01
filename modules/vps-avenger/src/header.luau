@@ -548,22 +548,29 @@ end
 
 -- Where MENU and UNDO were read against where the table, factor `k` and Avenger's corner (cx, cy)
 -- put them: THE measurement line. A difference that holds at two zooms is an origin; one that
--- grows with the zoom is the tables (geometry.luau). On Avenger's own window (Windows), where no
--- difference is added, the same against the corner with geometry.luau's (-2, +2) added as well, so
--- that one Windows session says which of the two the difference is.
+-- grows with the zoom is the tables (geometry.luau). Where a difference is added — on a DAW's panel
+-- and on Avenger's own window (Windows) since the third Windows session (2026-11-01) — the same
+-- against the panel's corner with none added (+0,+0) as well, so that the next session shows what
+-- is left over either way; on an origin with none added, against the corner with geometry.luau's
+-- (-2, +2) added.
 local function measured(ctrl, h, k, cx, cy)
   local mx, my = centre(h.menu)
   local ux, uy = centre(h.undo)
   local fx, fy = G.frameOf(ctrl)
+  -- To a tenth, half up: a difference of nothing that floating point leaves a hair below 0 is
+  -- +0.0, not -0.0.
+  local function tenth(v) return math.floor(v * 10 + 0.5) / 10 end
   local function against(ax, ay)
-    return string.format("(%+.1f,%+.1f) and (%+.1f,%+.1f)", mx - (ax + k * G.MENU[1]),
-      my - (ay + k * G.MENU[2]), ux - (ax + k * G.UNDO[1]), uy - (ay + k * G.UNDO[2]))
+    return string.format("(%+.1f,%+.1f) and (%+.1f,%+.1f)", tenth(mx - (ax + k * G.MENU[1])),
+      tenth(my - (ay + k * G.MENU[2])), tenth(ux - (ax + k * G.UNDO[1])), tenth(uy - (ay + k * G.UNDO[2])))
   end
   local line = string.format("MENU read at (%.0f,%.0f), UNDO at (%.0f,%.0f): %s from where the table "
     .. "puts them with Avenger's corner at the panel's %+d,%+d", mx, my, ux, uy, against(cx, cy), fx, fy)
   if fx == 0 and fy == 0 then
     local d = G.ORIGIN_DIFF
     line = line .. string.format(", %s with it at %+d,%+d", against(cx + d[1], cy + d[2]), d[1], d[2])
+  else
+    line = line .. string.format(", %s with it at +0,+0", against(cx - fx, cy - fy))
   end
   return line
 end

@@ -146,6 +146,25 @@ local function starsDrawn(pl, g)
   return drawn, boxes
 end
 
+-- Which rows' star boxes hold a light pixel, by grid `g` of E.LIGHT — "1, 4", from 1, at the rows'
+-- places on a list's first page — or nil where none does. For FAV's line only, where the column
+-- holds light: the third Windows session's page key read FAV on from one lit box in row 1, dark
+-- 25 s later with the same list shown and nothing clicked — a hover, a preview's mark or an
+-- animation, which only pictures can tell (avw3-verified, S-F6 and S-F8). The rule stays the
+-- tool's, any light is ON, until they do (the maintainer's decision of 2026-11-01, B5).
+local function litRows(pl, g)
+  local sx = pl:exact(X.PRESET_FAVORITE_X, 0)
+  local hw, hh = X.FAVORITE_STATE[1] / 2 * pl.k, X.FAVORITE_STATE[2] / 2 * pl.k
+  local rows = {}
+  for i = 0, X.PRESET_VISIBLE_ROWS - 1 do
+    local _, y = pl:exact(0, X.PRESET_Y0 + i * X.PRESET_Y_STEP)
+    local _, _, any = g:share({ math.floor(sx - hw + 0.5), math.floor(y - hh + 0.5), math.floor(sx + hw + 0.5),
+      math.floor(y + hh + 0.5) })
+    if any then rows[#rows + 1] = tostring(i + 1) end
+  end
+  return #rows > 0 and table.concat(rows, ", ") or nil
+end
+
 -- FAV into `v.favoriteView`, read only while `open` (an expansion read open): nil otherwise.
 function E.favorite(pl, got, v, log, marks, open)
   local x, y = pl:point(X.FAVORITE_VIEW[1], X.FAVORITE_VIEW[2])
@@ -165,9 +184,14 @@ function E.favorite(pl, got, v, log, marks, open)
     return
   end
   v.favoriteView = any or drawn > 0
-  log(string.format("expansion: FAV — the star column %s light (the project's %.0f pixels of %.0f), a star drawn in the "
-    .. "middle of %d of the %d rows' boxes — %s", P.pct(share), share * pl:toolPixels(r), pl:toolPixels(r), drawn, boxes,
-    v.favoriteView and "ON" or "OFF"))
+  local lit = ""
+  if any then
+    local rows = litRows(pl, g)
+    lit = rows and (", in the box of row " .. rows) or ", in no row's box"
+  end
+  log(string.format("expansion: FAV — the star column %s light (the project's %.0f pixels of %.0f)%s, a star drawn in "
+    .. "the middle of %d of the %d rows' boxes — %s", P.pct(share), share * pl:toolPixels(r), pl:toolPixels(r), lit,
+    drawn, boxes, v.favoriteView and "ON" or "OFF"))
 end
 
 -- The view's caption as an OCR entry: asked only where the view's icon tells neither state (E.look's

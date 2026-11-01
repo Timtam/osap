@@ -193,6 +193,32 @@ fn the_key_shows_the_page_beside_avenger_and_in_the_page_goes_back_to_it() {
     "##.replace("@KEY@", MAC_KEY).as_str());
 }
 
+/// A show at the key that the system declines (the third Windows session, 2026-11-01): over
+/// Avenger's window the host hides a declined page again, and a hidden page cannot come by itself —
+/// the module's sentence names the key that brings it and promises nothing; where the page is still
+/// shown it may yet come, and the key is named too. Each logged with what was said.
+#[test]
+fn a_show_declined_at_the_key_names_the_key_and_a_hidden_page_promises_nothing() {
+    run_mac(r##"
+        local S = T.S
+        T.avengerAt80("Init Preset")
+        T.pageReady()
+        S.pageAnswers = { { false, T.E("refused", "declined by the system"), hidden = true } }
+        T.openPage()
+        local hidden = "The system did not bring the page to the front; @KEY@ brings it."
+        T.ok(T.lastSaid() == hidden and S.speech[#S.speech].interrupt == true, T.said())
+        T.ok(not T.page().shown, "hidden again")
+        T.ok(T.count("[avenger] [page] not shown: declined by the system, hidden again; said: '" .. hidden .. "'") == 1,
+          T.dump())
+        T.event()
+        S.pageAnswers = { { false, T.E("refused", "declined by the system") } }
+        T.openPage()
+        local shown = "The system did not bring the page to the front; if it does not come by itself, @KEY@ brings it."
+        T.ok(T.lastSaid() == shown, T.said())
+        T.ok(T.count("[avenger] [page] not shown: declined by the system; said: '" .. shown .. "'") == 1, T.dump())
+    "##.replace("@KEY@", MAC_KEY).as_str());
+}
+
 /// Anywhere but on an identified Avenger the key opens nothing and says the tool's sentence —
 /// without the DAWs it named, which are daw-hosts' to know — before Avenger is identified, and
 /// with another application in front.
@@ -1814,6 +1840,52 @@ fn back_and_next_carry_aria_disabled_and_stay_in_the_tab_order() {
     let restore = js.find("function restoreFocus() {").expect("panel.js has restoreFocus");
     let restore_body = &js[restore..restore + js[restore..].find("\n  }\n").unwrap()];
     assert!(!restore_body.contains("aria-disabled"), "restoreFocus passes over an aria-disabled button");
+}
+
+/// A round trip's sentence told with a focus (Open's "<name> opened", the third Windows session's
+/// tester having heard only the heading; a refusal at a limit — src/actions.luau's report): the page
+/// is away when it is told, and its live region would not say it as the page comes back, so the
+/// page makes the error region the focused element's description, read with it where the focus
+/// lands. The element's own description comes back at its first blur, at the next focus described
+/// and when an error is cleared; a focus told with no sentence describes nothing.
+#[test]
+fn a_focus_told_with_a_sentence_is_described_by_the_error_region_until_it_leaves() {
+    let html = INDEX_HTML.replace("\r\n", "\n");
+    let js = PANEL_JS.replace("\r\n", "\n");
+    assert!(html.contains("<p class=\"error\" id=\"error-text\" tabindex=\"-1\"></p>"), "index.html's error text");
+    let handler = js.find("else if (message.kind === 'focus') {").expect("panel.js takes a focus");
+    let handler_body = &js[handler..handler + js[handler..].find("\n      }\n").expect("it ends")];
+    assert!(
+        handler_body.contains("if (message.described === true) focusDescribed(message.id);")
+            && handler_body.contains("else focusElementById(message.id);"),
+        "{handler_body}"
+    );
+    let start = js.find("function focusDescribed(id) {").expect("panel.js has focusDescribed");
+    let body = &js[start..start + js[start..].find("\n  }\n").expect("it ends")];
+    let first = body.find("undescribe();").expect("the one described before is undone first");
+    let focus = body.find("if (!focusTarget(target)) return false;").expect("the focus moved as any other");
+    let set = body
+        .find("target.setAttribute('aria-describedby', own ? `${own} error-text` : 'error-text');")
+        .expect("the error region as its description");
+    assert!(first < focus && focus < set, "{body}");
+    assert!(
+        body.contains("target.addEventListener('blur', () => {")
+            && body.contains("if (described && described.el === target) undescribe();")
+            && body.contains("}, { once: true });"),
+        "undone at its first blur: {body}"
+    );
+    let undo = js.find("function undescribe() {").expect("panel.js has undescribe");
+    let undo_body = &js[undo..undo + js[undo..].find("\n  }\n").expect("it ends")];
+    assert!(
+        undo_body.contains("if (own) el.setAttribute('aria-describedby', own);")
+            && undo_body.contains("else el.removeAttribute('aria-describedby');"),
+        "its own description back: {undo_body}"
+    );
+    let show = js.find("function showError(msg, focus) {").expect("panel.js has showError");
+    assert!(js[show..].starts_with("function showError(msg, focus) {\n    if (!msg) undescribe();"), "an error cleared");
+    let plain = js.find("function focusElementById(id) {").expect("panel.js has focusElementById");
+    let plain_body = &js[plain..plain + js[plain..].find("\n  }\n").expect("it ends")];
+    assert!(!plain_body.contains("aria-describedby"), "a plain focus describes nothing: {plain_body}");
 }
 
 /// The page claims nothing of DRUM SQ at a click (the plan's slice 8, its other half, the page edits

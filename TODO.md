@@ -3,6 +3,130 @@
 Project backlog for the cross-platform automation platform.
 Architecture and feasibility foundation: [docs/architecture-feasibility-study.md](docs/architecture-feasibility-study.md).
 
+## The third Windows session (2026-11-01)
+
+One session of 2026-11-01 on build 19e8f37 (VPS Avenger 0.16.0, overlay runtime 0.16.2): REAPER,
+the VST3 at 80 %, the display at 100 %, calibration off. Analysed and adversarially verified
+(avw3-grid, avw3-page, avw3-select, avw3-verified, in the session's notes). Built on
+wip/avenger-1101 as VPS Avenger 0.17.0 and overlay runtime 0.16.3, with the host's diagnostics;
+tested headless, not yet run on either platform.
+
+What went wrong, in short:
+
+- **Open "Vocal Trance" opened Funky House 4.** The grid's bottom scrollbar click moved nothing —
+  most likely it lay on the very end of the track, Avenger being drawn about 2 px left of and above
+  its child window's corner on Windows, which the second session's wrong factor had hidden — and
+  the tile was clicked all the same; the header check closed Funky House 4 again.
+- **The page did not come back after it.** Windows declined the show, the host hid the page again
+  over REAPER's FX window as designed, and the sentence promised a page that "might come by itself"
+  and did not name the key. The tester waited, pressed Alt+Tab and quit.
+- **A Select took 16.5 s and said nothing**: 12 s went on five change waits that ran to their 2 s
+  bound, two of them on lists already at their end.
+- **That Select loaded the preset** on this Avenger, and the page's heading said Init Preset for
+  15 s.
+- **Smaller misreads, the same likely cause**: Init Preset's Level 90 % and its macros 10 % where the
+  Mac reads 100 % and 0 %; FAV read ON from one lit star box that was dark 25 s later.
+- **The tester's own words** (via the maintainer): after opening an expansion he could not tell
+  whether it had worked — Factory opened and was confirmed, but only the page's focus moved to its
+  heading and nothing was said, where Close says a sentence; the last expansion of the list
+  certainly did not open.
+
+The maintainer's decisions of 2026-11-01:
+
+- **B1.** On Avenger's own window (its class's KalliGuiWin prefix, a property of the window) the
+  frame is (-2, -2); the geometry's comment holds the Windows measurements; the header's measured
+  line logs the comparison against +0,+0 as well. A DAW's panel on a Mac keeps (-2, +2).
+- **B2.** One silent name read after a page Select, posted as the preset and its loaded row, logged,
+  nothing said: the 2026-10-26 premise "a Select loads nothing" does not hold on this Avenger.
+- **B3.** Where the page cannot come back: the action's result first, then "The page did not come
+  back; <the page key> brings it." (at the key: "… did not come to the front; …").
+- **B4** (read the scrollbars' thumbs) and **B5** (FAV's "any light" rule, the tool's) not now; B5's
+  log of which row's box held the light is built.
+- Also built: A1 to A5 of avw3-verified, and from the tester's words "<name> opened" after an Open.
+
+Built (one line each, and the tests in `crates/host/src` below it):
+
+- [x] **A4 (c), the host's facts behind a declined show** (`webview_lua.rs`, `backend/windows.rs`):
+      the centre probe before the hide; the last input event, the host's own last injected input
+      and the last key from the keyboard, times only; `foreground lock timeout` among `[env]`:
+      `a_declines_line_says_which_input_came_last`;
+      `the_centre_is_probed_before_a_declined_page_is_hidden_again`;
+      `the_foreground_lock_timeout_line_is_in_milliseconds`; `the_inputs_are_measured_back_from_now`;
+      `every_send_input_and_every_key_from_the_keyboard_is_stamped`.
+- [x] **A2 and B3 in the runtime** (0.16.3, which VPS Avenger 0.17.0 depends on): a declined page hidden again names the page key, the
+      result first, no place kept for a late grant, `said:` in the log:
+      `a_declined_show_back_hidden_over_the_plugin_names_the_key`;
+      `a_show_declined_and_hidden_again_at_the_key_names_the_key_and_holds_no_place`;
+      `an_open_whose_page_does_not_come_back_says_the_answer_first_and_then_the_key`.
+- [x] **A2 at VPS Avenger's key** (page.luau, its own sentence, the key named):
+      `a_show_declined_at_the_key_names_the_key_and_a_hidden_page_promises_nothing`.
+- [x] **B1, the own window's (-2, -2)** (geometry.luau, header.luau); the Windows scenarios' child
+      at (250, 62) with Avenger drawn at (248, 60), where they always drew it:
+      `on_windows_avengers_corner_is_its_childs_two_pixels_left_and_up`;
+      `a_ring_drawn_two_pixels_left_of_and_above_its_window_reads_true_on_avengers_own_window`;
+      `on_windows_a_display_scaled_nowhere_gives_the_zoom_from_the_headers_size` (both comparisons).
+- [x] **A1, the travel's first scrollbar click must move**, or nothing more is clicked:
+      `a_first_scrollbar_click_toward_another_page_that_moves_nothing_clicks_no_tile`;
+      `a_first_presets_scrollbar_click_toward_another_page_that_moves_nothing_clicks_no_row`.
+- [x] **A3, the grid's top kept across a change of the list chosen**:
+      `the_grids_top_is_kept_when_the_list_chosen_changes`.
+- [x] **A4 (a), every change wait's numbers in its line** (settled, still changing at the bound, or
+      none): `a_scrollbar_verdict_says_whether_it_settled`.
+- [x] **A4 (b), the scrollbars' points marked in the browser's pictures, and where a wrong name
+      says the grid stood**: `a_calibrating_run_writes_the_browsers_pictures_once_per_view_and_zoom`;
+      `a_held_single_click_reaches_the_grids_last_page_where_a_paired_one_does_not`.
+- [x] **A4 (d) and B2, the strip's dots after a category's click and the name once after a
+      Select**: `a_select_on_an_avenger_that_loads_posts_the_name_read_after_it_and_says_nothing`
+      (nothing said of it where the page does not come back either);
+      `a_preset_selected_is_a_preview_with_no_name_watched_and_nothing_forgotten` (no name watch,
+      one read, nothing said).
+- [x] **A5, where a preset action looks, said once**:
+      `a_preset_action_that_scrolls_says_where_it_looks_once`.
+- [x] **B5's log line, the row whose star box held the light**:
+      `fav_read_off_a_lone_lit_box_says_which_rows_box_held_the_light`.
+- [x] **"<name> opened"**, with the focus on its heading and the error region as the heading's
+      description (ui/panel.js; a refusal at a limit the same), read where the focus lands as the
+      page comes back: `an_expansion_is_opened_by_its_place_confirmed_by_the_header`;
+      `a_focus_told_with_a_sentence_is_described_by_the_error_region_until_it_leaves`.
+
+Open:
+
+- [ ] **B4. Read the scrollbars' thumbs** (avw3-verified S-P2, G-F4), after the calibrated run: the
+      column must allow for the own window's offset, the thresholds from a Windows picture. It
+      saves the 2 s stood-still wait per reset and per categories' click, and makes A1 exact.
+- [ ] **C1.** The offset's exact value at the browser, the strip and the knobs: Windows'
+      `browser-grid-8-per-row-80pct.png`, `browser-open-80pct.png`, `strip-80pct.png` and
+      `macros-80pct.png` against the developer's, pixel for pixel; the grid's picture, marked at the
+      scrollbar's points now, shows whether the bottom point lies on the track.
+- [ ] **C2.** Constant in pixels, or growing with the zoom: the same pictures and the header's line at
+      a second zoom, 100 % say.
+- [ ] **C3.** What a Select draws on Windows: pictures before and after the category's click and the
+      row's; whether Arp's click highlights and loads row 1 (A4 d's line counts the strip's dots);
+      what the transient lit star box was (B5's line names its row).
+- [ ] **C4.** The thumb-press question (avw3-verified G7): only if the down-click still stands still
+      after A3 and B1.
+- [ ] **C5.** What kept the presets' bands changing for 2 s (S-F2): A4 (a)'s numbers answer it.
+- [ ] **C6.** The thumbs' extents and colours, for B4.
+- [ ] **Heard?** "<name> opened" as the page comes back after an Open, after the heading's name and
+      once; a refusal at a limit the same, with its target. The heading's description is the error
+      region until the focus leaves it: whether it is read again when the page key brings a page
+      that did not come back.
+- [ ] **For the developer (Mac)**: B2's read says nothing; it is not the spoken "unchanged, <name>" he
+      called unnecessary. Ask him alongside.
+- [ ] **For the tester (Windows)** — höchstens vier Fragen:
+      1. Nächster Test, bitte so: in den Einstellungen der Automation Platform „Kalibrierung“
+         einschalten und den Bildschirmvorhang von JAWS ausschalten, sonst sind die Bilder schwarz.
+         Dann Factory öffnen, in Arp ein Preset „Auswählen“, Factory schließen und „Vocal Trance“
+         öffnen. Danach bitte das Log und den Ordner „calibration“ schicken; er liegt neben der
+         Programmdatei unter modules\vps-avenger.
+      2. Welche Expansions hast du in Avenger installiert? Alle 129 der Liste, die du auf der Seite
+         gewählt hast, oder fehlen welche, oder kommen andere dazu?
+      3. Zu „AR A State of Trance“: Als du dort auf „Auswählen“ gedrückt hast, hat sich der Klang
+         schon geändert, ohne dass du „Laden“ gedrückt hast? Und hast du nach den 16 Sekunden Stille
+         Alt+Tab gedrückt, weil nichts kam?
+      4. Zu „Vocal Trance“: Hast du während des Öffnens eine Taste gedrückt, zum Beispiel Strg, um
+         JAWS zu unterbrechen? Was hast du danach gehört, als die Seite nicht zurückkam?
+
 ## The second Windows session and the developer's Mac test (2026-10-31)
 
 Two sessions of 2026-10-31, both on build c70dacf (VPS Avenger 0.15.1, overlay runtime 0.16.0):

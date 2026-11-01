@@ -119,7 +119,8 @@ G.HEIGHT_AT_50 = 561
 
 -- ── Avenger's corner ─────────────────────────────────────────────────────────
 -- Where the tables start, relative to the DAW's plug-in panel: 2 points left of the panel's
--- corner and 2 below it. ONE constant, and unverified.
+-- corner and 2 below it. ONE constant, and unverified. On Avenger's own window (Windows), 2 pixels
+-- left of the child's corner and 2 above it: G.OWN_WINDOW_DIFF, below.
 --
 -- The evidence is a difference that is the same in the two hosts the project has figures for:
 --   * Logic: the project's tables start at the window's frame + (0, 90); daw-hosts' panel starts
@@ -145,18 +146,44 @@ G.HEIGHT_AT_50 = 561
 --
 -- Added in the overlay's FRAME, which the scale does not touch: a point is placed at the panel's
 -- corner + (-2, 2) + factor × (x, y). Only on a DAW's panel (class "host-panel",
--- docs/api/overlay.md, attachEmbedded on macOS): on Windows the origin is Avenger's own child
--- window, whose corner is Avenger's corner and was never compared with anything. Every
--- identification logs how far MENU and UNDO were read from where this puts them (header.luau) —
--- and on Windows also from where they would be with the difference added — at every zoom it is
--- read at: the same offset at two zooms is (b), one that grows with the zoom is (a). TODO.md, "The
--- origin difference".
+-- docs/api/overlay.md, attachEmbedded on macOS); on Avenger's own window, below. Every
+-- identification logs how far MENU and UNDO were read from where this puts them, and from where
+-- they would be with no difference added (header.luau), at every zoom it is read at: the same
+-- offset at two zooms is (b), one that grows with the zoom is (a). TODO.md, "The origin
+-- difference".
 G.ORIGIN_DIFF = { -2, 2 }
 
+-- On Avenger's OWN window — the child whose class begins with "KalliGuiWin" (src/main.luau's
+-- `control`), a property of the window, which only Windows shows — Avenger is drawn 2 pixels left
+-- of the child's corner and 2 above it: (-2, -2), and ONE constant again, measured at one zoom
+-- only. The third Windows session (2026-11-01, Avenger at 80 % on a display at 100 %) gave four
+-- measures that agree within about a pixel:
+--   * the strip's first dot, its middle 393.5 from the child's corner against the 395.6 the table
+--     puts it at (T.DOT_MIDDLE 247.25 × 1.6, tables/strip.luau) — the developer's Mac read it at
+--     395.5 from his frame — and its rows 2 higher than the Mac's from his;
+--   * the macro knobs' centre of brightness on Init Preset, by the same reader: (-1.6, -1.2) from
+--     the Mac's;
+--   * the oscillator's pointer on Init Preset: 258° against the Mac's 267°, a middle about 2 off at
+--     a pointer about 12 long — which read its Level 90 % and its macros 10 % where the Mac reads
+--     100 % and 0 % (read/knob.luau rounds both a step up);
+--   * MENU's and UNDO's words, from other recognisers: 3 to 3.5 left and 1 to 2.5 up.
+-- The avenger_control developer's own Windows origin, the FX window's corner + (215, 102), agrees in
+-- y; its x is either -3 or +5 off, by which of his two left edges is taken. With (0, 0) the grid's
+-- bottom scrollbar click landed on the very end of its track and moved nothing (the session's Open
+-- of Vocal Trance), where the second session's, pulled 2.4 px up and left by a factor wrong by
+-- 0.7 %, had landed on the Mac's pixel. Whether it is the same at every zoom is not known; a
+-- constant 2 leaves less error than 0 either way — 0.5 px at 100 % and 0.75 at 50 % if it grows
+-- with the zoom, against 2.5 and 1.25. TODO.md, "The third Windows session (2026-11-01)".
+G.OWN_WINDOW_DIFF = { -2, -2 }
+
 -- The frame: `O:frame`'s function, and what every read of this module that is made before the
--- overlay is active (header.luau, dialog.luau) places its regions with.
+-- overlay is active (header.luau, dialog.luau) places its regions with. Any other origin, which
+-- this module is never bound to, adds nothing.
 function G.frameOf(origin)
   if origin and origin.class == "host-panel" then return G.ORIGIN_DIFF[1], G.ORIGIN_DIFF[2] end
+  if origin and string.find(tostring(origin.class or ""), "^KalliGuiWin") then
+    return G.OWN_WINDOW_DIFF[1], G.OWN_WINDOW_DIFF[2]
+  end
   return 0, 0
 end
 

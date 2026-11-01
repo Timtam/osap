@@ -255,6 +255,31 @@ function Pg.scroll(view, from, to, count)
   return out
 end
 
+-- The page of view `view`, for a list of `total`, whose first expansion shown is the one at place
+-- `first` (from 0), or nil where no page starts there: where a tile clicked shows the grid stood,
+-- from the place of the expansion it opened (src/actions/browser.luau, closeAgain).
+function Pg.pageShowing(view, first, total)
+  for index = math.max(0, first), total - 1 do
+    local p = Pg.place(view, index, total)
+    if not p then return nil end
+    if index - p.visible == first then return p.page end
+    if index - p.visible > first then return nil end
+  end
+  return nil
+end
+
+-- The scrollbars' points marked in the browser's pictures of a calibrating run
+-- (src/actions/browser.luau): with the grid shown, 8 per Row's three on its scrollbar; with an
+-- expansion open, the presets' two and the categories' two — so that a picture shows each point
+-- against the bar Avenger draws (the third Windows session, 2026-11-01). Table points.
+function Pg.scrollMarks(open)
+  if open then
+    return { { Pg.PRESET_SCROLL.x, Pg.PRESET_SCROLL.top }, { Pg.PRESET_SCROLL.x, Pg.PRESET_SCROLL.bottom },
+      { Pg.CATEGORY_SCROLL.x, Pg.CATEGORY_SCROLL.top }, { Pg.CATEGORY_SCROLL.x, Pg.CATEGORY_SCROLL.bottom } }
+  end
+  return { { Pg.SCROLL_X, EIGHT.top }, { Pg.SCROLL_X, EIGHT.middle }, { Pg.SCROLL_X, EIGHT.bottom } }
+end
+
 -- Where expansion `p` (Pg.place's) is clicked in view `view`, a table point (expansion_cell_pos,
 -- expansion_list_cell_pos), or nil where the project's tables have no row for it.
 function Pg.cell(view, p)
@@ -492,7 +517,10 @@ end
 -- last. A list of table points, each clicked in turn. The reset's cost where the list stood at its
 -- top already: its first click moves nothing and the rest at that point are not made
 -- (src/actions/browser.luau, clickSeries) — one change wait's bound, B.STEP_WITHIN, 2 s, where the
--- tool spends its 9 × 0.35 s.
+-- tool spends its 9 × 0.35 s. The first click of the TRAVEL — after the reset, or from the page
+-- known — is marked `must = true`: the list stands on another page than the one it goes to, so
+-- that click has to move it (clickSeries; the third Windows session, 2026-11-01). The reset's
+-- clicks are never marked: the list may stand at its top already.
 function Pg.presetScroll(from, to, count)
   local ys = {}
   local function at(y, n)
@@ -514,9 +542,13 @@ function Pg.presetScroll(from, to, count)
     at(top, reset)
     page = 0
   end
-  if page ~= to.page then at(to.page > page and bottom or top, math.max(1, math.abs(to.page - page))) end
+  local travel = nil
+  if page ~= to.page then
+    travel = #ys + 1
+    at(to.page > page and bottom or top, math.max(1, math.abs(to.page - page)))
+  end
   local out = {}
-  for i, y in ipairs(ys) do out[i] = { Pg.PRESET_SCROLL.x, y } end
+  for i, y in ipairs(ys) do out[i] = { Pg.PRESET_SCROLL.x, y, must = i == travel or nil } end
   return out
 end
 

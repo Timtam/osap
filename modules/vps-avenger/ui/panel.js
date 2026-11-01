@@ -534,6 +534,7 @@
 
   // `focus`: the error came while the page was away, and the page comes back on it.
   function showError(msg, focus) {
+    if (!msg) undescribe();
     $('error-text').textContent = msg || '';
     $('error-section').hidden = !msg;
     if (msg && focus) {
@@ -2856,6 +2857,34 @@
     return focusTarget($(id));
   }
 
+  // A focus the module's sentence goes with (`described`: a refusal at a limit, Open's "<name>
+  // opened", src/actions.luau's report). The page is told while it is away, and a live region speaks
+  // only while its page is in front — one that appears with its text already in it is, as a rule,
+  // not announced, and the page's own announcement as it comes back cuts off what is said before it
+  // (docs/building-a-page.md, Step 3). So the error region is the target's description for as long as
+  // it keeps the focus, read with it where the focus lands; its own description back at its first
+  // blur — the page going away again is one — or at the next focus described, or an error cleared.
+  let described = null; // { el, own }: the element whose description is the error region, and its own
+  function undescribe() {
+    if (!described) return;
+    const { el, own } = described;
+    described = null;
+    if (own) el.setAttribute('aria-describedby', own);
+    else el.removeAttribute('aria-describedby');
+  }
+  function focusDescribed(id) {
+    undescribe();
+    const target = $(id);
+    if (!focusTarget(target)) return false;
+    const own = target.getAttribute('aria-describedby');
+    described = { el: target, own: own };
+    target.setAttribute('aria-describedby', own ? `${own} error-text` : 'error-text');
+    target.addEventListener('blur', () => {
+      if (described && described.el === target) undescribe();
+    }, { once: true });
+    return true;
+  }
+
   function menuOptionId(itemsId, option) {
     return `${itemsId}-${String(option).toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;
   }
@@ -3534,7 +3563,10 @@
         echoApplied();
       }
       else if (message.kind === 'error') showError(message.text, message.focus === true);
-      else if (message.kind === 'focus') focusElementById(message.id);
+      else if (message.kind === 'focus') {
+        if (message.described === true) focusDescribed(message.id);
+        else focusElementById(message.id);
+      }
       else if (message.kind === 'restoreFocus') restoreFocus();
       else if (message.kind === 'settings') applySettings(message);
     };

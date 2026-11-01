@@ -140,10 +140,13 @@ local notChosen = Act.notChosen
 -- What the page is told after a trip, and the words for when it does not come back: the state —
 -- what the trip read written over what was read before (`set`, `values`, `part`) — then the error,
 -- or the focus: on the element the action names (`focus`, the tool's), or back where the user was;
--- an error with a `focus` is a refusal at a limit, the focus put there and the error said beside.
+-- an error with a `focus` is a refusal at a limit, the focus put there and the error read as its
+-- description, and so is a note with one (Open's "<name> opened", src/actions/browser.luau).
 -- `result`: { set = { key -> value }?, values = all of them?, part = { keys, values }? (a part read
 -- again, src/act.luau), facts = { key -> value }? (state.luau's), error = a reason?, sentence = a
--- whole sentence?, note = a reason?, focus = an element's id?, said = what was read, in words? }.
+-- whole sentence?, note = a reason?, focus = an element's id?, said = what was read, in words?,
+-- quiet = true where `set`'s name is no words for a page that does not come back (a Select's name
+-- read after it, which nothing says: the maintainer's decision of 2026-11-01, B2) }.
 -- What the page is told of a trip's end, in one log line — the second Windows session (2026-10-31)
 -- left no trace of what the trips told the tester (avw2-verified, A7): the sentence, error or note
 -- in the error region, the words said where the page does not come back, the focus; or nothing.
@@ -174,9 +177,11 @@ local function report(label, result)
   if text then
     if result.focus then
       -- A refusal at a limit (src/act.luau): the focus where the tool leaves it — the eighth tab,
-      -- the fourth macro tab, the only one — and then the sentence in the error region, a live
-      -- region, which says it without taking the focus there.
-      E.post({ kind = "focus", id = result.focus })
+      -- the fourth macro tab, the only one — and then the sentence in the error region, which the
+      -- page makes the focused element's description (`described`, ui/panel.js): the page is away
+      -- now, and its live region would not say it as the page comes back (docs/building-a-page.md,
+      -- Step 3), so the sentence is read where the focus lands, after the element's name.
+      E.post({ kind = "focus", id = result.focus, described = true })
       E.post({ kind = "error", text = text })
     else
       E.post({ kind = "error", text = text, focus = true })
@@ -190,7 +195,7 @@ local function report(label, result)
     E.post({ kind = "restoreFocus" })
   end
   if result.said then return label .. ": " .. result.said end
-  local name = result.set and result.set.preset
+  local name = not result.quiet and result.set and result.set.preset
   return name and (label .. ": " .. name) or nil
 end
 

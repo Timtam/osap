@@ -1,6 +1,6 @@
 id = "com.platform.vps-avenger"
 name = "VPS Avenger"
-version = "0.16.0"
+version = "0.17.0"
 license = "GPL-3.0-or-later"
 # The runtime's page support (O:addPage, O:inPlugin) came with version 0.6; `identify`'s `again`
 # and O:watch's count of readings, which the header's read and the name after ◀ and ▶ use, with 0.7;
@@ -23,8 +23,11 @@ license = "GPL-3.0-or-later"
 # O:afterDialog's dialog that the window server lists and nothing brings to the front — Logic's
 # "Load Preset..." panel after the ring's Load preset (src/main.luau) — with 0.16.1; and the reading
 # an OCR button's `value` is handed, by whose words the Preset read-out says no name a recogniser
-# only guessed (src/main.luau), with 0.16.2.
-dependencies = ["com.platform.overlay >= 0.16.2", "com.platform.daw-hosts"]
+# only guessed (src/main.luau), with 0.16.2; and the words for a page that does not come back after
+# a trip — the trip's answer first, the page key named, nothing of coming by itself where the host
+# hid it again — on which Open's "<name> opened" and every trip's error rely (src/actions.luau),
+# with 0.16.3.
+dependencies = ["com.platform.overlay >= 0.16.3", "com.platform.daw-hosts"]
 # The catalog of Avenger's expansions (modules/vps-avenger-presets), when it is installed:
 # the preset's expansion, category, oscillators and macros, the names by which the ring's
 # Oscillator stepper, Mute, Solo and the knobs' sentences name a tab whose name was not read
@@ -76,7 +79,8 @@ optional_dependencies = ["com.platform.vps-avenger-presets"]
 #           the tool's sentences for a knob's amount (src/amount.luau, #6 to #11) and a drum slot's
 #           Browse and a row of the sample browser (#13), the pattern DRUM SQ's watcher reads
 #           selected (src/watch.luau), that an expansion is being looked for in the browser's grid by
-#           its place (src/actions/browser.luau), that the page key changed, and that the
+#           its place, and a preset in its category where its category or its scrollbar is clicked
+#           first (src/actions/browser.luau), that the page key changed, and that the
 #           page was described again when its mode changed from it (src/page.luau)
 #   log     what was read, and where
 #   screen  the screen's size, before a choice that opens Avenger's warning box; the name's field's
@@ -96,7 +100,8 @@ optional_dependencies = ["com.platform.vps-avenger-presets"]
 #           questions with callbacks (src/watch.luau); the expansion browser's pictures, its view's
 #           icon's, its title band's, its list bar's, the star column's and the stars' grids, the
 #           change waits after a click, after every click on a scrollbar and before FAV is read after
-#           an Open, and the profiles of the view list's place
+#           an Open, the strip's picture and its dots after a category's click (logged only), and the
+#           profiles of the view list's place
 #           before and after a Close where nothing told (src/actions/browser.luau, src/act.luau,
 #           src/read/browser.luau);
 #           the calibration pictures of the header, the warning box, the page's reads, the editor,

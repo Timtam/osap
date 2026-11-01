@@ -323,7 +323,9 @@ S.snapHeld = 0
 -- Each keeps its options (`minPixels`, `settle`, `tolerance`, `watch`) for a scenario to look at;
 -- with S.honourMinPixels a changed picture counts only where at least `minPixels` of the watched
 -- pixels (the region without `watch`) differ from the baseline by more than `tolerance`
--- (T.paintDiff), as the host counts them; `settle` is not played: a change stands still at once.
+-- (T.paintDiff), as the host counts them; `settle` is not played: a change stands still at once —
+-- unless S.neverSettles, where a change is answered at the wait's timeout, still changing, with
+-- `changed = true, settled = false`, as the host answers one whose still spell never lasted `settle`.
 -- S.onSnapshotWait, when set, runs inside a picture a handler waits for, before it is answered:
 -- the user going elsewhere meanwhile.
 S.changeWaits = {}
@@ -425,9 +427,10 @@ do
         end
         changed = n >= w.minPixels
       end
-      if changed or S.now >= w.asked + w.timeout then
+      local bound = S.now >= w.asked + w.timeout
+      if (changed and not S.neverSettles) or bound then
         table.remove(S.changeWaits, i)
-        due[#due + 1] = { w = w, changed = changed }
+        due[#due + 1] = { w = w, changed = changed, settled = changed and not S.neverSettles }
       else
         i += 1
       end
@@ -438,7 +441,7 @@ do
       local s = T.snap(d.w.region)
       s.picture = S.picture
       T.call("answer", d.w.cb, s, nil, { time = S.now, waited = S.now - d.w.asked, frames = 1,
-        changed = d.changed, settled = d.changed, rebased = false })
+        changed = d.changed, settled = d.settled, rebased = false })
     end
   end
 end
@@ -806,8 +809,10 @@ function T.logic(zoom)
 end
 
 -- REAPER's FX chain on Windows, with Avenger's own child window (its class as the first Windows
--- session's probe read it) at (248, 60) sized for `zoom` on a display of factor `d`, the keyboard
--- in it.
+-- session's probe read it) at (250, 62) sized for `zoom` on a display of factor `d`, the keyboard
+-- in it. Avenger is drawn 2 pixels left of the child's corner and 2 above it (geometry.luau,
+-- G.OWN_WINDOW_DIFF, the third Windows session's measure): at (248, 60), where these scenarios
+-- paint it and place its header's words — so every point they pin is where Avenger is drawn.
 T.WFX = { id = 60, title = 'FX: Track 1 "VPS Avenger"', class = "#32770",
   app = { pid = 4242, exe = "reaper.exe" },
   bounds = { x = 0, y = 0, w = 3800, h = 2600 }, client = { x = 8, y = 30, w = 3784, h = 2562 } }
@@ -815,8 +820,8 @@ T.WLIST = { id = 61, class = "SysListView32", bounds = { x = 8, y = 60, w = 230,
   client = { x = 8, y = 60, w = 230, h = 600 } }
 function T.kalliGui(zoom, d)
   local w, h = T.size(zoom, d)
-  return { id = 70, class = "KalliGuiWin18360-000000000D72C850", bounds = { x = 248, y = 60, w = w, h = h },
-    client = { x = 248, y = 60, w = w, h = h } }
+  return { id = 70, class = "KalliGuiWin18360-000000000D72C850", bounds = { x = 250, y = 62, w = w, h = h },
+    client = { x = 250, y = 62, w = w, h = h } }
 end
 function T.onWindows(zoom, d)
   local j = T.kalliGui(zoom, d)
@@ -2181,11 +2186,12 @@ fn a_step_overtaken_by_a_second_press_leaves_the_last_word_to_it() {
 }
 
 /// On Windows Avenger is its own child window, matched by its class's KalliGuiWin prefix and
-/// identified by the same header read; its corner is the child's, with no DAW difference added —
-/// the log line gives the offsets with the panel's (-2, +2) as well, so one Windows session says
-/// which of the two it is. At 150 % display scaling Avenger is drawn half again as large at the
-/// same zoom, which the header says: the zoom field reads 80 %, MENU and UNDO sit where a factor of
-/// 2.4 puts them, and the display factor is 1.5. A display scaled to 110 % — no quarter step —
+/// identified by the same header read; its corner is the child's + (-2, -2), where the third
+/// Windows session (2026-11-01) measured it drawn — the log line gives the offsets with no
+/// difference added as well (+0,+0), so the next session says what is left over. At 150 % display
+/// scaling Avenger is drawn half again as large at the same zoom, which the header says: the zoom
+/// field reads 80 %, MENU and UNDO sit where a factor of 2.4 puts them, and the display factor is
+/// 1.5. A display scaled to 110 % — no quarter step —
 /// fits nothing: the captions are Avenger's, but it is not taken as Avenger until a factor fits.
 /// Where English OCR is not installed the header is read in the user's own language.
 #[test]
@@ -2195,8 +2201,8 @@ fn on_windows_avenger_is_its_kalligui_child_and_a_display_factor_is_learned_from
         local J = T.onWindows(80, 1.5)
         local header = T.avenger()
         local r = T.lastRead("vps-avenger header")
-        -- The child at (248, 60), 2091 across: 940.95 -> 941, and 76.8 -> 77 down.
-        T.ok(r and T.region(r.region) == "248,60,1189,137", r and T.region(r.region))
+        -- The child at (250, 62), 2091 across: 940.95 -> 941, and 76.8 -> 77 down.
+        T.ok(r and T.region(r.region) == "250,62,1191,139", r and T.region(r.region))
         T.ok(not header.active)
         T.answer(r, T.header(248, 60, 2.4, 80))
         -- Picked up through the `again` the runtime hands `identify` on the pattern's path too: on
@@ -2206,8 +2212,10 @@ fn on_windows_avenger_is_its_kalligui_child_and_a_display_factor_is_learned_from
         T.ok(header.active and header:origin().id == 70)
         T.ok(T.count("attachEmbedded: matched control [KalliGuiWin18360-000000000D72C850] id=70, identify=true") == 1)
         T.ok(T.count("zoom 80 % (read), factor 2.4000, display factor 1.50") == 1)
-        T.ok(T.count("from where the table puts them with Avenger's corner at the panel's +0,+0, "
-          .. "(+2.0,-2.0) and (+2.0,-2.0) with it at -2,+2") == 1, "no DAW difference on the plug-in's own window")
+        -- Avenger drawn at (248, 60), 2 left of and above the child's corner: where the table puts
+        -- MENU and UNDO with the own window's (-2, -2), and 2 left and up of where it would without.
+        T.ok(T.count("(+0.0,+0.0) and (+0.0,+0.0) from where the table puts them with Avenger's corner at the panel's "
+          .. "-2,-2, (-2.0,-2.0) and (-2.0,-2.0) with it at +0,+0") == 1, "the own window's difference: " .. T.dump())
         -- Undo: (305, 14) x 2.4 from (248, 60) = (980, 93.6), rounded once: (980, 94).
         T.pressAt(header, 7)
         T.ok(T.clickAt() == "980,94", T.clickAt())
@@ -2230,6 +2238,42 @@ fn on_windows_avenger_is_its_kalligui_child_and_a_display_factor_is_learned_from
         local r = T.lastRead("vps-avenger header")
         T.ok(r.answered == false, "read again at that evaluation")
         T.ok(T.count("not VPS Avenger") == 0, "and never a no")
+    "##);
+}
+
+/// B1 (the maintainer's decision of 2026-11-01): on Avenger's own window the corner the tables start
+/// at is the child's + (-2, -2), as the third Windows session measured Avenger drawn — its child at
+/// 242,129, 1394 x 894, Avenger at 80 % on a display at 100 %, factor 1.6. The grid's bottom
+/// scrollbar point (228, 222) lands at (605, 482), on the Mac's pixel of the bar, where that
+/// session's (607, 484) lay on the very end of its track; Factory's tile (23, 68) at (277, 236);
+/// Undo at (728, 149), 2 left of and above (730, 151). A DAW's panel keeps its (-2, +2); a window
+/// of another class adds nothing.
+#[test]
+fn on_windows_avengers_corner_is_its_childs_two_pixels_left_and_up() {
+    run(r##"
+        local S = T.S
+        local j = { id = 70, class = "KalliGuiWin18360-000000000D72C850", bounds = { x = 242, y = 129, w = 1394, h = 894 },
+          client = { x = 242, y = 129, w = 1394, h = 894 } }
+        S.listed = { T.WFX }
+        S.front, S.controls, S.chain = T.WFX, { T.WLIST, j }, { j, T.WFX }
+        T.turn()
+        S.scaling = { scale = 1, system = 1 }
+        local header = T.avenger()
+        T.answer(T.lastRead("vps-avenger header"), T.header(240, 127, 1.6, 80))
+        T.runDue()
+        T.ok(header.active, T.dump())
+        local G = S.included["modules/vps-avenger/src/geometry.luau"][1]
+        local function at(x, y)
+          local px, py = G.place(j, 1.6, x, y)
+          return px .. "," .. py
+        end
+        T.ok(at(228, 222) == "605,482" and at(23, 68) == "277,236", at(228, 222) .. " " .. at(23, 68))
+        -- Undo: 240 + 1.6 x 305 = 728, 127 + 22.4 -> 149.
+        T.pressAt(header, 7)
+        T.ok(T.clickAt() == "728,149", T.clickAt())
+        local function frame(class) return table.concat({ G.frameOf({ class = class }) }, ",") end
+        T.ok(frame("KalliGuiWin18360-000000000D72C850") == "-2,-2" and frame("host-panel") == "-2,2"
+          and frame("Unmatched") == "0,0", "the frames")
     "##);
 }
 
@@ -2263,7 +2307,7 @@ fn on_windows_a_zoom_step_keeps_the_control_avengers_and_an_unread_zoom_is_not_g
         T.event()
         T.tick(1)
         local r = T.lastRead("vps-avenger header")
-        T.ok(r and not r.answered and T.region(r.region) == "248,60,1248,142", r and T.region(r.region))
+        T.ok(r and not r.answered and T.region(r.region) == "250,62,1250,144", r and T.region(r.region))
         T.answer(r, T.reading({ { text = "Loading", x = 300, y = 80, w = 60, h = 20 } }))
         T.ok(header.active, "still up")
         T.ok(T.count("not VPS Avenger") == 0, "a miss at a new size of Avenger's own control is no 'no'")
@@ -2319,7 +2363,7 @@ fn on_windows_a_first_read_without_the_header_is_not_yet_and_read_again_at_once(
         T.answer(r, T.reading({ { text = "Loading", x = 300, y = 80, w = 60, h = 20 } }))
         T.ok(not header.active and T.count("not VPS Avenger") == 0, "no 'no': " .. T.dump())
         T.ok(T.count("[avenger] 'FX: Track 1 \"VPS Avenger\"' (2091x1346): neither MENU nor UNDO was read in "
-          .. "the header band at 248,60 941x77: \"Loading\" — no verdict yet (read 1 of 8 in this visit)") == 1, T.dump())
+          .. "the header band at 250,62 941x77: \"Loading\" — no verdict yet (read 1 of 8 in this visit)") == 1, T.dump())
         T.runDue()
         local r2 = T.lastRead("vps-avenger header")
         T.ok(r2 ~= r and not r2.answered and T.readsOf("vps-avenger header") == 2,
@@ -2372,7 +2416,7 @@ fn on_windows_a_blank_or_half_read_is_read_again_through_again() {
         local half = T.header(248, 60, 2.4, 80)
         table.remove(half.words, 5)
         T.answer(r2, half)
-        T.ok(T.count("no UNDO was read in the header band at 248,60 941x77") == 1
+        T.ok(T.count("no UNDO was read in the header band at 250,62 941x77") == 1
           and T.count("no verdict yet (read 2 of 8 in this visit)") == 1, T.dump())
         T.runDue()
         local r3 = T.lastRead("vps-avenger header")
@@ -2519,7 +2563,7 @@ fn on_windows_undecided_reads_leave_a_held_state_its_rereads() {
         local clicks = #S.clicks
         T.pressAt(header, 7)
         local r = T.lastRead("vps-avenger header")
-        T.ok(r and not r.answered and T.region(r.region) == "248,60,1189,137", "read again: " .. T.dump())
+        T.ok(r and not r.answered and T.region(r.region) == "250,62,1191,139", "read again: " .. T.dump())
         T.ok(#S.clicks == clicks and T.count("brought no zoom") == 0, T.dump())
         T.answer(r, T.header(248, 60, 2.4, 80))
         T.tick(1)
@@ -4233,6 +4277,9 @@ fn on_windows_a_display_scaled_nowhere_gives_the_zoom_from_the_headers_size() {
         T.answer(T.lastRead("vps-avenger header"), T.header(248, 60, 1.6, false, { -3, -1 }))
         T.event()
         T.ok(header.active, T.dump())
+        -- Both comparisons: against the own window's corner (-2, -2), and against the child's corner.
+        T.ok(T.count("(-3.0,-1.0) and (-3.0,-1.0) from where the table puts them with Avenger's corner at the panel's "
+          .. "-2,-2, (-5.0,-3.0) and (-5.0,-3.0) with it at +0,+0") == 1, T.dump())
         T.ok(T.count("zoom 80 % (seen from the header's size, not read), factor 1.6000, display factor 1.00 (the "
           .. "display's scaling 1.00, the system's 1.00)") == 1, T.dump())
         T.ok(S.scalingAsked[#S.scalingAsked] == 70, "asked of Avenger's own window: " .. tostring(S.scalingAsked[#S.scalingAsked]))
